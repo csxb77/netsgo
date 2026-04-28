@@ -157,7 +157,7 @@ func (s *Server) RequireAuthIfInitialized(next http.HandlerFunc) http.HandlerFun
 		}
 		initialized, err := s.auth.adminStore.IsInitializedE()
 		if err != nil {
-			log.Printf("⚠️ failed to read initialization state for auth middleware: %v", err)
+			slog.Warn("failed to read initialization state for auth middleware", "error", err)
 			http.Error(w, `{"error":"temporary storage failure"}`, http.StatusServiceUnavailable)
 			return
 		}

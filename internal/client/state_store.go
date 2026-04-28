@@ -3,7 +3,6 @@ package client
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 
 	"netsgo/internal/storage"
@@ -97,13 +96,18 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 func LoadClientIdentity(path string) (ClientIdentity, bool, error) {
-	if _, err := os.Stat(path); err != nil {
-		return ClientIdentity{}, false, err
-	}
-	store, err := newClientStateStore(path)
+	db, err := storage.OpenReadOnly(path)
 	if err != nil {
 		return ClientIdentity{}, false, err
 	}
+	store := &clientStateStore{path: path, db: db}
 	defer func() { _ = store.Close() }()
+	hasIdentity, err := storage.TableExists(db, "client_identity")
+	if err != nil {
+		return ClientIdentity{}, false, err
+	}
+	if !hasIdentity {
+		return ClientIdentity{}, false, nil
+	}
 	return store.Load()
 }

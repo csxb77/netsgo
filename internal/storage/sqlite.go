@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -56,6 +57,58 @@ func Open(path string, migrations []Migration) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenReadOnly opens an existing SQLite database without creating the file,
+// changing pragmas with write side effects, or applying migrations.
+func OpenReadOnly(path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("sqlite path must not be empty")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("sqlite path is a directory: %s", path)
+	}
+
+	db, err := sql.Open("sqlite", ReadOnlyDSN(path))
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite database read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+
+	if err := configureReadOnly(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// ReadOnlyDSN returns a SQLite DSN that refuses writes and file creation.
+func ReadOnlyDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Set("mode", "ro")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// TableExists checks sqlite_master without creating schema artifacts.
+func TableExists(db *sql.DB, tableName string) (bool, error) {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, tableName).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func ensurePrivateSQLiteFile(path string) error {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, privateFileMode)
 	if err != nil {
@@ -96,6 +149,20 @@ func configure(db *sql.DB) error {
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return fmt.Errorf("configure sqlite %q: %w", statement, err)
+		}
+	}
+	return nil
+}
+
+func configureReadOnly(db *sql.DB) error {
+	statements := []string{
+		`PRAGMA query_only = ON;`,
+		`PRAGMA foreign_keys = ON;`,
+		`PRAGMA busy_timeout = 5000;`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("configure sqlite read-only %q: %w", statement, err)
 		}
 	}
 	return nil

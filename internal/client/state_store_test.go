@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"netsgo/internal/storage"
 )
 
 func TestClientStateStoreRoundTrip(t *testing.T) {
@@ -90,5 +92,20 @@ func TestLoadClientIdentityDoesNotCreateMissingDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("LoadClientIdentity should not create %s, stat error = %v", path, err)
+	}
+}
+
+func TestLoadClientIdentityTreatsMissingTableAsAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client", clientDBFileName)
+	db, err := storage.Open(path, nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	if _, ok, err := LoadClientIdentity(path); err != nil || ok {
+		t.Fatalf("LoadClientIdentity() error = %v, ok = %v; want absent identity without error", err, ok)
 	}
 }

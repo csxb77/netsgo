@@ -119,6 +119,42 @@ func TestOpenCreatesPrivateSQLiteSidecarFiles(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyDoesNotCreateDatabaseOrRunMigrations(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing", "netsgo.db")
+	if _, err := OpenReadOnly(missing); !os.IsNotExist(err) {
+		t.Fatalf("OpenReadOnly(missing) error = %v, want os.IsNotExist", err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("OpenReadOnly should not create missing DB, stat error = %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "netsgo.db")
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	ro, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly(existing) error = %v", err)
+	}
+	defer func() { _ = ro.Close() }()
+
+	exists, err := TableExists(ro, "widgets")
+	if err != nil {
+		t.Fatalf("TableExists() error = %v", err)
+	}
+	if exists {
+		t.Fatal("OpenReadOnly should not run migrations or create unrelated tables")
+	}
+	if _, err := ro.Exec(`CREATE TABLE widgets (id TEXT PRIMARY KEY)`); err == nil {
+		t.Fatal("OpenReadOnly should reject write statements")
+	}
+}
+
 func assertPragmaValue(t *testing.T, db *sql.DB, name, want string) {
 	t.Helper()
 	var got string
