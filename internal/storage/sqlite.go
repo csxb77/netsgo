@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -89,11 +91,34 @@ func OpenReadOnly(path string) (*sql.DB, error) {
 
 // ReadOnlyDSN returns a SQLite DSN that refuses writes and file creation.
 func ReadOnlyDSN(path string) string {
+	return readOnlyDSNForOS(path, runtime.GOOS)
+}
+
+func readOnlyDSNForOS(path, goos string) string {
 	u := url.URL{Scheme: "file", Path: path}
+	if goos == "windows" {
+		u = windowsFileURL(path)
+	} else {
+		u.Path = filepath.ToSlash(path)
+	}
 	q := u.Query()
 	q.Set("mode", "ro")
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func windowsFileURL(path string) url.URL {
+	slashPath := strings.ReplaceAll(path, `\`, `/`)
+	if trimmed, ok := strings.CutPrefix(slashPath, "//"); ok {
+		host, rest, ok := strings.Cut(trimmed, "/")
+		if ok {
+			return url.URL{Scheme: "file", Host: host, Path: "/" + rest}
+		}
+	}
+	if len(slashPath) >= 2 && slashPath[1] == ':' && !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	return url.URL{Scheme: "file", Path: slashPath}
 }
 
 // TableExists checks sqlite_master without creating schema artifacts.

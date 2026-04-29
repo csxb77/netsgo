@@ -155,6 +155,64 @@ func TestOpenReadOnlyDoesNotCreateDatabaseOrRunMigrations(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyReadsExistingDatabaseAndRejectsWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "netsgo.db")
+	db, err := Open(path, []Migration{{
+		Name: "001_create_widgets",
+		Up:   `CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT NOT NULL); INSERT INTO widgets (id, name) VALUES ('w1', 'Widget');`,
+	}})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	ro, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly(existing) error = %v", err)
+	}
+	defer func() { _ = ro.Close() }()
+
+	var name string
+	if err := ro.QueryRow(`SELECT name FROM widgets WHERE id = 'w1'`).Scan(&name); err != nil {
+		t.Fatalf("read existing row through read-only DB: %v", err)
+	}
+	if name != "Widget" {
+		t.Fatalf("read-only row name = %q, want Widget", name)
+	}
+	if _, err := ro.Exec(`INSERT INTO widgets (id, name) VALUES ('w2', 'Other')`); err == nil {
+		t.Fatal("OpenReadOnly should reject writes")
+	}
+}
+
+func TestReadOnlyDSNFormatsWindowsPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "drive absolute path",
+			path: `C:\Users\alice\AppData\Local\netsgo\netsgo.db`,
+			want: "file:///C:/Users/alice/AppData/Local/netsgo/netsgo.db?mode=ro",
+		},
+		{
+			name: "unc path",
+			path: `\\server\share\netsgo\netsgo.db`,
+			want: "file://server/share/netsgo/netsgo.db?mode=ro",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := readOnlyDSNForOS(tt.path, "windows"); got != tt.want {
+				t.Fatalf("readOnlyDSNForOS() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func assertPragmaValue(t *testing.T, db *sql.DB, name, want string) {
 	t.Helper()
 	var got string
