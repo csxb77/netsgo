@@ -3748,6 +3748,50 @@ func TestDeleteManagedTunnel_EventPreservesBandwidthFields(t *testing.T) {
 	assertTunnelBandwidthFields(t, tunnelPayload, config.IngressBPS, config.EgressBPS)
 }
 
+func TestDeleteRunningTunnelReturnsLocalizedError(t *testing.T) {
+	s, handler, token, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+
+	client := &ClientConn{
+		ID:         "client-delete-running",
+		Info:       protocol.ClientInfo{Hostname: "delete-running-host"},
+		proxies:    make(map[string]*ProxyTunnel),
+		generation: 1,
+		state:      clientStateLive,
+	}
+	s.clients.Store(client.ID, client)
+
+	req := protocol.ProxyNewRequest{
+		Name:       "running-delete",
+		Type:       protocol.ProxyTypeTCP,
+		RemotePort: reserveTCPPort(t),
+	}
+	s.upsertTunnelPlaceholder(client, req, protocol.ProxyDesiredStateRunning, protocol.ProxyRuntimeStateExposed, "", time.Time{})
+
+	resp := doMuxRequest(t, handler, http.MethodDelete, fmt.Sprintf("/api/clients/%s/tunnels/%s", client.ID, req.Name), token, nil)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("delete running tunnel: want 400, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := mustDecodeJSON(t, resp.Body, &body); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if body["error_code"] != protocol.TunnelMutationErrorCodeTunnelBusy {
+		t.Fatalf("error_code: want %q, got %v", protocol.TunnelMutationErrorCodeTunnelBusy, body["error_code"])
+	}
+	errorMessage, _ := body["error"].(string)
+	if errorMessage == "" {
+		t.Fatalf("error should be non-empty, got %v", body["error"])
+	}
+	if errorMessage != "请先停止隧道后再删除" {
+		t.Fatalf("error: want running delete hint, got %q", errorMessage)
+	}
+	if strings.Contains(errorMessage, "running/exposed") {
+		t.Fatalf("error should not expose internal state wording: %v", body["error"])
+	}
+}
+
 func TestFailRestoredTunnelAfterReadyPreservesCreatedAt(t *testing.T) {
 	s := New(0)
 	createdAt := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
