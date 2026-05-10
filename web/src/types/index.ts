@@ -10,10 +10,22 @@ export interface ClientInfo {
   arch: "amd64" | "arm64";
   ip: string;
   version: string;
+  update_capability?: UpdateCapability;
   public_ipv4?: string;
   public_ipv6?: string;
 }
 
+export interface UpdateCapability {
+  install_method: "service" | "docker" | "binary";
+}
+
+export type VersionInstallMethod = "service" | "docker" | "binary";
+export interface VersionCheckCommands {
+  domestic: string;
+  global: string;
+}
+
+export type VersionTargetKind = "server" | "client";
 /** 对齐 protocol.SystemStats */
 export interface SystemStats {
   cpu_usage: number;      // 0-100
@@ -204,6 +216,7 @@ export interface ServerStatus {
   client_count: number;
   summary?: ConsoleSummary;
   version: string;
+  update_capability?: UpdateCapability;
   listen_port: number;
   uptime: number;         // seconds (process uptime)
   system_uptime: number;  // seconds (OS boot uptime)
@@ -230,6 +243,24 @@ export interface ServerStatus {
   public_ipv6?: string;
   generated_at: string;
   fresh_until: string;
+}
+
+export interface VersionCheckResult {
+  target: VersionTargetKind;
+  target_id: string;
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  checked_at: string;
+  install_method: VersionInstallMethod;
+  recommended_channel: "stable" | "beta" | "";
+  recommended_action: "none" | "run_script" | "github_release" | "docker_docs";
+  commands: VersionCheckCommands | null;
+  release_url: string;
+  check_failed: boolean;
+  refresh_failed: boolean;
+  cache_source: "fresh" | "cache" | "stale_cache" | "none";
+  reason: string;
 }
 
 // --- Admin System ---

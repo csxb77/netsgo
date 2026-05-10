@@ -25,8 +25,10 @@ func (s *Server) newHTTPMux() *http.ServeMux {
 func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", s.handleWeb)
 	mux.HandleFunc("GET /api/status", s.RequireAuth(s.handleAPIStatus))
+	mux.HandleFunc("GET /api/version/check", s.RequireAuth(s.handleAPIVersionCheck))
 	mux.HandleFunc("GET /api/clients", s.RequireAuth(s.handleAPIClients))
 	mux.HandleFunc("DELETE /api/clients/{id}", s.RequireAuth(s.handleDeleteClient))
+	mux.HandleFunc("GET /api/clients/{id}/version/check", s.RequireAuth(s.handleAPIClientVersionCheck))
 	mux.HandleFunc("GET /api/console/snapshot", s.RequireAuth(s.handleAPIConsoleSnapshot))
 	mux.HandleFunc("PUT /api/clients/{id}/display-name", s.RequireAuth(s.handleUpdateDisplayName))
 	mux.HandleFunc("PUT /api/clients/{id}/bandwidth-settings", s.RequireAuth(s.handleUpdateBandwidthSettings))
