@@ -21,14 +21,24 @@ die() {
   exit 1
 }
 
+log() {
+  printf '==> %s\n' "$*" >&2
+}
+
+warn() {
+  printf 'WARN: %s\n' "$*" >&2
+}
+
 require_linux_systemd() {
+  log "检查 Linux + systemd 环境"
   [ "$(uname -s)" = "Linux" ] || die "此脚本只支持 Linux + systemd。请前往 GitHub Releases 手动下载。"
   command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl。请前往 GitHub Releases 手动下载。"
   systemctl --version >/dev/null 2>&1 || die "systemd 不可用。请前往 GitHub Releases 手动下载。"
 }
 
 require_tools() {
-  for tool in curl tar sha256sum jq awk sed sort grep; do
+  log "检查依赖工具"
+  for tool in curl tar sha256sum jq awk sed sort grep head dirname rm mv mkdir mktemp chmod; do
     command -v "$tool" >/dev/null 2>&1 || die "缺少依赖: $tool"
   done
 }
@@ -169,7 +179,15 @@ download_official() {
   url="$1"
   out="$2"
   official_url_allowed "$url" || die "拒绝非官方下载 URL: $url"
-  curl -fsSL "$url" -o "$out"
+  tmp_out="${out}.part.$$"
+  rm -f "$tmp_out"
+  log "下载 $url"
+  if curl -fL --progress-bar "$url" -o "$tmp_out"; then
+    mv "$tmp_out" "$out"
+    return 0
+  fi
+  rm -f "$tmp_out"
+  return 1
 }
 
 json_url_for_name_provider() {
@@ -226,10 +244,19 @@ verify_checksum() {
   checksums="$1"
   archive="$2"
   name="$3"
+  checksum_matches "$checksums" "$archive" "$name" || die "checksum mismatch: $name"
+}
+
+checksum_matches() {
+  checksums="$1"
+  archive="$2"
+  name="$3"
+  [ -s "$checksums" ] || return 1
+  [ -s "$archive" ] || return 1
   expected="$(awk -v n="$name" '$2 == n {print $1}' "$checksums" | head -1)"
-  [ -n "$expected" ] || die "checksums.txt 中找不到 $name"
+  [ -n "$expected" ] || return 1
   actual="$(sha256sum "$archive" | awk '{print $1}')"
-  [ "$actual" = "$expected" ] || die "checksum mismatch: $name"
+  [ "$actual" = "$expected" ]
 }
 
 verify_signature_openssl() {
@@ -266,13 +293,20 @@ verify_signature() {
   checksums="$1"
   sig="$2"
   sshsig="$3"
+  signature_valid "$checksums" "$sig" "$sshsig" || die "无法验证 checksums.txt 签名，已终止。"
+}
+
+signature_valid() {
+  checksums="$1"
+  sig="$2"
+  sshsig="$3"
   if verify_signature_openssl "$checksums" "$sig"; then
     return 0
   fi
   if verify_signature_sshsig "$checksums" "$sshsig"; then
     return 0
   fi
-  die "无法验证 checksums.txt 签名，已终止。"
+  return 1
 }
 
 download_available_signatures() {
@@ -297,10 +331,101 @@ download_available_signatures() {
 extract_netsgo() {
   archive="$1"
   dest="$2"
+  log "解压 NetsGo 二进制"
   mkdir -p "$(dirname "$dest")"
   tar -xzf "$archive" -C "$(dirname "$dest")" --strip-components=1 --wildcards '*/netsgo' 2>/dev/null ||
     tar -xzf "$archive" -C "$(dirname "$dest")" netsgo
   chmod +x "$dest"
+}
+
+default_cache_root() {
+  printf '%s/netsgo-update-cache\n' "${TMPDIR:-/tmp}"
+}
+
+cache_dir_for() {
+  root="${NETSGO_UPDATE_CACHE_DIR:-$(default_cache_root)}"
+  tag="$1"
+  platform="$2"
+  printf '%s/%s/%s\n' "$root" "$tag" "$platform"
+}
+
+cleanup_empty_cache_parents() {
+  cache_dir="$1"
+  root="${NETSGO_UPDATE_CACHE_DIR:-$(default_cache_root)}"
+  parent="$(dirname "$cache_dir")"
+  if [ "$parent" != "$root" ] && [ -d "$parent" ]; then
+    rmdir "$parent" 2>/dev/null || true
+  fi
+  if [ -d "$root" ]; then
+    rmdir "$root" 2>/dev/null || true
+  fi
+}
+
+ensure_release_detail_cached() {
+  source="$1"
+  tag="$2"
+  asset="$3"
+  cache_dir="$4"
+  out="$cache_dir/release.json"
+  mkdir -p "$cache_dir"
+  if [ -s "$out" ] && validate_release_detail "$out" "$tag" "$asset" >/dev/null 2>&1; then
+    log "复用已下载的 release detail: $out"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  [ ! -e "$out" ] || warn "已下载的 release detail 无效，将重新下载: $out"
+  rm -f "$out"
+  fetch_release_detail "$source" "$tag" "$out" >/dev/null || die "无法获取 release detail: $tag"
+  validate_release_detail "$out" "$tag" "$asset"
+  printf '%s\n' "$out"
+}
+
+ensure_checksums_cached() {
+  detail="$1"
+  source="$2"
+  cache_dir="$3"
+  checksums="$cache_dir/checksums.txt"
+  sig="$cache_dir/checksums.txt.sig"
+  sshsig="$cache_dir/checksums.txt.sshsig"
+  mkdir -p "$cache_dir"
+  if [ -s "$checksums" ] && signature_valid "$checksums" "$sig" "$sshsig"; then
+    log "复用已下载并验签的 checksums.txt"
+    printf '%s\n' "$checksums"
+    return 0
+  fi
+  if [ -e "$checksums" ] || [ -e "$sig" ] || [ -e "$sshsig" ]; then
+    warn "已下载的 checksum 或签名无效，将重新下载"
+  fi
+  rm -f "$checksums" "$sig" "$sshsig"
+  download_release_detail_file "$detail" "$source" checksums.txt "$checksums" >/dev/null || die "无法下载 checksums.txt"
+  download_available_signatures "$detail" "$source" "$sig" "$sshsig"
+  verify_signature "$checksums" "$sig" "$sshsig"
+  log "checksums.txt 签名验证通过"
+  printf '%s\n' "$checksums"
+}
+
+ensure_archive_cached() {
+  detail="$1"
+  source="$2"
+  asset="$3"
+  cache_dir="$4"
+  checksums="$5"
+  archive="$cache_dir/$asset"
+  mkdir -p "$cache_dir"
+  if [ -s "$archive" ] && checksum_matches "$checksums" "$archive" "$asset"; then
+    log "复用已下载并校验的 release archive: $archive"
+    printf '%s\n' "$archive"
+    return 0
+  fi
+  [ ! -e "$archive" ] || warn "已下载的 release archive 校验失败，将重新下载: $archive"
+  rm -f "$archive"
+  download_release_detail_file "$detail" "$source" "$asset" "$archive" >/dev/null || die "无法下载 release archive: $asset"
+  if ! checksum_matches "$checksums" "$archive" "$asset"; then
+    rm -f "$archive"
+    die "checksum mismatch: $asset"
+  fi
+  log "release archive SHA256 校验通过"
+  printf '%s\n' "$archive"
 }
 
 version_sort_key() {
@@ -354,12 +479,32 @@ channel_for_target() {
 # END NETSGO COMMON UPDATE HELPERS
 
 cleanup_paths=""
+cache_dir=""
+completed=0
 cleanup() {
   for path in $cleanup_paths; do
     [ -n "$path" ] && rm -rf "$path"
   done
+  if [ "$completed" -eq 1 ]; then
+    if [ -n "$cache_dir" ]; then
+      if rm -rf "$cache_dir"; then
+        cleanup_empty_cache_parents "$cache_dir"
+        log "已清理下载缓存: $cache_dir"
+      else
+        warn "安装已完成，但清理下载缓存失败: $cache_dir"
+      fi
+    fi
+  elif [ -n "$cache_dir" ]; then
+    warn "安装未完成，已保留下载缓存以便下次重试: $cache_dir"
+  fi
 }
 trap cleanup EXIT
+
+run_interactive_install() {
+  tty_path="${NETSGO_INSTALL_TTY:-/dev/tty}"
+  [ -r "$tty_path" ] && [ -w "$tty_path" ] || die "install must be run from an interactive TTY"
+  "$1" install <"$tty_path" >"$tty_path" 2>&1
+}
 
 source="auto"
 channel="stable"
@@ -390,6 +535,7 @@ case "$channel" in stable|beta) ;; *) die "--channel 仅支持 stable|beta" ;; e
 require_linux_systemd
 require_tools
 
+log "检查是否已有 NetsGo 托管服务"
 if systemctl list-unit-files 'netsgo-*.service' 2>/dev/null | grep -q '^netsgo-'; then
   die "检测到已有 NetsGo 托管服务。请使用 scripts/upgrade.sh 或 netsgo manage。"
 fi
@@ -397,25 +543,28 @@ fi
 tmp="$(mktemp -d)"
 cleanup_paths="$cleanup_paths $tmp"
 
+log "获取 release index（source=${source}, channel=${channel}）"
 provider="$(fetch_latest_index "$source" "$tmp/latest.json")" || die "无法获取 release index"
 target="$(json_get_channel_latest "$tmp/latest.json" "$channel")"
 [ -n "$target" ] && valid_release_tag "$target" || die "release index 中缺少有效 $channel 版本"
+log "目标版本: $target"
 
 platform="$(canonical_platform)"
 asset="$(asset_name_for "$target" "$platform")"
-fetch_release_detail "$source" "$target" "$tmp/release.json" >/dev/null || die "无法获取 release detail: $target"
-validate_release_detail "$tmp/release.json" "$target" "$asset"
+log "当前平台: $platform"
+cache_dir="$(cache_dir_for "$target" "$platform")"
+log "下载缓存目录: $cache_dir"
 
-download_release_detail_file "$tmp/release.json" "$source" checksums.txt "$tmp/checksums.txt" >/dev/null || die "无法下载 checksums.txt"
-download_available_signatures "$tmp/release.json" "$source" "$tmp/checksums.txt.sig" "$tmp/checksums.txt.sshsig"
-verify_signature "$tmp/checksums.txt" "$tmp/checksums.txt.sig" "$tmp/checksums.txt.sshsig"
+release_detail="$(ensure_release_detail_cached "$source" "$target" "$asset" "$cache_dir")"
+checksums="$(ensure_checksums_cached "$release_detail" "$source" "$cache_dir")"
+archive="$(ensure_archive_cached "$release_detail" "$source" "$asset" "$cache_dir" "$checksums")"
+extract_netsgo "$archive" "$tmp/netsgo"
 
-download_release_detail_file "$tmp/release.json" "$source" "$asset" "$tmp/$asset" >/dev/null || die "无法下载 release archive: $asset"
-verify_checksum "$tmp/checksums.txt" "$tmp/$asset" "$asset"
-extract_netsgo "$tmp/$asset" "$tmp/netsgo"
-
+log "验证临时 NetsGo 版本"
 version_output="$("$tmp/netsgo" --version)"
 version="$(extract_exact_release_version "$version_output" || true)"
 [ "$version" = "$target" ] || die "临时 netsgo 版本不匹配: want $target, got $version_output"
 
-"$tmp/netsgo" install
+log "进入交互安装"
+run_interactive_install "$tmp/netsgo"
+completed=1

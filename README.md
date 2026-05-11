@@ -59,13 +59,44 @@
 
 ## 快速开始
 
-> 下文示例默认在下载目录中直接执行 `./netsgo`。已通过 `netsgo install` 安装或已加入系统 PATH 的，可以省略 `./`。
+> Linux + systemd 环境推荐使用一键安装脚本。下文 CLI 直跑示例默认在下载目录中执行 `./netsgo`；已通过 `netsgo install` 安装或已加入系统 PATH 的，可以省略 `./`。
 
 ### 1. 启动服务端
 
-#### 推荐方式：Linux Service（systemd）
+#### 推荐方式：一键安装（Linux Service / systemd）
 
-长期运行最省事的方案。下载 `netsgo` 二进制后执行：
+长期运行最省事的方案。脚本会下载并验签 release 包，然后进入 `netsgo install` 交互式安装：
+
+```bash
+curl -fsSL https://cnb.cool/zsio/netsgo/-/git/raw/main/scripts/install.sh | sh -s -- --channel beta
+```
+
+按交互提示选择 **Server**，并填入管理员账号、访问地址等信息。安装完成后：
+
+```bash
+# 已经安装到系统中, 可以直接使用 netsgo 命令了
+sudo netsgo manage
+```
+
+`manage` 提供查看状态、启停、看日志、卸载等入口。
+
+> 数据目录默认位于 `/var/lib/netsgo`。
+
+<details>
+<summary>点击展开升级命令</summary>
+
+```bash
+curl -fsSL https://cnb.cool/zsio/netsgo/-/git/raw/main/scripts/upgrade.sh | sh -s -- --channel beta -y -f
+```
+
+</details>
+
+#### 方式二：下载二进制后安装（Linux Service / systemd）
+
+<details>
+<summary>点击展开手动安装命令</summary>
+
+下载 `netsgo` 二进制后执行：
 
 ```bash
 sudo ./netsgo install
@@ -82,7 +113,9 @@ sudo netsgo manage
 
 > 数据目录默认位于 `/var/lib/netsgo`。
 
-#### 方式二：Docker Compose 示例
+</details>
+
+#### 方式三：Docker Compose 示例
 
 <details>
 <summary>点击展开 docker-compose.yml 示例</summary>
@@ -115,7 +148,7 @@ Docker 镜像默认执行 `netsgo server`。这里通过 `NETSGO_DATA_DIR=/var/l
 
 </details>
 
-#### 方式三：直接运行（仅试用/调试）
+#### 方式四：直接运行（仅试用/调试）
 
 <details>
 <summary>点击展开 CLI 直跑命令</summary>
@@ -146,11 +179,12 @@ Docker 镜像默认执行 `netsgo server`。这里通过 `NETSGO_DATA_DIR=/var/l
 
 ### 3. 启动客户端
 
-#### 推荐方式：Linux Service（systemd）
+#### 推荐方式：一键安装（Linux Service / systemd）
+
+在需要接入内网服务的 Linux 主机上执行：
 
 ```bash
-# 客户端也是这样进入交互菜单进行安装
-sudo ./netsgo install
+curl -fsSL https://cnb.cool/zsio/netsgo/-/git/raw/main/scripts/install.sh | sh -s -- --channel beta
 ```
 
 按交互提示选择 **Client**，并填入 Web 面板或 Server 安装完成提示中显示的服务地址（通常是 `http://` 或 `https://`）与 Client Key。
@@ -159,7 +193,34 @@ sudo ./netsgo install
 
 之后用 `sudo netsgo manage` 查看状态和日志。
 
-#### 方式二：Docker Compose 示例
+<details>
+<summary>点击展开升级命令</summary>
+
+```bash
+curl -fsSL https://cnb.cool/zsio/netsgo/-/git/raw/main/scripts/upgrade.sh | sh -s -- --channel beta -y -f
+```
+
+</details>
+
+#### 方式二：下载二进制后安装（Linux Service / systemd）
+
+<details>
+<summary>点击展开手动安装命令</summary>
+
+下载 `netsgo` 二进制后执行：
+
+```bash
+# 客户端也是这样进入交互菜单进行安装
+sudo ./netsgo install
+```
+
+按交互提示选择 **Client**，并填入 Web 面板或 Server 安装完成提示中显示的服务地址（通常是 `http://` 或 `https://`）与 Client Key。
+
+之后用 `sudo netsgo manage` 查看状态和日志。
+
+</details>
+
+#### 方式三：Docker Compose 示例
 
 <details>
 <summary>点击展开 docker-compose.yml 示例</summary>
@@ -186,7 +247,7 @@ Docker 镜像默认执行 `netsgo server`，所以客户端容器需要把 `comm
 
 </details>
 
-#### 方式三：直接运行（仅试用/调试）
+#### 方式四：直接运行（仅试用/调试）
 
 <details>
 <summary>点击展开 CLI 直跑命令</summary>
