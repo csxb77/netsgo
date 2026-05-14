@@ -35,13 +35,30 @@ function artifactVersion(tag) {
 }
 
 function parseAssetName(name, version) {
-  const prefix = `netsgo_${version}_`;
-  const suffix = '.tar.gz';
-  if (!name.startsWith(prefix) || !name.endsWith(suffix)) return null;
-  const platform = name.slice(prefix.length, -suffix.length);
-  const parts = platform.split('_');
-  if (parts.length !== 2) return null;
-  return { os: parts[0], arch: parts[1] };
+  const cliPrefix = `netsgo_${version}_`;
+  const cliSuffix = '.tar.gz';
+  if (name.startsWith(cliPrefix) && name.endsWith(cliSuffix)) {
+    const platform = name.slice(cliPrefix.length, -cliSuffix.length);
+    const parts = platform.split('_');
+    if (parts.length === 2) return { os: parts[0], arch: parts[1], kind: 'cli' };
+  }
+
+  const desktopPrefix = `NetsGo_${version}_`;
+  if (!name.startsWith(desktopPrefix)) return null;
+
+  const desktopAssetPatterns = [
+    { re: /^macos_x64\.app\.tar\.gz$/, os: 'macos', arch: 'x64', kind: 'desktop-app' },
+    { re: /^macos_arm64\.dmg$/, os: 'macos', arch: 'arm64', kind: 'desktop-dmg' },
+    { re: /^windows_x64-setup\.exe$/, os: 'windows', arch: 'x64', kind: 'desktop-nsis' },
+    { re: /^windows_x64_en-US\.msi$/, os: 'windows', arch: 'x64', kind: 'desktop-msi' },
+  ];
+  const desktopName = name.slice(desktopPrefix.length);
+  for (const pattern of desktopAssetPatterns) {
+    if (pattern.re.test(desktopName)) {
+      return { os: pattern.os, arch: pattern.arch, kind: pattern.kind };
+    }
+  }
+  return null;
 }
 
 async function sha256File(filePath) {
