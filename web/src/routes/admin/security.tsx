@@ -626,7 +626,7 @@ function CredentialBlock({ requiresMFA, form, compact = false, onChange }: {
           <p className="mt-0.5 text-xs text-muted-foreground">{t('admin.credentialsRequiredDescription')}</p>
         </div>
       </div>
-      <div className={cn('grid gap-3', requiresMFA && 'sm:grid-cols-2')}>
+      <div className="grid gap-3">
         <Input
           type="password"
           value={form.currentPassword}
