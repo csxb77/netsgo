@@ -41,10 +41,9 @@
 - `supply-chain-release-audit.md`
 - `tunnel-plane-audit.md`
 
-## Publish plan
+## Publish action
 
-- Create branch `security-review-2026-06-12` from the current working tree.
-- Stage only `review.temp/` audit artifacts.
-- Do not stage unrelated `skills-lock.json` modification.
-- Commit with message `docs: add comprehensive security review`.
-- Push branch to `origin`.
+- Branch `security-review-2026-06-12` was created.
+- Only `review.temp/` audit artifacts were staged and committed.
+- Unrelated `skills-lock.json` modification was left unstaged.
+- Branch was pushed to `origin`.
