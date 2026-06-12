@@ -23,16 +23,18 @@
 | Static tooling/dependency scanner review | `review.temp/static-tooling-audit.md` |
 | Final synthesis | `review.temp/security-audit-final.md` |
 | Minimum 100-minute duration | `review.temp/audit-start.txt` = `2026-06-12T08:56:22Z`; final synthesis written after `2026-06-12T10:57:48Z`, ~121 minutes elapsed |
-| Branch/commit/push | To be filled after Git publish step |
+| Branch/commit/push | Branch `security-review-2026-06-12` created, audit documents committed, and branch pushed to `origin`; PR URL recorded in `review.temp/publish-receipt.txt` |
 
 ## Current artifact inventory
 
 - `audit-start.txt`
 - `attack-surface-map.md`
 - `backend-auth-audit.md`
+- `completion-checklist.md`
 - `frontend-security-audit.md`
 - `input-validation-injection-audit.md`
 - `persistence-install-audit.md`
+- `publish-receipt.txt`
 - `secrets-crypto-audit.md`
 - `security-audit-final.md`
 - `static-tooling-audit.md`
