@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -58,6 +59,14 @@ func (s *Server) handleAPIMFAVerify(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "invalid_mfa_token", "invalid or expired mfa token")
 		return
 	}
+	limiterKey := s.mfaAttemptLimiterKey(r, challenge.ID)
+	if s.auth.mfaLimiter != nil {
+		if allowed, retryAfter := s.auth.mfaLimiter.Allow(limiterKey, challenge.ExpiresAt); !allowed {
+			slog.Warn("MFA verification rate limited", "ip", s.clientIP(r), "module", "security")
+			writeMFARateLimitResponse(w, retryAfter)
+			return
+		}
+	}
 	user, err := s.auth.adminStore.GetAdminUserByID(challenge.UserID)
 	if err != nil {
 		writeAPIError(w, http.StatusUnauthorized, "invalid_mfa_token", "invalid or expired mfa token")
@@ -69,6 +78,13 @@ func (s *Server) handleAPIMFAVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		if s.auth.mfaLimiter != nil {
+			if locked, retryAfter := s.auth.mfaLimiter.RecordFailure(limiterKey, challenge.ExpiresAt); locked {
+				slog.Warn("MFA verification attempts exceeded", "ip", s.clientIP(r), "module", "security")
+				writeMFARateLimitResponse(w, retryAfter)
+				return
+			}
+		}
 		writeAPIError(w, http.StatusUnauthorized, "invalid_mfa_code", "invalid mfa code")
 		return
 	}
@@ -76,7 +92,23 @@ func (s *Server) handleAPIMFAVerify(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "invalid_mfa_token", "invalid or expired mfa token")
 		return
 	}
+	if s.auth.mfaLimiter != nil {
+		s.auth.mfaLimiter.Reset(limiterKey)
+	}
 	s.createAdminLoginSession(w, r, user)
+}
+
+func (s *Server) mfaAttemptLimiterKey(r *http.Request, challengeID string) string {
+	ip := s.clientIP(r)
+	if ip == "" {
+		ip = remoteIP(r.RemoteAddr)
+	}
+	return ip + ":" + challengeID
+}
+
+func writeMFARateLimitResponse(w http.ResponseWriter, retryAfter time.Duration) {
+	w.Header().Set("Retry-After", retryAfterString(retryAfter))
+	writeAPIError(w, http.StatusTooManyRequests, "mfa_attempts_exceeded", "too many mfa attempts, please try again later")
 }
 
 func (s *Server) verifyLoginMFA(user AdminUser, code string) (bool, error) {
