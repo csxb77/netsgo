@@ -14,7 +14,7 @@
 | [`secrets-management`](./issue/secrets-management.md) | High | Partial in SOCKS5 | 本次必须做 password hash/脱敏；通用 secret store 后续治理 |
 | [`ingress-access-policy-rollout`](./issue/ingress-access-policy-rollout.md) | Medium | In SOCKS5 | SOCKS5/TCP/UDP/HTTP source allowlist 本次一并补齐 |
 | [`socks5-udp-associate`](./issue/socks5-udp-associate.md) | Medium | Open | SOCKS5 UDP ASSOCIATE 支持设计 |
-| [`c2c-socks5`](./issue/c2c-socks5.md) | Medium | Open | client_to_client SOCKS5 产品语义与协议设计 |
+| [`c2c-socks5`](./issue/c2c-socks5.md) | Medium | In SOCKS5 | client_to_client SOCKS5 本次一并实现，P2P 传输策略后续治理 |
 | [`p2p-data-transport-policy`](./issue/p2p-data-transport-policy.md) | High | Open | client_to_client 数据通道中继/P2P preferred/P2P only 策略 |
 | [`frontend-error-code-alignment`](./issue/frontend-error-code-alignment.md) | Low | In SOCKS5 if touched | 前端错误码映射与后端实际错误码对齐，小修建议随 SOCKS5 前端改动完成 |
 | [`stream-header-legacy-cleanup`](./issue/stream-header-legacy-cleanup.md) | Low | Open | 旧 StreamHeader helper 清理 |

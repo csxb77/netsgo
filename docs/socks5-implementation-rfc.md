@@ -1,7 +1,7 @@
 # SOCKS5 Tunnel Implementation RFC
 
-> Status: Final design draft  
-> Date: 2026-06-16  
+> Status: Final design draft
+> Date: 2026-06-20
 > Supersedes: [`docs/socket-tunnel-storage-design.md`](./socket-tunnel-storage-design.md)
 
 ## 0. 结论
@@ -10,6 +10,7 @@ NetsGo 应在统一隧道模型中新增 SOCKS5 CONNECT 隧道能力。首个完
 
 ```text
 server_expose + server/socks5_listen -> client/socks5_connect_handler
+client_to_client + ingress-client/socks5_listen -> target-client/socks5_connect_handler
 transport_policy = server_relay_only
 SOCKS5 command = CONNECT only
 ```
@@ -25,13 +26,14 @@ SOCKS5 command = CONNECT only
 | 范围 | 当前根因 | 主要代码位置 | 本次处理 |
 |---|---|---|---|
 | DB endpoint type | SQLite `CHECK` 只允许 TCP/UDP/HTTP endpoint | `internal/server/migrations/005_unified_tunnel_storage.sql` | 新增迁移，扩展 CHECK 到 `socks5_listen` / `socks5_connect_handler` |
-| API endpoint 校验 | endpoint/topology 组合写死在 unified API 的 if-else 中 | `internal/server/unified_tunnel_api.go` 的 `validateUnifiedEndpointCombination` | 增加 `server_expose + socks5_listen -> socks5_connect_handler`，建议抽兼容矩阵 |
-| resource lock | ingress lock 只处理 `tcp_listen` / `udp_listen` / `http_host` | `internal/server/store.go` 的 `tunnelIngressResourceLock` | SOCKS5 与 TCP listen 竞争同一 bind ip + port |
-| client capabilities | 默认 client 只声明 TCP/UDP target 能力 | `pkg/protocol/types.go` 的 `DefaultClientCapabilities` | 增加 `socks5_connect_handler` 能力；server 对旧 client 拒绝创建/下发 |
+| API endpoint 校验 | endpoint/topology 组合写死在 unified API 的 if-else 中 | `internal/server/unified_tunnel_api.go` 的 `validateUnifiedEndpointCombination` | 增加 `server_expose` 与 `client_to_client` 的 SOCKS5 合法组合，建议抽兼容矩阵 |
+| resource lock | ingress lock 只处理 `tcp_listen` / `udp_listen` / `http_host` | `internal/server/store.go` 的 `tunnelIngressResourceLock` | SOCKS5 与 TCP listen 竞争同一 bind ip + port；client ingress 侧也要复用 TCP listen 资源语义 |
+| client capabilities | 默认 client 只声明 TCP/UDP ingress/target 能力 | `pkg/protocol/types.go` 的 `DefaultClientCapabilities` | 增加 `socks5_listen` 与 `socks5_connect_handler` 能力；server 对旧 client 拒绝创建/下发 |
 | provisioning | `ProxyNewRequest` 是固定目标 flat 模型 | `pkg/protocol/message.go`、`internal/client/unified_tunnel.go` | 本次必须让 provisioning 能表达 SOCKS5 handler config；不依赖 `local_ip/local_port` |
 | stream header | 数据流 header 没有 per-stream 动态目标字段 | `pkg/protocol/stream_header.go` | 增加 `target_host` / `target_port` 等字段，并保持 capability gate |
 | server runtime | 现有 server ingress 只有 TCP/UDP/HTTP 处理 | `internal/server/proxy.go`、`internal/server/server_expose_unified.go`、相关 data/open stream 路径 | 新增 SOCKS5 listener、握手、CONNECT、reply、relay |
-| client runtime | client `handleStream` 只面向固定 TCP/UDP target | `internal/client/client.go`、`internal/client/unified_tunnel.go` | 新增 `socks5_connect_handler` 分支，执行 target policy 与 dial |
+| c2c relay | `client_to_client` 当前只处理中继固定 TCP/UDP 流 | `internal/server/client_relay.go`、`internal/client/unified_tunnel.go` | ingress client 处理 SOCKS5 handshake/CONNECT，再通过 server relay 打开带动态目标的 target stream |
+| client runtime | client `handleStream` 只面向固定 TCP/UDP target，client ingress 只监听 TCP/UDP | `internal/client/client.go`、`internal/client/unified_tunnel.go` | 新增 `socks5_listen` ingress runtime 与 `socks5_connect_handler` target 分支，执行 target policy 与 dial |
 | frontend | 表单和模型只表达 TCP/UDP/HTTP 固定目标 | `web/src/lib/tunnel-model.ts`、`web/src/components/custom/tunnel/` | 新增 SOCKS5 表单、错误码、capability gate、脱敏展示 |
 
 实施者应先核对这些代码位置，再开始修改；如果代码已变化，以当前代码为准更新本 RFC。
@@ -56,12 +58,14 @@ SOCKS5 command = CONNECT only
 | `runtime_state active/exposed` 统一 | 后续 | 与 SOCKS5 无直接依赖，迁移风险独立 |
 | v1/v2 API 大统一 | 后续 | SOCKS5 可只支持 v2 |
 | SOCKS5 UDP ASSOCIATE | 后续 | 独立命令和数据面语义 |
-| c2c SOCKS5 | 后续 | 拓扑和握手位置不同 |
+| c2c SOCKS5 | 必做 | 用户需要 client 到 client 的 SOCKS5 入口；握手位置不同但可复用同一 endpoint 语义 |
 | P2P data transport policy | 后续 | 独立数据通道大设计 |
 
 ## 1. 正确运行模型
 
-外部用户连接的是 server 暴露的 SOCKS5 端口，因此 SOCKS5 server 角色必须在 server 侧完成：
+SOCKS5 server 角色必须在流量进入的 ingress 侧完成；`socks5_connect_handler` target 侧只处理已解析的动态 CONNECT 目标。
+
+`server_expose` 模型：
 
 ```text
 External user
@@ -78,13 +82,31 @@ External user
   -> Target service
 ```
 
+`client_to_client` 模型：
+
+```text
+External or local user
+  -> Ingress Client socks5_listen
+     - method negotiation
+     - RFC 1929 username/password auth
+     - CONNECT request parsing
+     - source allowlist check
+  -> yamux data stream to Server relay with target_host/target_port
+  -> Target Client socks5_connect_handler
+     - target allowlist check
+     - dial target
+     - return dial result with bound address
+  -> Target service
+```
+
+server 在 c2c SOCKS5 中负责控制面下发、能力门禁、状态聚合和数据流中继，不负责解析外部用户的 SOCKS5 握手。
+
 ### 1.1 不支持的范围
 
 首期不支持：
 
 - SOCKS5 `BIND`
 - SOCKS5 `UDP ASSOCIATE`
-- `client_to_client` SOCKS5
 - P2P SOCKS5 data transport
 - server-side target
 
@@ -99,7 +121,7 @@ IngressTypeSOCKS5Listen = "socks5_listen"
 TargetTypeSOCKS5ConnectHandler = "socks5_connect_handler"
 ```
 
-首期唯一合法组合：
+首期合法组合：
 
 | 字段 | 值 |
 |---|---|
@@ -110,16 +132,28 @@ TargetTypeSOCKS5ConnectHandler = "socks5_connect_handler"
 | `target.type` | `socks5_connect_handler` |
 | `transport_policy` | `server_relay_only` |
 
+| 字段 | 值 |
+|---|---|
+| `topology` | `client_to_client` |
+| `ingress.location` | `client` |
+| `ingress.client_id` | ingress client |
+| `ingress.type` | `socks5_listen` |
+| `target.location` | `client` |
+| `target.client_id` | target client |
+| `target.type` | `socks5_connect_handler` |
+| `transport_policy` | `server_relay_only` |
+
 不允许：
 
 ```text
 tcp_listen -> socks5_connect_handler
-client_to_client + socks5_listen -> socks5_connect_handler
+socks5_listen -> tcp_service
+server-side socks5_connect_handler
 ```
 
-如果最终设计是 server 侧解析 SOCKS5，则 ingress 必须是 `socks5_listen`，不能把普通 TCP listener 和 SOCKS5 listener 混为一谈。
+SOCKS5 解析发生在 ingress 所在位置；ingress 必须是 `socks5_listen`，不能把普通 TCP listener 和 SOCKS5 listener 混为一谈。
 
-`socks5_connect_handler` 这个 target type 名称是有意选择的：client 侧不是 SOCKS5 server，也不处理外部用户的 SOCKS5 method negotiation/auth/CONNECT request。它只执行 server 已解析出的 SOCKS5 CONNECT 动态目标：校验 target policy、dial 目标、返回 dial result、参与 relay。名称中包含 `connect` 是为了避免读者误以为首期支持完整 SOCKS5 server、BIND 或 UDP ASSOCIATE。
+`socks5_connect_handler` 这个 target type 名称是有意选择的：target 侧不是 SOCKS5 server，也不处理外部用户的 SOCKS5 method negotiation/auth/CONNECT request。它只执行 ingress 已解析出的 SOCKS5 CONNECT 动态目标：校验 target policy、dial 目标、返回 dial result、参与 relay。名称中包含 `connect` 是为了避免读者误以为首期支持完整 SOCKS5 server、BIND 或 UDP ASSOCIATE。
 
 ### 2.1 兼容规则来源
 
@@ -135,11 +169,12 @@ server_expose:
   socks5_listen -> socks5_connect_handler
 
 client_to_client:
-  tcp_listen -> tcp_service
-  udp_listen -> udp_service
+  tcp_listen    -> tcp_service
+  udp_listen    -> udp_service
+  socks5_listen -> socks5_connect_handler
 ```
 
-不得首期加入 `tcp_listen -> socks5_connect_handler` 或 `client_to_client socks5_listen -> socks5_connect_handler`。
+不得首期加入 `tcp_listen -> socks5_connect_handler` 或 `socks5_listen -> tcp_service`。
 
 ## 3. Access control 与配置位置
 
@@ -170,7 +205,7 @@ TargetAccessPolicy:
 
 ### 3.1 ingress/server 配置
 
-`ingress_config`：
+`server_expose` 的 `ingress_config`：
 
 ```json
 {
@@ -194,6 +229,8 @@ server 侧负责执行：
 - password hash 校验与所有输出脱敏
 - CONNECT request parsing
 - 对外返回 RFC 1928 reply
+
+`client_to_client` 的 `ingress_config` 使用同一结构，但由 ingress client 执行 listen、source CIDR、SOCKS5 auth、CONNECT 解析和 SOCKS5 reply。server 只负责把该配置下发给 ingress client 并聚合运行态。
 
 ### 3.2 target/client 配置
 
@@ -342,6 +379,14 @@ IPv4 与 IPv6 CIDR 都应支持。
 
 `auth_required=false` 等于任何能连接监听端口的人都能使用代理。它只能用于受控网络、localhost、VPN/TLS 外层保护等场景。UI/API 应明确提示风险。
 
+`server_expose` 的 SOCKS5 创建/更新表单如果未配置认证，必须要求用户勾选显式确认复选框后才能提交。建议文案：
+
+```text
+我知道未启用认证会让可访问该端口的人使用此代理。
+```
+
+该确认是一次提交行为，不应作为长期安全状态存入 `ingress_config`。创建/更新请求应在 `ingress.config` 之外携带类似 `confirm_no_auth_risk=true` 的提交级字段；API 必须在 `server_expose + socks5_listen` 且无认证时校验该字段，避免绕过前端直接提交时缺少显式确认。
+
 ### 7.2 密码存储与脱敏
 
 本次不得把 SOCKS5 password 或 HTTP Basic Auth password 以可直接恢复的明文形式写入 `ingress_config`、日志、事件、API 响应或诊断导出。
@@ -390,27 +435,33 @@ CHECK (target_type IN ('tcp_service', 'udp_service', 'socks5_connect_handler'))
 
 ## 9. 资源锁
 
-SOCKS5 监听端口本质是 server 侧 TCP listen port，必须与普通 TCP tunnel 互斥。
+SOCKS5 监听端口本质是 TCP listen port，必须与同一位置的普通 TCP tunnel 互斥。
 
 推荐资源 key 语义：
 
 ```text
 ingress:server:tcp:<bind_ip>:<port>
+ingress:client:<client_id>:tcp:<bind_ip>:<port>
 ```
 
-也就是说，`tcp_listen` 与 `socks5_listen` 应竞争同一个 TCP 端口资源，而不是拆成互不冲突的 `server_tcp_port` / `server_socks5_port`。
+也就是说，`tcp_listen` 与 `socks5_listen` 应在 server 或同一个 ingress client 上竞争同一个 TCP 端口资源，而不是拆成互不冲突的 `*_tcp_port` / `*_socks5_port`。
 
 如果实现上需要 `resource_kind` 区分展示，可以额外记录 kind，但冲突判断必须基于同一个 bind ip + port 资源。
 
 ## 10. 能力门禁与协议兼容
 
-`ClientCapabilities.TargetTypes` 必须增加：
+`ClientCapabilities` 必须增加：
 
 ```text
-socks5_connect_handler
+IngressTypes: socks5_listen
+TargetTypes: socks5_connect_handler
 ```
 
-server 必须拒绝向未声明该能力的 client 创建或下发 SOCKS5 tunnel。
+server 必须拒绝向未声明相应能力的 client 创建或下发 SOCKS5 tunnel：
+
+- `server_expose` target client 必须支持 `socks5_connect_handler`；
+- `client_to_client` ingress client 必须支持 `socks5_listen`；
+- `client_to_client` target client 必须支持 `socks5_connect_handler`。
 
 `DecodeDataStreamHeader` 当前使用 `DisallowUnknownFields` 是合理防御，不应为了新字段直接放弃。新字段加入结构体后，旧 client 仍不能收到 SOCKS5 stream；这依赖 capability gate 保证。
 
@@ -435,7 +486,7 @@ TunnelProvisionRequest.Spec -> proxyRequestFromTunnelSpec -> ProxyNewRequest
 
 不建议新增一个与 `TunnelSpec` 平行的 `ProxyProvisionPayload` 协议消息，除非后续要专门清理 legacy v1 provisioning；否则会增加第三套表达。该独立治理项记录在 [`docs/issue/proxy-provision-payload-split.md`](./issue/proxy-provision-payload-split.md)。
 
-本次必须解决的是：server -> client provisioning 能完整表达 SOCKS5 target config 和 access policy。彻底清理 legacy `ProxyNewRequest` 的所有历史用途可以后续单独做，但不能因此让 SOCKS5 继续依赖 `local_ip/local_port` 语义。
+本次必须解决的是：server -> client provisioning 能完整表达 SOCKS5 ingress config、target config 和 access policy。彻底清理 legacy `ProxyNewRequest` 的所有历史用途可以后续单独做，但不能因此让 SOCKS5 继续依赖 `local_ip/local_port` 语义。
 
 ### 11.1 最低可接受 payload 能力
 
@@ -444,6 +495,9 @@ TunnelProvisionRequest.Spec -> proxyRequestFromTunnelSpec -> ProxyNewRequest
 ```text
 tunnel_id
 revision
+role = ingress | target
+ingress_type = socks5_listen
+ingress bind_ip/port/auth/allowed_source_cidrs
 target_type = socks5_connect_handler
 allowed_target_cidrs
 allowed_target_hosts
@@ -453,7 +507,7 @@ bandwidth_settings
 transport_policy
 ```
 
-client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧 provision 继续处理新 stream。
+ingress runtime 与 target runtime 都必须按 `tunnel_id + revision` 校验 stream header，避免旧 provision 继续处理新 stream。
 
 ## 12. 本次不混入的独立治理项
 
@@ -465,7 +519,6 @@ client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧
 - endpoint type 完全可扩展化；
 - 通用 secret store / secrets table / secret rotation；
 - SOCKS5 UDP ASSOCIATE；
-- c2c SOCKS5；
 - P2P data transport policy 实现；
 - legacy stream header 清理；
 - P2P 占位代码清理。
@@ -473,6 +526,7 @@ client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧
 以下小修复或局部能力应随本次一起完成，避免后续补丁更分散：
 
 - SOCKS5 provisioning 表达力；
+- client_to_client SOCKS5 provisioning、ingress runtime 与 target relay；
 - password hash 与脱敏；
 - SOCKS5/TCP 端口资源互斥；
 - endpoint CHECK 扩展到 SOCKS5 已知类型；
@@ -491,11 +545,14 @@ client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧
 - 新 `socks5_listen` / `socks5_connect_handler` 可插入、读取、恢复；
 - TCP tunnel 与 SOCKS5 tunnel 不能监听同一 bind ip + port；
 - 两个 SOCKS5 tunnel 不能监听同一 bind ip + port。
+- 同一 ingress client 上的 TCP tunnel 与 SOCKS5 tunnel 不能监听同一 bind ip + port。
 
 ### 13.2 协议与能力
 
 - 未声明 `socks5_connect_handler` 的 client 被拒绝；
+- c2c ingress client 未声明 `socks5_listen` 时被拒绝；
 - 声明 `socks5_connect_handler` 的 client 可接收 SOCKS5 provisioning；
+- c2c ingress client 可接收 `socks5_listen` provisioning，target client 可接收 `socks5_connect_handler` provisioning；
 - `DataStreamHeader` 新字段 round-trip；
 - 普通 TCP/UDP/HTTP stream header 不受影响；
 - `DisallowUnknownFields` 行为有测试覆盖。
@@ -513,7 +570,19 @@ client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧
 - client dial 失败映射为合理 RFC REP；
 - 成功 reply 包含 BND.ADDR/BND.PORT。
 
-### 13.4 client runtime
+### 13.4 c2c ingress runtime
+
+- ingress client no-auth 正常；
+- ingress client username/password auth 正常；
+- auth 失败关闭连接；
+- `BIND` / `UDP ASSOCIATE` 返回 command not supported；
+- IPv4/IPv6/domain CONNECT 正常；
+- allowed_source_cidrs 在 ingress client 生效；
+- target client offline/data channel missing 时返回 SOCKS5 failure，不挂住连接；
+- target dial 失败映射为合理 RFC REP；
+- 成功 reply 包含 BND.ADDR/BND.PORT。
+
+### 13.5 target client runtime
 
 - literal IPv4 allow/deny；
 - literal IPv6 allow/deny；
@@ -523,7 +592,7 @@ client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧
 - dial timeout 生效；
 - 成功后双向 relay。
 
-### 13.5 前端/API
+### 13.6 前端/API
 
 - 创建 SOCKS5 tunnel 的 spec 正确；
 - 表单不要求固定 local_ip/local_port；
@@ -532,11 +601,13 @@ client runtime 必须按 `tunnel_id + revision` 校验 stream header，避免旧
 - password 更新只能重新设置，不显示旧值；
 - endpoint/capability/access-control 错误码有明确文案。
 - allowlist 字段在 UI 中必填，默认值明确展示为允许所有，用户可自行收窄。
+- server_expose SOCKS5 未配置认证时，必须勾选风险确认复选框才能提交。
 
-### 13.6 回归
+### 13.7 回归
 
 - 现有 TCP tunnel 创建、停止、恢复、删除；
 - 现有 UDP tunnel 创建、停止、恢复、删除；
 - 现有 HTTP tunnel 路由；
 - server 重启后 SOCKS5 tunnel 恢复；
-- client 重连后 SOCKS5 tunnel 恢复。
+- client 重连后 SOCKS5 tunnel 恢复；
+- c2c SOCKS5 的 stop/resume/delete/reconnect 行为正确。
