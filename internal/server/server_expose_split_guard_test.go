@@ -27,6 +27,14 @@ func TestUnifiedServerExposeRuntimeDoesNotReadStoredProxyNewRequest(t *testing.T
 		"unified_tunnel_runtime.go",
 		"unified_tunnel_api.go",
 	}
+	disallowedStoredFlatFields := map[string]bool{
+		"Type":       true,
+		"LocalIP":    true,
+		"LocalPort":  true,
+		"RemotePort": true,
+		"BindIP":     true,
+		"Domain":     true,
+	}
 	var violations []string
 
 	for _, path := range files {
@@ -37,20 +45,42 @@ func TestUnifiedServerExposeRuntimeDoesNotReadStoredProxyNewRequest(t *testing.T
 
 		ast.Inspect(file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "ProxyNewRequest" {
+			if !ok {
 				return true
 			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "protocol" {
+			if sel.Sel.Name == "ProxyNewRequest" {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "protocol" {
+					return true
+				}
+				violations = append(violations, fset.Position(sel.Pos()).String()+" in "+path)
 				return true
 			}
-			violations = append(violations, fset.Position(sel.Pos()).String()+" in "+path)
+			if path == "server_expose_unified.go" && disallowedStoredFlatFields[sel.Sel.Name] && serverSelectorIsInsideFunction(fset, file, sel, "serverExposeRuntimeProxyRequest") {
+				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "stored" {
+					violations = append(violations, fset.Position(sel.Pos()).String()+" promoted flat field "+sel.Sel.Name+" in "+path)
+				}
+			}
 			return true
 		})
 	}
 
 	if len(violations) > 0 {
-		t.Fatalf("unified server-expose runtime/reconcile must derive runtime config from stored endpoint/spec fields, not StoredTunnel.ProxyNewRequest; found %d violation(s):\n%s", len(violations), strings.Join(violations, "\n"))
+		t.Fatalf("unified server-expose runtime/reconcile must derive runtime config from stored endpoint/spec fields, not StoredTunnel.ProxyNewRequest or its promoted flat fields; found %d violation(s):\n%s", len(violations), strings.Join(violations, "\n"))
 	}
+}
+
+func serverSelectorIsInsideFunction(fset *token.FileSet, file *ast.File, sel *ast.SelectorExpr, name string) bool {
+	if file == nil || sel == nil {
+		return false
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != name || fn.Body == nil {
+			continue
+		}
+		return sel.Pos() >= fn.Body.Pos() && sel.End() <= fn.Body.End()
+	}
+	return false
 }
 
 func TestUnifiedServerRuntimeDoesNotDefineTunnelSpecToProxyNewRequestHelper(t *testing.T) {

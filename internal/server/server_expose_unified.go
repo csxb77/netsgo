@@ -113,7 +113,7 @@ func (s *Server) failUnifiedServerExposeAfterProvision(client *ClientConn, store
 	_ = s.notifyServerExposeTargetUnprovision(client, storedTunnelToProxyConfig(stored), "provision_failed")
 	runtimeConfig, err := serverExposeRuntimeProxyRequest(stored)
 	if err != nil {
-		runtimeConfig = protocol.ProxyNewRequest{ID: stored.ID, Name: stored.Name, Type: stored.Type}
+		runtimeConfig = protocol.ProxyNewRequest{ID: stored.ID, Name: stored.Name}
 	}
 	config := s.upsertTunnelPlaceholderWithRevision(client, runtimeConfig, stored.Revision, protocol.ProxyDesiredStateRunning, protocol.ProxyRuntimeStateError, message, stored.CreatedAt)
 	mergeStoredMetadataIntoProxyConfig(&config, stored)
@@ -132,12 +132,6 @@ func serverExposeRuntimeProxyRequest(stored StoredTunnel) (protocol.ProxyNewRequ
 	config := protocol.ProxyNewRequest{
 		ID:                stored.ID,
 		Name:              stored.Name,
-		Type:              stored.Type,
-		LocalIP:           stored.LocalIP,
-		LocalPort:         stored.LocalPort,
-		RemotePort:        stored.RemotePort,
-		BindIP:            tunnelIngressBindIP(stored),
-		Domain:            stored.Domain,
 		BandwidthSettings: stored.BandwidthSettings,
 	}
 
@@ -175,6 +169,8 @@ func serverExposeRuntimeProxyRequest(stored StoredTunnel) (protocol.ProxyNewRequ
 		config.Type = protocol.ProxyTypeTCP
 		config.RemotePort = listenCfg.Port
 		config.BindIP = normalizeServerBindIP(listenCfg.BindIP)
+	default:
+		return protocol.ProxyNewRequest{}, fmt.Errorf("unsupported server ingress type %q", stored.Ingress.Type)
 	}
 
 	switch stored.Target.Type {
@@ -192,6 +188,8 @@ func serverExposeRuntimeProxyRequest(stored StoredTunnel) (protocol.ProxyNewRequ
 	case protocol.TargetTypeSOCKS5ConnectHandler:
 		config.LocalIP = ""
 		config.LocalPort = 0
+	default:
+		return protocol.ProxyNewRequest{}, fmt.Errorf("unsupported target type %q", stored.Target.Type)
 	}
 	return config, nil
 }
