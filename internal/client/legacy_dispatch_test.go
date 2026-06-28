@@ -282,6 +282,167 @@ func TestClientControlLoopLegacyProxyCloseFixtureDeletesLegacyProxyStore(t *test
 }
 
 func TestClientControlLoopUnifiedPayloadIgnoresLegacyFlatFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		spec   protocol.TunnelSpec
+		assert func(t *testing.T, c *Client, spec protocol.TunnelSpec)
+	}{
+		{
+			name: "tcp target",
+			spec: mixedPayloadTunnelSpec(t, "split-tcp", protocol.IngressTypeTCPListen, protocol.TargetTypeTCPService, map[string]any{
+				"bind_ip": "0.0.0.0",
+				"port":    19091,
+			}, map[string]any{
+				"host": "127.0.0.1",
+				"port": 8080,
+			}),
+			assert: func(t *testing.T, c *Client, spec protocol.TunnelSpec) {
+				t.Helper()
+				if _, ok := c.fixedTargetRuntimes.Load(spec.ID); !ok {
+					t.Fatal("mixed TCP payload with tunnel_id must create unified fixed target runtime")
+				}
+			},
+		},
+		{
+			name: "udp target",
+			spec: mixedPayloadTunnelSpec(t, "split-udp", protocol.IngressTypeUDPListen, protocol.TargetTypeUDPService, map[string]any{
+				"bind_ip": "0.0.0.0",
+				"port":    19093,
+			}, map[string]any{
+				"host": "127.0.0.1",
+				"port": 8081,
+			}),
+			assert: func(t *testing.T, c *Client, spec protocol.TunnelSpec) {
+				t.Helper()
+				if _, ok := c.fixedTargetRuntimes.Load(spec.ID); !ok {
+					t.Fatal("mixed UDP payload with tunnel_id must create unified fixed target runtime")
+				}
+			},
+		},
+		{
+			name: "socks5 target",
+			spec: mixedPayloadTunnelSpec(t, "split-socks5", protocol.IngressTypeSOCKS5Listen, protocol.TargetTypeSOCKS5ConnectHandler, map[string]any{
+				"bind_ip":              "0.0.0.0",
+				"port":                 19094,
+				"auth":                 map[string]any{"type": "none"},
+				"allowed_source_cidrs": []string{"0.0.0.0/0", "::/0"},
+			}, protocol.SOCKS5ConnectHandlerConfig{
+				AllowedTargetCIDRs: []string{"127.0.0.0/8"},
+				AllowedTargetHosts: []string{"127.0.0.1"},
+				AllowedTargetPorts: []int{8080},
+				DialTimeoutSeconds: 2,
+			}),
+			assert: func(t *testing.T, c *Client, spec protocol.TunnelSpec) {
+				t.Helper()
+				if _, ok := c.socks5Targets.Load(spec.ID); !ok {
+					t.Fatal("mixed SOCKS5 payload with tunnel_id must create unified SOCKS5 target runtime")
+				}
+				if _, ok := c.fixedTargetRuntimes.Load(spec.ID); ok {
+					t.Fatal("mixed SOCKS5 payload with tunnel_id must not create fixed target runtime")
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provisionAck := make(chan protocol.TunnelProvisionAck, 1)
+			ackErr := make(chan error, 1)
+			ms := newMockServer(true)
+			ms.onMessage = func(msg protocol.Message) *protocol.Message {
+				if msg.Type != protocol.MsgTypeTunnelProvisionAck {
+					return nil
+				}
+				var ack protocol.TunnelProvisionAck
+				if err := msg.ParsePayload(&ack); err != nil {
+					ackErr <- err
+					return nil
+				}
+				provisionAck <- ack
+				return nil
+			}
+			ts := newMockHTTPServer(ms)
+			defer ts.Close()
+
+			c := newIsolatedTestClient(t, "ws"+ts.URL[len("http"):], "test-key")
+			c.DisableReconnect = true
+
+			go func() { _ = c.Start() }()
+			conn := ms.waitForConn(t, 2*time.Second)
+			spec := tc.spec
+			const legacyShadowName = "legacy-shadow"
+			const legacyShadowID = "legacy-shadow-id"
+			payload := mustJSON(t, map[string]any{
+				// Legacy flat fields are deliberately contradictory. Presence of
+				// tunnel_id must make the client use the unified payload shape.
+				"id":          legacyShadowID,
+				"name":        legacyShadowName,
+				"type":        protocol.ProxyTypeTCP,
+				"local_ip":    "192.0.2.200",
+				"local_port":  6553,
+				"remote_port": 19092,
+				"tunnel_id":   spec.ID,
+				"revision":    spec.Revision,
+				"role":        protocol.DataStreamRoleTarget,
+				"spec":        spec,
+			})
+			msg := protocol.Message{
+				Type:    protocol.MsgTypeProxyProvision,
+				Payload: json.RawMessage(payload),
+			}
+			if err := ms.writeControlJSON(conn, msg); err != nil {
+				t.Fatalf("server failed to send mixed unified proxy_provision: %v", err)
+			}
+
+			select {
+			case err := <-ackErr:
+				t.Fatalf("failed to parse tunnel_provision_ack: %v", err)
+			case ack := <-provisionAck:
+				if !ack.Accepted {
+					t.Fatalf("unified tunnel provision should be accepted: %+v", ack)
+				}
+				if ack.TunnelID != spec.ID || ack.Revision != spec.Revision || ack.Role != protocol.DataStreamRoleTarget {
+					t.Fatalf("unified ack identity mismatch: %+v", ack)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("did not receive tunnel_provision_ack")
+			}
+
+			if _, ok := c.proxies.Load(legacyShadowName); ok {
+				t.Fatal("mixed payload with tunnel_id must not fall back to legacy flat proxy store")
+			}
+			if _, ok := c.proxies.Load(spec.ID); ok {
+				t.Fatal("unified target provision must not write ProxyNewRequest into legacy c.proxies")
+			}
+			tc.assert(t, c, spec)
+		})
+	}
+}
+
+func mixedPayloadTunnelSpec(t *testing.T, idSuffix, ingressType, targetType string, ingressConfig, targetConfig any) protocol.TunnelSpec {
+	t.Helper()
+	return protocol.TunnelSpec{
+		ID:              "split-tunnel-" + idSuffix,
+		Name:            "split-tunnel-" + idSuffix,
+		Revision:        11,
+		Topology:        protocol.TunnelTopologyServerExpose,
+		OwnerClientID:   "target-client",
+		TransportPolicy: protocol.TransportPolicyServerRelayOnly,
+		Ingress: protocol.EndpointSpec{
+			Location: protocol.EndpointLocationServer,
+			Type:     ingressType,
+			Config:   mustJSON(t, ingressConfig),
+		},
+		Target: protocol.EndpointSpec{
+			Location: protocol.EndpointLocationClient,
+			ClientID: "target-client",
+			Type:     targetType,
+			Config:   mustJSON(t, targetConfig),
+		},
+	}
+}
+
+func TestClientControlLoopRejectedUnifiedPayloadDoesNotFallBackToLegacyProxyStore(t *testing.T) {
 	provisionAck := make(chan protocol.TunnelProvisionAck, 1)
 	ackErr := make(chan error, 1)
 	ms := newMockServer(true)
@@ -305,41 +466,20 @@ func TestClientControlLoopUnifiedPayloadIgnoresLegacyFlatFields(t *testing.T) {
 
 	go func() { _ = c.Start() }()
 	conn := ms.waitForConn(t, 2*time.Second)
-
-	spec := protocol.TunnelSpec{
-		ID:              "split-tunnel-id",
-		Name:            "split-tunnel",
-		Revision:        11,
-		Topology:        protocol.TunnelTopologyServerExpose,
-		OwnerClientID:   "target-client",
-		TransportPolicy: protocol.TransportPolicyServerRelayOnly,
-		Ingress: protocol.EndpointSpec{
-			Location: protocol.EndpointLocationServer,
-			Type:     protocol.IngressTypeTCPListen,
-			Config: mustJSON(t, map[string]any{
-				"bind_ip": "0.0.0.0",
-				"port":    19091,
-			}),
-		},
-		Target: protocol.EndpointSpec{
-			Location: protocol.EndpointLocationClient,
-			ClientID: "target-client",
-			Type:     protocol.TargetTypeTCPService,
-			Config: mustJSON(t, map[string]any{
-				"host": "127.0.0.1",
-				"port": 8080,
-			}),
-		},
-	}
+	spec := mixedPayloadTunnelSpec(t, "split-unsupported", protocol.IngressTypeTCPListen, "future_target", map[string]any{
+		"bind_ip": "0.0.0.0",
+		"port":    19091,
+	}, map[string]any{
+		"host": "127.0.0.1",
+		"port": 8080,
+	})
 	payload := mustJSON(t, map[string]any{
-		// Legacy flat fields are deliberately contradictory. Presence of
-		// tunnel_id must make the client use the unified payload shape.
-		"id":          "legacy-shadow-id",
-		"name":        "legacy-shadow",
+		"id":          "legacy-reject-shadow-id",
+		"name":        "legacy-reject-shadow",
 		"type":        protocol.ProxyTypeTCP,
-		"local_ip":    "192.0.2.200",
-		"local_port":  6553,
-		"remote_port": 19092,
+		"local_ip":    "192.0.2.201",
+		"local_port":  6554,
+		"remote_port": 19093,
 		"tunnel_id":   spec.ID,
 		"revision":    spec.Revision,
 		"role":        protocol.DataStreamRoleTarget,
@@ -350,27 +490,91 @@ func TestClientControlLoopUnifiedPayloadIgnoresLegacyFlatFields(t *testing.T) {
 		Payload: json.RawMessage(payload),
 	}
 	if err := ms.writeControlJSON(conn, msg); err != nil {
-		t.Fatalf("server failed to send mixed unified proxy_provision: %v", err)
+		t.Fatalf("server failed to send rejected mixed unified proxy_provision: %v", err)
 	}
 
 	select {
 	case err := <-ackErr:
 		t.Fatalf("failed to parse tunnel_provision_ack: %v", err)
 	case ack := <-provisionAck:
-		if !ack.Accepted {
-			t.Fatalf("unified tunnel provision should be accepted: %+v", ack)
+		if ack.Accepted {
+			t.Fatalf("unsupported unified target should be rejected: %+v", ack)
 		}
 		if ack.TunnelID != spec.ID || ack.Revision != spec.Revision || ack.Role != protocol.DataStreamRoleTarget {
-			t.Fatalf("unified ack identity mismatch: %+v", ack)
+			t.Fatalf("unified reject ack identity mismatch: %+v", ack)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not receive tunnel_provision_ack")
 	}
-
-	if _, ok := c.proxies.Load("legacy-shadow"); ok {
-		t.Fatal("mixed payload with tunnel_id must not fall back to legacy flat proxy store")
+	if _, ok := c.proxies.Load("legacy-reject-shadow"); ok {
+		t.Fatal("rejected mixed payload with tunnel_id must not fall back to legacy flat proxy store")
 	}
 	if _, ok := c.proxies.Load(spec.ID); ok {
-		t.Fatal("unified target provision must not write ProxyNewRequest into legacy c.proxies")
+		t.Fatal("rejected unified target provision must not write ProxyNewRequest into legacy c.proxies")
+	}
+	if _, ok := c.fixedTargetRuntimes.Load(spec.ID); ok {
+		t.Fatal("rejected unified target provision must not create fixed target runtime")
+	}
+	if _, ok := c.socks5Targets.Load(spec.ID); ok {
+		t.Fatal("rejected unified target provision must not create SOCKS5 target runtime")
+	}
+}
+
+func TestClientControlLoopMalformedUnifiedPayloadDoesNotFallBackToLegacyProxyStore(t *testing.T) {
+	provisionAck := make(chan protocol.TunnelProvisionAck, 1)
+	ms := newMockServer(true)
+	ms.onMessage = func(msg protocol.Message) *protocol.Message {
+		if msg.Type == protocol.MsgTypeTunnelProvisionAck {
+			var ack protocol.TunnelProvisionAck
+			if err := msg.ParsePayload(&ack); err == nil {
+				provisionAck <- ack
+			}
+		}
+		return nil
+	}
+	ts := newMockHTTPServer(ms)
+	defer ts.Close()
+
+	c := newIsolatedTestClient(t, "ws"+ts.URL[len("http"):], "test-key")
+	c.DisableReconnect = true
+
+	go func() { _ = c.Start() }()
+	conn := ms.waitForConn(t, 2*time.Second)
+	payload := mustJSON(t, map[string]any{
+		"id":          "legacy-malformed-shadow-id",
+		"name":        "legacy-malformed-shadow",
+		"type":        protocol.ProxyTypeTCP,
+		"local_ip":    "192.0.2.202",
+		"local_port":  6555,
+		"remote_port": 19094,
+		"tunnel_id":   "malformed-unified-id",
+		"revision":    "not-a-number",
+		"role":        protocol.DataStreamRoleTarget,
+		"spec":        map[string]any{"id": "malformed-unified-id"},
+	})
+	msg := protocol.Message{
+		Type:    protocol.MsgTypeProxyProvision,
+		Payload: json.RawMessage(payload),
+	}
+	if err := ms.writeControlJSON(conn, msg); err != nil {
+		t.Fatalf("server failed to send malformed mixed unified proxy_provision: %v", err)
+	}
+
+	select {
+	case ack := <-provisionAck:
+		t.Fatalf("malformed unified payload should not produce ACK or fall back: %+v", ack)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, ok := c.proxies.Load("legacy-malformed-shadow"); ok {
+		t.Fatal("malformed mixed payload with tunnel_id must not fall back to legacy flat proxy store")
+	}
+	if _, ok := c.proxies.Load("malformed-unified-id"); ok {
+		t.Fatal("malformed unified provision must not write ProxyNewRequest into legacy c.proxies")
+	}
+	if _, ok := c.fixedTargetRuntimes.Load("malformed-unified-id"); ok {
+		t.Fatal("malformed unified provision must not create fixed target runtime")
+	}
+	if _, ok := c.socks5Targets.Load("malformed-unified-id"); ok {
+		t.Fatal("malformed unified provision must not create SOCKS5 target runtime")
 	}
 }

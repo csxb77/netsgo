@@ -134,6 +134,74 @@ func serverFuncDowngradesTunnelSpecToProxyNewRequest(fn *ast.FuncDecl) bool {
 	return false
 }
 
+func TestUnifiedServerRuntimeOnlyAllowsNamedServerExposeProxyRequestAdapter(t *testing.T) {
+	// This is a signature-level boundary guard; body-level runtime source checks
+	// live in TestUnifiedServerExposeRuntimeDoesNotReadStoredProxyNewRequest.
+	allowedAdapters := map[string]struct{}{
+		"serverExposeRuntimeProxyRequest": {},
+	}
+	dirEntries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read server package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, entry := range dirEntries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(".", name)
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name == nil {
+				continue
+			}
+			if !serverFuncAdaptsStoredTunnelToProxyNewRequest(fn) {
+				continue
+			}
+			if _, ok := allowedAdapters[fn.Name.Name]; !ok {
+				t.Fatalf("server runtime must keep StoredTunnel -> ProxyNewRequest adaptation at an explicit allowlisted boundary, found %s at %s; update allowedAdapters here if this is an intentional rename or split", fn.Name.Name, fset.Position(fn.Pos()))
+			}
+		}
+	}
+}
+
+func serverFuncAdaptsStoredTunnelToProxyNewRequest(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Type == nil || fn.Type.Params == nil || fn.Type.Results == nil {
+		return false
+	}
+	hasStoredTunnelParam := false
+	for _, field := range fn.Type.Params.List {
+		if serverExprIsIdentTypeOrPointerTo(field.Type, "StoredTunnel") {
+			hasStoredTunnelParam = true
+			break
+		}
+	}
+	if !hasStoredTunnelParam {
+		return false
+	}
+	for _, field := range fn.Type.Results.List {
+		if serverExprIsProtocolTypeOrPointerTo(field.Type, "ProxyNewRequest") {
+			return true
+		}
+	}
+	return false
+}
+
+func serverExprIsIdentTypeOrPointerTo(expr ast.Expr, typeName string) bool {
+	if ident, ok := expr.(*ast.Ident); ok && ident.Name == typeName {
+		return true
+	}
+	if star, ok := expr.(*ast.StarExpr); ok {
+		return serverExprIsIdentTypeOrPointerTo(star.X, typeName)
+	}
+	return false
+}
+
 func serverExprIsProtocolTypeOrPointerTo(expr ast.Expr, typeName string) bool {
 	if serverExprIsProtocolType(expr, typeName) {
 		return true

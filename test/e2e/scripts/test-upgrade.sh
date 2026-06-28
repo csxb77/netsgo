@@ -515,6 +515,7 @@ verify_socks5_http() {
 
 verify_server_expose_suite() {
 	local host="$1" udp_payload="$2" phase="$3"
+	# Large-payload TCP regression is covered by TestSystemE2E/compat full; upgrade stays a short data-path gate.
 	verify_http "${host}" "${BACKEND_RESPONSE}" 60 || { log "FAIL: ${phase} HTTP data path failed"; return 1; }
 	verify_tcp_http "${SERVER_TCP_PORT}" "${BACKEND_HOST}" "${BACKEND_RESPONSE}" 30 || { log "FAIL: ${phase} server_expose TCP data path failed"; return 1; }
 	verify_udp_echo "${SERVER_UDP_PORT}" "${udp_payload}" 30 || { log "FAIL: ${phase} server_expose UDP data path failed"; return 1; }

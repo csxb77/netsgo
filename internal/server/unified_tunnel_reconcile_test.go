@@ -689,6 +689,98 @@ func TestUnifiedServerExposeProvisionAndDataHeaderUseStoredRevision(t *testing.T
 	}
 }
 
+func TestServerExposeIngressIssueCodeUsesEndpointTypeNotLegacyFlatType(t *testing.T) {
+	s := New(0)
+	stored := StoredTunnel{
+		ProxyNewRequest: protocol.ProxyNewRequest{
+			ID:   "http-endpoint-flat-tcp-id",
+			Name: "http-endpoint-flat-tcp",
+			Type: protocol.ProxyTypeTCP,
+		},
+		Revision:     1,
+		DesiredState: protocol.ProxyDesiredStateRunning,
+		Ingress: EndpointSpec{
+			Type: protocol.IngressTypeHTTPHost,
+		},
+	}
+
+	s.recordServerExposeReconcileIssue(stored, errors.New("route registration failed"))
+
+	issues := s.unifiedRuntime.issuesForStoredTunnel(stored, true)
+	if len(issues) != 1 {
+		t.Fatalf("expected one ingress issue, got %+v", issues)
+	}
+	if issues[0].Code != protocol.TunnelIssueCodeIngressRouteFailed {
+		t.Fatalf("HTTP endpoint ingress issue must be classified by endpoint type, got %+v", issues[0])
+	}
+}
+
+func TestServerExposeIngressIssueCodeKeepsLegacyHTTPTypeCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		typeValue string
+		message   string
+		wantCode  string
+	}{
+		{
+			name:      "unified http endpoint type",
+			typeValue: protocol.IngressTypeHTTPHost,
+			message:   "bind: address already in use",
+			wantCode:  protocol.TunnelIssueCodeIngressRouteFailed,
+		},
+		{
+			name:      "legacy http proxy type",
+			typeValue: protocol.ProxyTypeHTTP,
+			message:   "bind: address already in use",
+			wantCode:  protocol.TunnelIssueCodeIngressRouteFailed,
+		},
+		{
+			name:      "tcp endpoint port in use",
+			typeValue: protocol.IngressTypeTCPListen,
+			message:   "bind: address already in use",
+			wantCode:  protocol.TunnelIssueCodeIngressPortInUse,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := serverExposeIngressIssueCode(tc.typeValue, tc.message)
+			if got != tc.wantCode {
+				t.Fatalf("serverExposeIngressIssueCode(%q) = %q, want %q", tc.typeValue, got, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestLegacyFlatHTTPRecordReconcileIssueUsesNormalizedEndpointType(t *testing.T) {
+	s := New(0)
+	stored := StoredTunnel{
+		ProxyNewRequest: protocol.ProxyNewRequest{
+			ID:        "legacy-http-id",
+			Name:      "legacy-http",
+			Type:      protocol.ProxyTypeHTTP,
+			LocalIP:   "127.0.0.1",
+			LocalPort: 8080,
+			Domain:    "legacy.example.com",
+		},
+		ClientID:     "target-client",
+		Revision:     1,
+		DesiredState: protocol.ProxyDesiredStateRunning,
+		RuntimeState: protocol.ProxyRuntimeStateOffline,
+	}
+	if err := stored.normalize(); err != nil {
+		t.Fatalf("normalize legacy HTTP tunnel: %v", err)
+	}
+
+	s.recordServerExposeReconcileIssue(stored, errors.New("address already in use"))
+
+	issues := s.unifiedRuntime.issuesForStoredTunnel(stored, true)
+	if len(issues) != 1 {
+		t.Fatalf("expected one ingress issue, got %+v", issues)
+	}
+	if issues[0].Code != protocol.TunnelIssueCodeIngressRouteFailed {
+		t.Fatalf("normalized legacy HTTP ingress issue must stay route-scoped, got %+v", issues[0])
+	}
+}
+
 func TestUnifiedServerExposeReconcileRejectsStaleProvisionAckAfterRevisionAdvance(t *testing.T) {
 	s := New(0)
 	s.store = newTestTunnelStore(t)

@@ -72,6 +72,19 @@ services:
     networks:
       - target-backend
 
+  tcp-backend-echo:
+    <<: *netsgo-e2e-tools
+    hostname: tcp-backend-echo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          socat -T60 TCP-LISTEN:18087,fork,reuseaddr SYSTEM:'head -c 1048576 >/dev/null && printf NETSGO_LARGE_OK'
+        done
+    networks:
+      - target-backend
+
   udp-backend:
     <<: *netsgo-e2e-tools
     hostname: udp-backend
@@ -105,6 +118,7 @@ services:
       - tcp-backend
       - tcp-backend-alt
       - tcp-backend-slow
+      - tcp-backend-echo
       - udp-backend
     networks:
       - control

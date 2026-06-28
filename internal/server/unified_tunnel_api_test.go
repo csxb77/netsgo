@@ -270,6 +270,11 @@ func awaitMuxResponse(t *testing.T, ch <-chan *httptest.ResponseRecorder) *httpt
 func createUnifiedAPITestClient(t *testing.T, s *Server, installID, hostname string) RegisteredClient {
 	t.Helper()
 	capabilities := protocol.DefaultClientCapabilities()
+	return createUnifiedAPITestClientWithCapabilities(t, s, installID, hostname, capabilities)
+}
+
+func createUnifiedAPITestClientWithCapabilities(t *testing.T, s *Server, installID, hostname string, capabilities protocol.ClientCapabilities) RegisteredClient {
+	t.Helper()
 	record, err := s.auth.adminStore.GetOrCreateClient(installID, protocol.ClientInfo{
 		Hostname:     hostname,
 		OS:           "linux",
@@ -281,6 +286,27 @@ func createUnifiedAPITestClient(t *testing.T, s *Server, installID, hostname str
 		t.Fatalf("failed to create client record: %v", err)
 	}
 	return *record
+}
+
+func unifiedCapabilityTestConfig(t *testing.T, endpointType string) string {
+	t.Helper()
+	switch endpointType {
+	case protocol.IngressTypeTCPListen:
+		return `{"bind_ip":"0.0.0.0","port":` + strconv.Itoa(reserveTCPPort(t)) + `,"allowed_source_cidrs":["0.0.0.0/0","::/0"]}`
+	case protocol.IngressTypeUDPListen:
+		return `{"bind_ip":"0.0.0.0","port":` + strconv.Itoa(reserveUDPPort(t)) + `,"allowed_source_cidrs":["0.0.0.0/0","::/0"]}`
+	case protocol.IngressTypeSOCKS5Listen:
+		return `{"bind_ip":"0.0.0.0","port":` + strconv.Itoa(reserveTCPPort(t)) + `,"allowed_source_cidrs":["0.0.0.0/0","::/0"],"auth":{"type":"none"}}`
+	case protocol.TargetTypeTCPService:
+		return `{"host":"127.0.0.1","port":22}`
+	case protocol.TargetTypeUDPService:
+		return `{"host":"127.0.0.1","port":53}`
+	case protocol.TargetTypeSOCKS5ConnectHandler:
+		return `{"allowed_target_cidrs":["0.0.0.0/0","::/0"],"allowed_target_hosts":["example.com"],"allowed_target_ports":[80,443],"dial_timeout_seconds":5}`
+	default:
+		t.Fatalf("unsupported endpoint type %q", endpointType)
+		return `{}`
+	}
 }
 
 func unifiedCreatePayload(name, clientID string, port int) []byte {
@@ -3063,6 +3089,173 @@ func TestAPI_UnifiedTunnelRejectsServerExposeUnsupportedTargetCapability(t *test
 	mustClose(t, ln)
 }
 
+func TestAPI_UnifiedTunnelRejectsUnsupportedEndpointCapabilitiesBeforePersist(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		topology          string
+		ingressType       string
+		targetType        string
+		ingressCaps       protocol.ClientCapabilities
+		targetCaps        protocol.ClientCapabilities
+		wantField         string
+		expectIngressPeer bool
+	}{
+		{
+			name:        "server expose target missing udp",
+			topology:    tunnelTopologyServerExpose,
+			ingressType: protocol.IngressTypeUDPListen,
+			targetType:  protocol.TargetTypeUDPService,
+			ingressCaps: protocol.ClientCapabilities{},
+			targetCaps: protocol.ClientCapabilities{
+				IngressTypes: protocol.DefaultClientCapabilities().IngressTypes,
+				TargetTypes:  []string{protocol.TargetTypeTCPService, protocol.TargetTypeSOCKS5ConnectHandler},
+			},
+			wantField: "target.type",
+		},
+		{
+			name:        "server expose target missing socks5",
+			topology:    tunnelTopologyServerExpose,
+			ingressType: protocol.IngressTypeSOCKS5Listen,
+			targetType:  protocol.TargetTypeSOCKS5ConnectHandler,
+			ingressCaps: protocol.ClientCapabilities{},
+			targetCaps: protocol.ClientCapabilities{
+				IngressTypes: protocol.DefaultClientCapabilities().IngressTypes,
+				TargetTypes:  []string{protocol.TargetTypeTCPService, protocol.TargetTypeUDPService},
+			},
+			wantField: "target.type",
+		},
+		{
+			name:              "client relay target missing tcp",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeTCPListen,
+			targetType:        protocol.TargetTypeTCPService,
+			ingressCaps:       protocol.DefaultClientCapabilities(),
+			targetCaps:        protocol.ClientCapabilities{IngressTypes: protocol.DefaultClientCapabilities().IngressTypes, TargetTypes: []string{protocol.TargetTypeUDPService, protocol.TargetTypeSOCKS5ConnectHandler}},
+			wantField:         "target.type",
+			expectIngressPeer: true,
+		},
+		{
+			name:              "client relay target missing udp",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeUDPListen,
+			targetType:        protocol.TargetTypeUDPService,
+			ingressCaps:       protocol.DefaultClientCapabilities(),
+			targetCaps:        protocol.ClientCapabilities{IngressTypes: protocol.DefaultClientCapabilities().IngressTypes, TargetTypes: []string{protocol.TargetTypeTCPService, protocol.TargetTypeSOCKS5ConnectHandler}},
+			wantField:         "target.type",
+			expectIngressPeer: true,
+		},
+		{
+			name:              "client relay target missing socks5",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeSOCKS5Listen,
+			targetType:        protocol.TargetTypeSOCKS5ConnectHandler,
+			ingressCaps:       protocol.DefaultClientCapabilities(),
+			targetCaps:        protocol.ClientCapabilities{IngressTypes: protocol.DefaultClientCapabilities().IngressTypes, TargetTypes: []string{protocol.TargetTypeTCPService, protocol.TargetTypeUDPService}},
+			wantField:         "target.type",
+			expectIngressPeer: true,
+		},
+		{
+			name:              "client relay reports target before ingress when both missing",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeTCPListen,
+			targetType:        protocol.TargetTypeTCPService,
+			ingressCaps:       protocol.ClientCapabilities{},
+			targetCaps:        protocol.ClientCapabilities{},
+			wantField:         "target.type",
+			expectIngressPeer: true,
+		},
+		{
+			name:              "client relay ingress missing tcp",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeTCPListen,
+			targetType:        protocol.TargetTypeTCPService,
+			ingressCaps:       protocol.ClientCapabilities{IngressTypes: []string{protocol.IngressTypeUDPListen, protocol.IngressTypeSOCKS5Listen}, TargetTypes: protocol.DefaultClientCapabilities().TargetTypes},
+			targetCaps:        protocol.DefaultClientCapabilities(),
+			wantField:         "ingress.type",
+			expectIngressPeer: true,
+		},
+		{
+			name:              "client relay ingress missing udp",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeUDPListen,
+			targetType:        protocol.TargetTypeUDPService,
+			ingressCaps:       protocol.ClientCapabilities{IngressTypes: []string{protocol.IngressTypeTCPListen, protocol.IngressTypeSOCKS5Listen}, TargetTypes: protocol.DefaultClientCapabilities().TargetTypes},
+			targetCaps:        protocol.DefaultClientCapabilities(),
+			wantField:         "ingress.type",
+			expectIngressPeer: true,
+		},
+		{
+			name:              "client relay ingress missing socks5",
+			topology:          tunnelTopologyClientToClient,
+			ingressType:       protocol.IngressTypeSOCKS5Listen,
+			targetType:        protocol.TargetTypeSOCKS5ConnectHandler,
+			ingressCaps:       protocol.ClientCapabilities{IngressTypes: []string{protocol.IngressTypeTCPListen, protocol.IngressTypeUDPListen}, TargetTypes: protocol.DefaultClientCapabilities().TargetTypes},
+			targetCaps:        protocol.DefaultClientCapabilities(),
+			wantField:         "ingress.type",
+			expectIngressPeer: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, handler, token, cleanup := setupTestServerWithStores(t, true)
+			defer cleanup()
+
+			target := createUnifiedAPITestClientWithCapabilities(t, s, "install-"+strings.ReplaceAll(tc.name, " ", "-")+"-target", tc.name+"-target", tc.targetCaps)
+			ingressClientID := ""
+			ingressLocation := protocol.EndpointLocationServer
+			if tc.expectIngressPeer {
+				ingress := createUnifiedAPITestClientWithCapabilities(t, s, "install-"+strings.ReplaceAll(tc.name, " ", "-")+"-ingress", tc.name+"-ingress", tc.ingressCaps)
+				ingressClientID = ingress.ID
+				ingressLocation = protocol.EndpointLocationClient
+			}
+
+			name := "unsupported-cap-" + strings.ReplaceAll(strings.ReplaceAll(tc.name, " ", "-"), "_", "-")
+			body := []byte(`{
+				"name":"` + name + `",
+				"topology":"` + tc.topology + `",
+				"ingress":{"location":"` + ingressLocation + `","client_id":"` + ingressClientID + `","type":"` + tc.ingressType + `","config":` + unifiedCapabilityTestConfig(t, tc.ingressType) + `},
+				"target":{"location":"client","client_id":"` + target.ID + `","type":"` + tc.targetType + `","config":` + unifiedCapabilityTestConfig(t, tc.targetType) + `},
+				"transport_policy":"server_relay_only",
+				"confirm_no_auth_risk":true
+			}`)
+
+			resp := doMuxRequest(t, handler, http.MethodPost, "/api/tunnels", token, body)
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("unsupported capability: want 400, got %d body=%s", resp.Code, resp.Body.String())
+			}
+			var bodyResp tunnelMutationErrorResponse
+			if err := mustDecodeJSON(t, resp.Body, &bodyResp); err != nil {
+				t.Fatalf("decode error: %v", err)
+			}
+			if bodyResp.ErrorCode != protocol.TunnelMutationErrorCodeCapabilityNotSupported || bodyResp.Field != tc.wantField {
+				t.Fatalf("capability error mismatch: %+v", bodyResp)
+			}
+			assertUnsupportedCapabilityRejectDidNotPersist(t, s, tc.topology, name, target.ID, ingressClientID)
+		})
+	}
+}
+
+func assertUnsupportedCapabilityRejectDidNotPersist(t *testing.T, s *Server, topology, name, targetClientID, ingressClientID string) {
+	t.Helper()
+	if _, err := s.store.GetTunnelE(targetClientID, name); !errors.Is(err, ErrTunnelNotFound) {
+		t.Fatalf("unsupported capability reject must not persist target-owned config, got err=%v", err)
+	}
+	switch topology {
+	case tunnelTopologyServerExpose:
+		if ingressClientID != "" {
+			t.Fatalf("server-expose capability reject fixture should not have a client ingress owner, got %q", ingressClientID)
+		}
+	case tunnelTopologyClientToClient:
+		if ingressClientID == "" {
+			t.Fatal("client-to-client capability reject fixture must have an ingress client owner")
+		}
+		if _, err := s.store.GetTunnelE(ingressClientID, name); !errors.Is(err, ErrTunnelNotFound) {
+			t.Fatalf("unsupported capability reject must not persist ingress-owned config, got err=%v", err)
+		}
+	default:
+		t.Fatalf("unsupported topology fixture %q", topology)
+	}
+}
+
 func TestAPI_UnifiedTunnelRejectsServerExposeUnsupportedIngressTypeWithoutResidualState(t *testing.T) {
 	s, handler, token, cleanup := setupTestServerWithStores(t, true)
 	defer cleanup()
@@ -3224,6 +3417,84 @@ func TestAPI_UnifiedTunnelUpdateRejectsServerExposeUnsupportedTargetCapabilityWi
 		t.Fatalf("rejected update must not leave tcp listener on new port %d: %v", newPort, err)
 	}
 	mustClose(t, ln)
+}
+
+func TestAPI_UnifiedTunnelUpdateRejectsClientRelayUnsupportedIngressCapabilityBeforePersist(t *testing.T) {
+	s, handler, token, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+
+	target := createUnifiedAPITestClient(t, s, "install-c2c-update-target", "c2c-update-target")
+	ingress := createUnifiedAPITestClient(t, s, "install-c2c-update-ingress", "c2c-update-ingress")
+	oldPort := reserveTCPPort(t)
+	stored := addUnifiedC2CTestTunnel(t, s, "c2c-update-unsupported-ingress", ingress.ID, target.ID, oldPort)
+	beforeTarget, err := s.store.GetTunnelByIDE(target.ID, stored.ID)
+	if err != nil {
+		t.Fatalf("load target-owned tunnel: %v", err)
+	}
+
+	ingressCaps := protocol.DefaultClientCapabilities()
+	ingressCaps.IngressTypes = []string{protocol.IngressTypeUDPListen, protocol.IngressTypeSOCKS5Listen}
+	_, ingressSession := newTestClientRelayDataSession(t)
+	s.clients.Store(ingress.ID, &ClientConn{
+		ID:          ingress.ID,
+		Info:        protocol.ClientInfo{Capabilities: &ingressCaps},
+		dataSession: ingressSession,
+		generation:  1,
+		state:       clientStateLive,
+	})
+	_, err = s.auth.adminStore.GetOrCreateClient("install-c2c-update-ingress", protocol.ClientInfo{
+		Hostname:     "c2c-update-ingress",
+		OS:           "linux",
+		Arch:         "amd64",
+		Version:      "0.1.0",
+		Capabilities: &ingressCaps,
+	}, "127.0.0.1:12345")
+	if err != nil {
+		t.Fatalf("update ingress capabilities: %v", err)
+	}
+
+	newPort := reserveTCPPort(t)
+	update := []byte(`{"expected_revision":` + strconv.FormatInt(stored.Revision, 10) + `,"spec":{
+		"name":"c2c-update-unsupported-ingress",
+		"topology":"client_to_client",
+		"ingress":{"location":"client","client_id":"` + ingress.ID + `","type":"tcp_listen","config":{"bind_ip":"127.0.0.1","port":` + strconv.Itoa(newPort) + `,"allowed_source_cidrs":["0.0.0.0/0","::/0"]}},
+		"target":{"location":"client","client_id":"` + target.ID + `","type":"tcp_service","config":{"ip":"127.0.0.1","port":2222}},
+		"transport_policy":"server_relay_only"
+	}}`)
+	resp := doMuxRequest(t, handler, http.MethodPut, "/api/tunnels/"+stored.ID, token, update)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported ingress capability update: want 400, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var bodyResp tunnelMutationErrorResponse
+	if err := mustDecodeJSON(t, resp.Body, &bodyResp); err != nil {
+		t.Fatalf("decode update error: %v", err)
+	}
+	if bodyResp.ErrorCode != protocol.TunnelMutationErrorCodeCapabilityNotSupported || bodyResp.Field != "ingress.type" {
+		t.Fatalf("capability update error mismatch: %+v", bodyResp)
+	}
+
+	afterTarget, err := s.store.GetTunnelByIDE(target.ID, stored.ID)
+	if err != nil {
+		t.Fatalf("reload target-owned tunnel after rejected update: %v", err)
+	}
+	assertStoredTunnelUnchangedAfterRejectedUpdate(t, beforeTarget, afterTarget)
+	if _, err := s.store.GetTunnelByIDE(ingress.ID, stored.ID); !errors.Is(err, ErrTunnelNotFound) {
+		t.Fatalf("rejected update must not create ingress-owned config, got err=%v", err)
+	}
+}
+
+func assertStoredTunnelUnchangedAfterRejectedUpdate(t *testing.T, before, after StoredTunnel) {
+	t.Helper()
+	if after.Revision != before.Revision ||
+		after.LocalIP != before.LocalIP ||
+		after.LocalPort != before.LocalPort ||
+		after.RemotePort != before.RemotePort ||
+		after.Name != before.Name {
+		t.Fatalf("rejected update mutated stored tunnel:\n before=%+v\n after=%+v", before, after)
+	}
+	if !bytes.Equal(after.Ingress.Config, before.Ingress.Config) || !bytes.Equal(after.Target.Config, before.Target.Config) {
+		t.Fatalf("rejected update mutated endpoint config:\n before=%+v\n after=%+v", before, after)
+	}
 }
 
 func TestUnifiedRuntimeReportIgnoresNonServerRelayTransport(t *testing.T) {

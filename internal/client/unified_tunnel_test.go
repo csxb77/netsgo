@@ -444,6 +444,65 @@ func TestClientTunnelProvisionSOCKS5TargetUsesEndpointRuntime(t *testing.T) {
 	}
 }
 
+func TestClientSOCKS5TargetStreamHeaderTransportPolicy(t *testing.T) {
+	baseReq := testTunnelProvisionRequest(t, protocol.DataStreamRoleTarget, reserveClientTCPPort(t))
+	baseReq.Spec.Target.Type = protocol.TargetTypeSOCKS5ConnectHandler
+	baseReq.Spec.Target.Config = mustJSON(t, protocol.SOCKS5ConnectHandlerConfig{
+		AllowedTargetCIDRs: []string{"127.0.0.0/8"},
+		AllowedTargetHosts: []string{"127.0.0.1"},
+		AllowedTargetPorts: []int{8080},
+		DialTimeoutSeconds: 2,
+	})
+	baseHeader := protocol.DataStreamHeader{
+		TunnelID:   baseReq.TunnelID,
+		Revision:   baseReq.Revision,
+		SourceRole: protocol.DataStreamRoleServer,
+		TargetRole: protocol.DataStreamRoleTarget,
+		Direction:  protocol.DataStreamDirectionIngressToTarget,
+		Transport:  protocol.ActualTransportServerRelay,
+		TargetHost: "127.0.0.1",
+		TargetPort: 8080,
+	}
+
+	t.Run("server relay policy accepts server relay header", func(t *testing.T) {
+		req := baseReq
+		req.Spec.TransportPolicy = protocol.TransportPolicyServerRelayOnly
+		target, err := newClientSOCKS5TargetRuntime(req)
+		if err != nil {
+			t.Fatalf("new SOCKS5 target runtime: %v", err)
+		}
+		if !dataStreamHeaderMatchesSOCKS5Target(baseHeader, target) {
+			t.Fatal("server_relay_only SOCKS5 target should accept server-relay data stream headers")
+		}
+	})
+
+	t.Run("direct only policy rejects server relay header", func(t *testing.T) {
+		req := baseReq
+		req.Spec.TransportPolicy = protocol.TransportPolicyDirectOnly
+		target, err := newClientSOCKS5TargetRuntime(req)
+		if err != nil {
+			t.Fatalf("new SOCKS5 target runtime: %v", err)
+		}
+		if dataStreamHeaderMatchesSOCKS5Target(baseHeader, target) {
+			t.Fatal("direct_only SOCKS5 target must reject server-relay data stream headers")
+		}
+	})
+
+	t.Run("peer direct header remains rejected", func(t *testing.T) {
+		req := baseReq
+		req.Spec.TransportPolicy = protocol.TransportPolicyServerRelayOnly
+		target, err := newClientSOCKS5TargetRuntime(req)
+		if err != nil {
+			t.Fatalf("new SOCKS5 target runtime: %v", err)
+		}
+		header := baseHeader
+		header.Transport = protocol.ActualTransportPeerDirect
+		if dataStreamHeaderMatchesSOCKS5Target(header, target) {
+			t.Fatal("SOCKS5 target must reject peer-direct data stream headers in server-relay handler")
+		}
+	})
+}
+
 func TestClientTunnelUnprovisionDeletesSOCKS5TargetWithoutComparingUncomparableValue(t *testing.T) {
 	c := New("ws://localhost:8080", "key")
 	req := testTunnelProvisionRequest(t, protocol.DataStreamRoleTarget, reserveClientTCPPort(t))

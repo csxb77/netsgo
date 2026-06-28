@@ -36,6 +36,8 @@ const (
 	backendAltResponse     = "system tcp alt response"
 	backendSlowHost        = "tcp-backend-slow"
 	backendSlowPort        = 18086
+	backendEchoHost        = "tcp-backend-echo"
+	backendEchoPort        = 18087
 	udpBackendHost         = "udp-backend"
 	udpBackendPort         = 18084
 )
@@ -57,6 +59,7 @@ type systemHarness struct {
 	serverTCPPort           int
 	serverUDPPort           int
 	serverSOCKS5Port        int
+	serverTCPAltPort        int
 	c2cSOCKS5Port           int
 	c2cDenyPort             int
 	c2cTCPPort              int
@@ -110,6 +113,7 @@ func TestSystemE2E(t *testing.T) {
 		httpProxyTunnel  tunnelResponse
 		httpDirectTunnel tunnelResponse
 		serverTCP        tunnelResponse
+		largeTCP         tunnelResponse
 		serverUDP        tunnelResponse
 		serverSOCKS5     tunnelResponse
 		c2cSOCKS5        tunnelResponse
@@ -146,12 +150,16 @@ func TestSystemE2E(t *testing.T) {
 	t.Run("TCP and UDP server_expose reach target client backends", func(t *testing.T) {
 		serverTCP = h.createTCPServerExposeTunnel(t, "system-tcp-server", h.serverTCPPort, backendHost, backendPort)
 		serverUDP = h.createUDPServerExposeTunnel(t, "system-udp-server", h.serverUDPPort, udpBackendHost, udpBackendPort)
+		largeTCP = h.createTCPServerExposeTunnel(t, "system-tcp-large-echo", h.serverTCPAltPort, backendEchoHost, backendEchoPort)
 		h.waitTunnelState(t, serverTCP.ID, "active", 90*time.Second)
 		h.waitTunnelState(t, serverUDP.ID, "active", 90*time.Second)
+		h.waitTunnelState(t, largeTCP.ID, "active", 90*time.Second)
 		h.expectTunnelNoIssues(t, serverTCP.ID)
 		h.expectTunnelNoIssues(t, serverUDP.ID)
+		h.expectTunnelNoIssues(t, largeTCP.ID)
 		h.expectTCPHTTPContains(t, h.serverTCPPort, backendHost, backendResponse)
 		h.expectUDPEcho(t, h.serverUDPPort, []byte("system server udp probe"), 30*time.Second)
+		h.expectLargeTCPUpload(t, h.serverTCPAltPort, 1<<20, 60*time.Second)
 	})
 
 	t.Run("SOCKS5 server_expose CONNECT reaches target client backend", func(t *testing.T) {
@@ -235,7 +243,7 @@ func TestSystemE2E(t *testing.T) {
 	})
 
 	t.Run("server restart restores persisted tunnels and data paths", func(t *testing.T) {
-		requiredTunnels := []tunnelResponse{httpProxyTunnel, httpDirectTunnel, serverTCP, serverUDP, serverSOCKS5, c2cSOCKS5, c2cTCP, c2cUDP}
+		requiredTunnels := []tunnelResponse{httpProxyTunnel, httpDirectTunnel, serverTCP, largeTCP, serverUDP, serverSOCKS5, c2cSOCKS5, c2cTCP, c2cUDP}
 		for _, tunnel := range requiredTunnels {
 			if tunnel.ID == "" {
 				t.Fatalf("required persisted tunnel was not created before restart: %+v", tunnel)
@@ -252,6 +260,7 @@ func TestSystemE2E(t *testing.T) {
 		h.expectHTTPContainsAt(t, h.baseURL, h.tunnelHost, backendResponse, 90*time.Second)
 		h.expectHTTPContainsAt(t, h.directBaseURL, h.directTunnelHost, backendResponse, 90*time.Second)
 		h.expectTCPHTTPContains(t, h.serverTCPPort, backendHost, backendResponse)
+		h.expectLargeTCPUpload(t, h.serverTCPAltPort, 1<<20, 60*time.Second)
 		h.expectUDPEcho(t, h.serverUDPPort, []byte("system server udp after server restart"), 60*time.Second)
 		h.expectSOCKS5HTTPContains(t, h.serverSOCKS5Port, backendHost, backendPort, nil, backendResponse)
 		h.expectSOCKS5HTTPContains(t, h.c2cSOCKS5Port, backendHost, backendPort, nil, backendResponse)
@@ -356,6 +365,24 @@ func TestSystemClientToClientCleanRejectE2E(t *testing.T) {
 		h.expectNoTunnelNamed(t, "c2c-clean-reject")
 		h.expectIngressListenerCount(t, "tcp", rejectPort, 0)
 	})
+
+	t.Run("unsupported client target type clean reject leaves no ingress listener", func(t *testing.T) {
+		rejectPort := h.c2cDenyPort
+		body := fmt.Sprintf(`{
+			"name":"c2c-target-clean-reject",
+			"topology":"client_to_client",
+			"ingress":{"location":"client","client_id":%q,"type":"tcp_listen","config":{
+				"bind_ip":"0.0.0.0",
+				"port":%d,
+				"allowed_source_cidrs":["0.0.0.0/0","::/0"]
+			}},
+			"target":{"location":"client","client_id":%q,"type":"future_target","config":{"host":%q,"port":%d}},
+			"transport_policy":"server_relay_only"
+		}`, h.ingressClientID, rejectPort, h.targetClientID, backendHost, backendPort)
+		h.expectTunnelCreateRejected(t, body, http.StatusBadRequest, "unsupported_endpoint_type", "target.type")
+		h.expectNoTunnelNamed(t, "c2c-target-clean-reject")
+		h.expectIngressListenerCount(t, "tcp", rejectPort, 0)
+	})
 }
 
 func TestSystemCapabilityLossReconcileE2E(t *testing.T) {
@@ -416,6 +443,7 @@ func newSystemHarness(t *testing.T) *systemHarness {
 		serverTCPPort:           mustAtoi(t, getenvDefault("SERVER_TCP_PORT", "19093")),
 		serverUDPPort:           mustAtoi(t, getenvDefault("SERVER_UDP_PORT", "19094")),
 		serverSOCKS5Port:        mustAtoi(t, getenvDefault("SERVER_SOCKS5_PORT", "19095")),
+		serverTCPAltPort:        mustAtoi(t, getenvDefault("SERVER_TCP_ALT_PORT", "19104")),
 		c2cSOCKS5Port:           mustAtoi(t, getenvDefault("C2C_SOCKS5_PORT", "19096")),
 		c2cDenyPort:             mustAtoi(t, getenvDefault("C2C_SOCKS5_DENY_PORT", "19097")),
 		c2cTCPPort:              mustAtoi(t, getenvDefault("C2C_TCP_PORT", "19098")),
@@ -460,7 +488,7 @@ func (h *systemHarness) startInfrastructure(t *testing.T) {
 	if v := os.Getenv("NETSGO_E2E_COMPOSE_BUILD"); v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") {
 		buildFlag = "--no-build"
 	}
-	h.compose(t, h.composeEnv, "up", "-d", buildFlag, "--remove-orphans", "server", "proxy", "tcp-backend", "tcp-backend-alt", "tcp-backend-slow", "udp-backend")
+	h.compose(t, h.composeEnv, "up", "-d", buildFlag, "--remove-orphans", "server", "proxy", "tcp-backend", "tcp-backend-alt", "tcp-backend-slow", "tcp-backend-echo", "udp-backend")
 }
 
 func (h *systemHarness) startClients(t *testing.T, clientKey string) {
@@ -1072,6 +1100,55 @@ func (h *systemHarness) requestTCPHTTP(port int, host, expected string, timeout 
 		return fmt.Errorf("TCP tunnel response missing %q:\n%s", expected, payload)
 	}
 	return nil
+}
+
+func (h *systemHarness) expectLargeTCPUpload(t *testing.T, port, size int, timeout time.Duration) {
+	t.Helper()
+	payload := deterministicPayload(size)
+	h.poll(t, timeout, func() (bool, string) {
+		got, err := h.requestTCPUploadAck(port, payload, timeout)
+		if err != nil {
+			return false, err.Error()
+		}
+		if string(got) != "NETSGO_LARGE_OK" {
+			return false, fmt.Sprintf("large TCP upload ack mismatch: got %q", got)
+		}
+		return true, ""
+	})
+}
+
+func deterministicPayload(size int) []byte {
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte((i * 7) % 251)
+	}
+	return payload
+}
+
+func (h *systemHarness) requestTCPUploadAck(port int, payload []byte, timeout time.Duration) ([]byte, error) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial TCP upload ingress port %d: %w", port, err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("set TCP upload deadline: %w", err)
+	}
+
+	written, err := io.Copy(conn, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("write large TCP upload payload after %d/%d bytes: %w", written, len(payload), err)
+	}
+	if written != int64(len(payload)) {
+		return nil, fmt.Errorf("short large TCP upload write: wrote %d/%d bytes", written, len(payload))
+	}
+
+	got := make([]byte, len("NETSGO_LARGE_OK"))
+	n, err := io.ReadFull(conn, got)
+	if err != nil {
+		return nil, fmt.Errorf("read large TCP upload ack after %d/%d bytes: %w", n, len(got), err)
+	}
+	return got, nil
 }
 
 func (h *systemHarness) expectUDPEcho(t *testing.T, port int, payload []byte, timeout time.Duration) {
