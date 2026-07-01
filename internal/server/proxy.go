@@ -388,7 +388,9 @@ func closeTunnelRuntimeResources(tunnel *ProxyTunnel) {
 		return
 	}
 	tunnel.once.Do(func() {
-		close(tunnel.done)
+		if tunnel.done != nil {
+			close(tunnel.done)
+		}
 		if tunnel.UDPState != nil {
 			tunnel.UDPState.Close()
 		}

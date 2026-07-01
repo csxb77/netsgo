@@ -572,6 +572,19 @@ func TestStopAllProxies(t *testing.T) {
 	_ = sConn.Close()
 }
 
+func TestCloseTunnelRuntimeResourcesAllowsUnboundPlaceholder(t *testing.T) {
+	tunnel := &ProxyTunnel{
+		Config: protocol.ProxyConfig{
+			Name:         "placeholder",
+			DesiredState: protocol.ProxyDesiredStateRunning,
+			RuntimeState: protocol.ProxyRuntimeStateOffline,
+		},
+	}
+
+	closeTunnelRuntimeResources(tunnel)
+	closeTunnelRuntimeResources(tunnel)
+}
+
 // ============================================================
 // Complete Proxy accept loop and forwarding behavior tests
 // ============================================================
