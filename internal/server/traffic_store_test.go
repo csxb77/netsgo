@@ -1017,7 +1017,17 @@ func TestTrafficAPI_Query(t *testing.T) {
 
 	clientID := "test-client-001"
 	now := time.Now().UTC()
-	ts.ApplyDeltas([]TrafficDelta{{ClientID: clientID, TunnelName: "web", TunnelType: "http", MinuteStart: minuteFloorUTC(now).Unix(), IngressBytes: 1024, EgressBytes: 512}})
+	stored := testStoredServerExposeTCPTunnel("traffic-query-web-id", "web", clientID, 8080, 18080, now)
+	mustAddStableTunnel(t, s.store, stored)
+	ts.ApplyDeltas([]TrafficDelta{{
+		TunnelID:     stored.ID,
+		ClientID:     clientID,
+		TunnelName:   stored.Name,
+		TunnelType:   stored.Type,
+		MinuteStart:  minuteFloorUTC(now).Unix(),
+		IngressBytes: 1024,
+		EgressBytes:  512,
+	}})
 
 	from := now.Add(-time.Minute).Unix()
 	to := now.Add(time.Minute).Unix()
@@ -1047,6 +1057,84 @@ func TestTrafficAPI_Query(t *testing.T) {
 	}
 	if web.Points[0].EgressBytes != 512 {
 		t.Errorf("web egress expected 512, got %d", web.Points[0].EgressBytes)
+	}
+}
+
+func TestTrafficAPI_HistoricalQueryIgnoresRuntimeOnlyProxyCreateTunnels(t *testing.T) {
+	s, handler, token, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+
+	ts, trafficCleanup := newTestTrafficStore(t)
+	defer trafficCleanup()
+	s.trafficStore = ts
+
+	clientID := "test-client-historical-runtime"
+	now := time.Now().UTC()
+	stored := testStoredServerExposeTCPTunnel("traffic-history-stored-id", "stored-history", clientID, 8080, 18080, now)
+	mustAddStableTunnel(t, s.store, stored)
+	runtimeID := "traffic-history-runtime-id"
+	ts.ApplyDeltas([]TrafficDelta{
+		{
+			TunnelID:     stored.ID,
+			ClientID:     clientID,
+			TunnelName:   stored.Name,
+			TunnelType:   stored.Type,
+			MinuteStart:  minuteFloorUTC(now).Unix(),
+			IngressBytes: 10,
+			EgressBytes:  5,
+		},
+		{
+			TunnelID:     runtimeID,
+			ClientID:     clientID,
+			TunnelName:   "runtime-history",
+			TunnelType:   protocol.ProxyTypeTCP,
+			MinuteStart:  minuteFloorUTC(now).Unix(),
+			IngressBytes: 99,
+			EgressBytes:  1,
+		},
+	})
+
+	from := now.Add(-time.Hour).Unix()
+	to := now.Add(time.Hour).Unix()
+	for _, resolution := range []TrafficResolution{TrafficResolutionMinute, TrafficResolutionHour} {
+		path := "/api/clients/" + clientID + "/traffic?from=" + itoa(from) + "&to=" + itoa(to) + "&resolution=" + string(resolution)
+		w := doMuxRequest(t, handler, http.MethodGet, path, token, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s traffic: want 200, got %d body=%s", resolution, w.Code, w.Body.String())
+		}
+		var resp TrafficQueryResult
+		if err := mustDecodeJSON(t, w.Body, &resp); err != nil {
+			t.Fatalf("failed to decode %s response: %v", resolution, err)
+		}
+		if len(resp.Items) != 1 || resp.Items[0].TunnelID != stored.ID {
+			t.Fatalf("%s historical traffic should only include stored tunnel, got %+v", resolution, resp.Items)
+		}
+	}
+
+	storedIDPath := "/api/clients/" + clientID + "/traffic?from=" + itoa(from) + "&to=" + itoa(to) + "&resolution=minute&tunnel=" + stored.ID
+	storedIDResp := doMuxRequest(t, handler, http.MethodGet, storedIDPath, token, nil)
+	if storedIDResp.Code != http.StatusOK {
+		t.Fatalf("GET stored id traffic: want 200, got %d body=%s", storedIDResp.Code, storedIDResp.Body.String())
+	}
+	var storedIDResult TrafficQueryResult
+	if err := mustDecodeJSON(t, storedIDResp.Body, &storedIDResult); err != nil {
+		t.Fatalf("failed to decode stored id response: %v", err)
+	}
+	if len(storedIDResult.Items) != 1 || storedIDResult.Items[0].TunnelID != stored.ID {
+		t.Fatalf("stored tunnel id filter should include stored traffic, got %+v", storedIDResult.Items)
+	}
+
+	runtimeIDPath := "/api/clients/" + clientID + "/traffic?from=" + itoa(from) + "&to=" + itoa(to) + "&resolution=minute&tunnel=" + runtimeID
+	runtimeIDResp := doMuxRequest(t, handler, http.MethodGet, runtimeIDPath, token, nil)
+	if runtimeIDResp.Code != http.StatusOK {
+		t.Fatalf("GET runtime id traffic: want 200, got %d body=%s", runtimeIDResp.Code, runtimeIDResp.Body.String())
+	}
+	var runtimeIDResult TrafficQueryResult
+	if err := mustDecodeJSON(t, runtimeIDResp.Body, &runtimeIDResult); err != nil {
+		t.Fatalf("failed to decode runtime id response: %v", err)
+	}
+	if len(runtimeIDResult.Items) != 0 {
+		t.Fatalf("runtime-only tunnel id filter should be empty, got %+v", runtimeIDResult.Items)
 	}
 }
 

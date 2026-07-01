@@ -1206,7 +1206,6 @@ func legacyUnifiedClientCapabilities() protocol.ClientCapabilities {
 		TunnelSpecVersion:   protocol.TunnelSpecVersion,
 		IngressTypes:        []string{protocol.IngressTypeTCPListen, protocol.IngressTypeUDPListen},
 		TargetTypes:         []string{protocol.TargetTypeTCPService, protocol.TargetTypeUDPService},
-		TransportPolicies:   []string{protocol.TransportPolicyServerRelayOnly},
 		P2P:                 protocol.P2PCapabilities{Supported: false},
 	}
 }

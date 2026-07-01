@@ -112,7 +112,7 @@ func (s *Server) knownTrafficTunnels(clientID, tunnelName string) []trafficSerie
 		if key.TunnelName == "" || key.TunnelType == "" {
 			return
 		}
-		if tunnelName != "" && key.TunnelName != tunnelName {
+		if tunnelName != "" && key.TunnelName != tunnelName && key.TunnelID != tunnelName {
 			return
 		}
 		known[key] = struct{}{}
@@ -135,6 +135,27 @@ func (s *Server) knownTrafficTunnels(clientID, tunnelName string) []trafficSerie
 	}
 	sortTrafficSeriesKeys(keys)
 	return keys
+}
+
+func filterTrafficResultByKnownTunnels(result TrafficQueryResult, knownTunnels []trafficSeriesKey) TrafficQueryResult {
+	allowedSeries := make(map[trafficSeriesKey]struct{}, len(knownTunnels))
+	for _, key := range knownTunnels {
+		if key.TunnelName == "" || key.TunnelType == "" {
+			continue
+		}
+		allowedSeries[key] = struct{}{}
+	}
+
+	items := make([]TunnelTrafficSeries, 0, len(result.Items))
+	for _, item := range result.Items {
+		key := trafficSeriesKey{TunnelID: item.TunnelID, TunnelName: item.TunnelName, TunnelType: item.TunnelType}
+		if _, ok := allowedSeries[key]; !ok {
+			continue
+		}
+		items = append(items, item)
+	}
+	result.Items = items
+	return result
 }
 
 func fillRealtimeTrafficResult(result TrafficQueryResult, knownTunnels []trafficSeriesKey, from, to time.Time) (TrafficQueryResult, error) {

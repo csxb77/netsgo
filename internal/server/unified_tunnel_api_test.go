@@ -2319,6 +2319,34 @@ func TestCollectClientViewsIgnoresRuntimeOnlyProxyCreateTunnels(t *testing.T) {
 	}
 }
 
+func TestAPI_ClientTunnelsIgnoresRuntimeOnlyProxyCreateTunnels(t *testing.T) {
+	s, handler, token, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+	now := time.Now().UTC()
+
+	stored := testStoredServerExposeTCPTunnel("stored-client-tunnels-id", "stored-client-tunnels", "client-a", 8080, 18080, now)
+	mustAddStableTunnel(t, s.store, stored)
+	s.clients.Store("client-a", &ClientConn{
+		ID:    "client-a",
+		state: clientStateLive,
+		proxies: map[string]*ProxyTunnel{
+			"runtime-only": testRuntimeOnlyProxyTunnel("runtime-client-tunnels-id", "runtime-only", "client-a", 8081, 18081, now.Add(time.Second)),
+		},
+	})
+
+	resp := doMuxRequest(t, handler, http.MethodGet, "/api/clients/client-a/tunnels?role=owner", token, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET client tunnels: want 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var tunnels []protocol.ProxyConfig
+	if err := mustDecodeJSON(t, resp.Body, &tunnels); err != nil {
+		t.Fatalf("failed to decode client tunnels: %v", err)
+	}
+	if len(tunnels) != 1 || tunnels[0].ID != stored.ID {
+		t.Fatalf("client tunnels should only include stored tunnel, got %+v", tunnels)
+	}
+}
+
 func addUnifiedC2CTestTunnel(t *testing.T, s *Server, name, ingressClientID, targetClientID string, ingressPort int) StoredTunnel {
 	t.Helper()
 	req := tunnelCreateRequestAPI{
