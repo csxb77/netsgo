@@ -3,8 +3,6 @@ package manage
 import (
 	"errors"
 	"fmt"
-	"os"
-	"syscall"
 
 	"netsgo/internal/install"
 	"netsgo/internal/svcmgr"
@@ -87,8 +85,7 @@ func defaultServerDeps() serverDeps {
 			return svcmgr.IsEnabled(svcmgr.UnitName(svcmgr.RoleServer))
 		},
 		Logs: func() error {
-			args := svcmgr.JournalArgs(svcmgr.UnitName(svcmgr.RoleServer), 100)
-			return syscall.Exec("/usr/bin/journalctl", args, os.Environ())
+			return execJournal(svcmgr.UnitName(svcmgr.RoleServer))
 		},
 		RunInstall: func() error {
 			return install.Run()

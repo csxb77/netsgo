@@ -46,30 +46,31 @@ var (
 
 // Client is the core client structure.
 type Client struct {
-	ServerAddr          string // Server address (supports ws://, wss://, http://, and https://, normalized internally)
-	Key                 string // Authentication key (used to exchange for a token)
-	Token               string // Client connection token (exchanged from Key)
-	InstallID           string // Stable installation ID
-	DataDir             string
-	ClientID            string // Stable client ID assigned by the server
-	TLSSkipVerify       bool
-	TLSFingerprint      string
-	dataToken           string
-	conn                *websocket.Conn
-	mu                  sync.Mutex // Protects the current runtime and mirrored fields
-	done                chan struct{}
-	dataSession         *yamux.Session // yamux session for the data channel
-	dataMu              sync.RWMutex
-	proxies             sync.Map // tunnel_id or legacy proxy name -> ProxyNewRequest
-	socks5Targets       sync.Map // tunnel_id -> clientSOCKS5TargetRuntime
-	fixedTargetRuntimes sync.Map // tunnel_id -> fixedServiceTargetRuntime
-	tunnels             sync.Map // tunnel_id:role -> *clientTunnelRuntime
-	useTLS              bool
-	startTime           time.Time // Program start time, used to calculate process uptime
-	publicIPv4          string    // Cached public IPv4 address
-	publicIPv6          string    // Cached public IPv6 address
-	publicIPFetched     time.Time // Last fetch time
-	publicIPFetching    bool      // Public IP refresh is currently running
+	ServerAddr             string // Server address (supports ws://, wss://, http://, and https://, normalized internally)
+	Key                    string // Authentication key (used to exchange for a token)
+	Token                  string // Client connection token (exchanged from Key)
+	InstallID              string // Stable installation ID
+	DataDir                string
+	ClientID               string // Stable client ID assigned by the server
+	TLSSkipVerify          bool
+	TLSFingerprint         string
+	TLSFingerprintExplicit bool
+	dataToken              string
+	conn                   *websocket.Conn
+	mu                     sync.Mutex // Protects the current runtime and mirrored fields
+	done                   chan struct{}
+	dataSession            *yamux.Session // yamux session for the data channel
+	dataMu                 sync.RWMutex
+	proxies                sync.Map // tunnel_id or legacy proxy name -> ProxyNewRequest
+	socks5Targets          sync.Map // tunnel_id -> clientSOCKS5TargetRuntime
+	fixedTargetRuntimes    sync.Map // tunnel_id -> fixedServiceTargetRuntime
+	tunnels                sync.Map // tunnel_id:role -> *clientTunnelRuntime
+	useTLS                 bool
+	startTime              time.Time // Program start time, used to calculate process uptime
+	publicIPv4             string    // Cached public IPv4 address
+	publicIPv6             string    // Cached public IPv6 address
+	publicIPFetched        time.Time // Last fetch time
+	publicIPFetching       bool      // Public IP refresh is currently running
 	// ProxyConfigs are delivered by the server and may also be set manually in benchmarks.
 	ProxyConfigs []protocol.ProxyNewRequest
 	// DisableReconnect disables automatic reconnect (used in tests and similar scenarios).
@@ -843,7 +844,8 @@ func (c *Client) connectDataChannelRuntime(rt *sessionRuntime) error {
 	return nil
 }
 
-// checkTLSFingerprint checks the TLS certificate fingerprint (TOFU).
+// checkTLSFingerprint checks certificate pins. CA-verified TLS connections do
+// not get TOFU-pinned implicitly; TOFU is reserved for --tls-skip-verify.
 func (c *Client) checkTLSFingerprint(conn *websocket.Conn) error {
 	tlsConn, ok := conn.UnderlyingConn().(*tls.Conn)
 	if !ok {
@@ -871,12 +873,24 @@ func (c *Client) checkTLSFingerprint(conn *websocket.Conn) error {
 
 	c.mu.Lock()
 	currentFingerprint := c.TLSFingerprint
+	explicitFingerprint := c.TLSFingerprintExplicit
+	skipVerify := c.TLSSkipVerify
+	if explicitFingerprint {
+		c.mu.Unlock()
+		if serverFP != currentFingerprint {
+			return tlsFingerprintMismatchError(currentFingerprint, serverFP, true)
+		}
+		c.logger().Info("client.tls_fingerprint_verified", "TLS certificate fingerprint verified", nil)
+		return nil
+	}
+	if !skipVerify {
+		c.mu.Unlock()
+		return nil
+	}
 	if currentFingerprint == "" {
-		// TOFU: first connection, record the fingerprint.
 		c.TLSFingerprint = serverFP
 		c.mu.Unlock()
 		c.logger().Info("client.tls_fingerprint_recorded", "TLS fingerprint recorded", map[string]any{"fingerprint": serverFP})
-		// Persist the fingerprint.
 		if err := c.saveTLSFingerprint(serverFP); err != nil {
 			c.logger().Warn("client.tls_fingerprint_save_failed", "Failed to save TLS fingerprint", map[string]any{"error": err.Error()})
 		}
@@ -884,18 +898,28 @@ func (c *Client) checkTLSFingerprint(conn *websocket.Conn) error {
 	}
 	c.mu.Unlock()
 
-	// A fingerprint already exists; compare strictly.
 	if serverFP != currentFingerprint {
-		return fmt.Errorf(
-			"TLS certificate fingerprint mismatch! A man-in-the-middle attack may be in progress"+
-				" (expected: %s, actual: %s); "+
-				"if the server really changed its certificate, delete the client state database and try again",
-			currentFingerprint, serverFP,
-		)
+		return tlsFingerprintMismatchError(currentFingerprint, serverFP, false)
 	}
 
 	c.logger().Info("client.tls_fingerprint_verified", "TLS certificate fingerprint verified", nil)
 	return nil
+}
+
+func tlsFingerprintMismatchError(expected, actual string, explicit bool) error {
+	if explicit {
+		return fmt.Errorf(
+			"TLS certificate fingerprint mismatch (expected configured fingerprint: %s, actual: %s); "+
+				"verify the server certificate, then update --tls-fingerprint or NETSGO_TLS_FINGERPRINT",
+			expected, actual,
+		)
+	}
+	return fmt.Errorf(
+		"TLS certificate fingerprint mismatch! A man-in-the-middle attack may be in progress"+
+			" (expected: %s, actual: %s); "+
+			"if the server really changed its certificate, delete the client state database and try again",
+		expected, actual,
+	)
 }
 
 // acceptStreamLoop continuously accepts yamux streams from the server.

@@ -83,6 +83,7 @@ All flags support environment variable configuration with NETSGO_ prefix, e.g.:
 		c.TLSSkipVerify = viper.GetBool("tls-skip-verify")
 		if fp := viper.GetString("tls-fingerprint"); fp != "" {
 			c.TLSFingerprint = fp
+			c.TLSFingerprintExplicit = true
 		}
 
 		sigCh := make(chan os.Signal, 1)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	clientstate "netsgo/internal/client"
 	"netsgo/internal/install"
@@ -74,8 +73,7 @@ func defaultClientDeps() clientDeps {
 			return svcmgr.IsEnabled(svcmgr.UnitName(svcmgr.RoleClient))
 		},
 		Logs: func() error {
-			args := svcmgr.JournalArgs(svcmgr.UnitName(svcmgr.RoleClient), 100)
-			return syscall.Exec("/usr/bin/journalctl", args, os.Environ())
+			return execJournal(svcmgr.UnitName(svcmgr.RoleClient))
 		},
 		RunInstall: func() error {
 			return install.Run()
