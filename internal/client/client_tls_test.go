@@ -231,45 +231,7 @@ func TestCheckTLSFingerprint_NonTLSConn_Skipped(t *testing.T) {
 	}
 }
 
-func TestCheckTLSFingerprint_TOFU_FirstConnect_RecordsFingerprint(t *testing.T) {
-	cert, x509Cert := generateTestCert(t)
-	ts, wsURL := startTLSWSServer(t, cert)
-	defer ts.Close()
-
-	conn := dialTLSWS(t, wsURL)
-	defer func() { _ = conn.Close() }()
-
-	c := New("wss://localhost", "key")
-	// Empty TLSFingerprint -> first TOFU connection
-	if err := c.checkTLSFingerprint(conn); err != nil {
-		t.Fatalf("first TOFU connection should not error: %v", err)
-	}
-
-	expectedFP := computeTestFingerprint(x509Cert.Raw)
-	if c.CurrentTLSFingerprint() != expectedFP {
-		t.Errorf("TOFU should record the fingerprint:\nwant: %s\ngot: %s", expectedFP, c.TLSFingerprint)
-	}
-}
-
-func TestCheckTLSFingerprint_TOFU_SameFingerprint_Passes(t *testing.T) {
-	cert, x509Cert := generateTestCert(t)
-	ts, wsURL := startTLSWSServer(t, cert)
-	defer ts.Close()
-
-	expectedFP := computeTestFingerprint(x509Cert.Raw)
-
-	conn := dialTLSWS(t, wsURL)
-	defer func() { _ = conn.Close() }()
-
-	c := New("wss://localhost", "key")
-	c.TLSFingerprint = expectedFP // Simulate an existing fingerprint
-
-	if err := c.checkTLSFingerprint(conn); err != nil {
-		t.Errorf("a matching fingerprint should not error: %v", err)
-	}
-}
-
-func TestCheckTLSFingerprint_TOFU_DifferentFingerprint_Rejects(t *testing.T) {
+func TestCheckTLSFingerprint_DefaultTLSPolicyDoesNotAutoPin(t *testing.T) {
 	cert, _ := generateTestCert(t)
 	ts, wsURL := startTLSWSServer(t, cert)
 	defer ts.Close()
@@ -278,7 +240,110 @@ func TestCheckTLSFingerprint_TOFU_DifferentFingerprint_Rejects(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	c := New("wss://localhost", "key")
-	c.TLSFingerprint = "AA:BB:CC:DD:FAKE:FINGERPRINT" // Forged old fingerprint
+	// The test dialer skips CA verification to accept the self-signed test cert;
+	// the policy under test is c.TLSSkipVerify=false.
+	if err := c.checkTLSFingerprint(conn); err != nil {
+		t.Fatalf("default TLS policy should not error: %v", err)
+	}
+
+	if c.CurrentTLSFingerprint() != "" {
+		t.Fatalf("default TLS policy should not auto-pin fingerprints, got %q", c.CurrentTLSFingerprint())
+	}
+}
+
+func TestCheckTLSFingerprint_ExplicitFingerprint_SameFingerprint_Passes(t *testing.T) {
+	cert, x509Cert := generateTestCert(t)
+	ts, wsURL := startTLSWSServer(t, cert)
+	defer ts.Close()
+
+	expectedFP := computeTestFingerprint(x509Cert.Raw)
+
+	conn := dialTLSWS(t, wsURL)
+	defer func() { _ = conn.Close() }()
+
+	c := New("wss://localhost", "key")
+	c.TLSFingerprint = expectedFP
+	c.TLSFingerprintExplicit = true
+
+	if err := c.checkTLSFingerprint(conn); err != nil {
+		t.Errorf("a matching fingerprint should not error: %v", err)
+	}
+}
+
+func TestCheckTLSFingerprint_ExplicitFingerprint_DifferentFingerprint_Rejects(t *testing.T) {
+	cert, _ := generateTestCert(t)
+	ts, wsURL := startTLSWSServer(t, cert)
+	defer ts.Close()
+
+	conn := dialTLSWS(t, wsURL)
+	defer func() { _ = conn.Close() }()
+
+	c := New("wss://localhost", "key")
+	c.TLSFingerprint = "AA:BB:CC:DD:FAKE:FINGERPRINT"
+	c.TLSFingerprintExplicit = true
+
+	err := c.checkTLSFingerprint(conn)
+	if err == nil {
+		t.Fatal("fingerprint mismatch should return an error")
+	}
+	if !strings.Contains(err.Error(), "TLS certificate fingerprint mismatch") {
+		t.Errorf("error should contain 'TLS certificate fingerprint mismatch', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "configured fingerprint") {
+		t.Errorf("error should mention the configured fingerprint: %v", err)
+	}
+}
+
+func TestCheckTLSFingerprint_LegacyFingerprintIgnoredWithVerifiedTLS(t *testing.T) {
+	cert, _ := generateTestCert(t)
+	ts, wsURL := startTLSWSServer(t, cert)
+	defer ts.Close()
+
+	conn := dialTLSWS(t, wsURL)
+	defer func() { _ = conn.Close() }()
+
+	c := New("wss://localhost", "key")
+	c.TLSFingerprint = "AA:BB:CC:DD:LEGACY:FINGERPRINT"
+
+	if err := c.checkTLSFingerprint(conn); err != nil {
+		t.Fatalf("legacy persisted fingerprints should not be enforced for verified TLS: %v", err)
+	}
+	if c.CurrentTLSFingerprint() != "AA:BB:CC:DD:LEGACY:FINGERPRINT" {
+		t.Fatalf("legacy fingerprint should be left untouched, got %q", c.CurrentTLSFingerprint())
+	}
+}
+
+func TestCheckTLSFingerprint_SkipVerifyTOFU_FirstConnect_RecordsFingerprint(t *testing.T) {
+	cert, x509Cert := generateTestCert(t)
+	ts, wsURL := startTLSWSServer(t, cert)
+	defer ts.Close()
+
+	conn := dialTLSWS(t, wsURL)
+	defer func() { _ = conn.Close() }()
+
+	c := New("wss://localhost", "key")
+	c.TLSSkipVerify = true
+	if err := c.checkTLSFingerprint(conn); err != nil {
+		t.Fatalf("first skip-verify TOFU connection should not error: %v", err)
+	}
+
+	expectedFP := computeTestFingerprint(x509Cert.Raw)
+	if c.CurrentTLSFingerprint() != expectedFP {
+		t.Errorf("TOFU should record the fingerprint:\nwant: %s\ngot: %s", expectedFP, c.TLSFingerprint)
+	}
+}
+
+func TestCheckTLSFingerprint_SkipVerifyTOFU_DifferentFingerprint_Rejects(t *testing.T) {
+	cert, _ := generateTestCert(t)
+	ts, wsURL := startTLSWSServer(t, cert)
+	defer ts.Close()
+
+	conn := dialTLSWS(t, wsURL)
+	defer func() { _ = conn.Close() }()
+
+	c := New("wss://localhost", "key")
+	c.TLSSkipVerify = true
+	c.TLSFingerprint = "AA:BB:CC:DD:FAKE:FINGERPRINT"
 
 	err := c.checkTLSFingerprint(conn)
 	if err == nil {
@@ -292,7 +357,7 @@ func TestCheckTLSFingerprint_TOFU_DifferentFingerprint_Rejects(t *testing.T) {
 	}
 }
 
-func TestCheckTLSFingerprint_TOFU_PersistsToStateFile(t *testing.T) {
+func TestCheckTLSFingerprint_SkipVerifyTOFU_PersistsToStateFile(t *testing.T) {
 	cert, x509Cert := generateTestCert(t)
 	ts, wsURL := startTLSWSServer(t, cert)
 	defer ts.Close()
@@ -306,6 +371,7 @@ func TestCheckTLSFingerprint_TOFU_PersistsToStateFile(t *testing.T) {
 	c := New("wss://localhost", "key")
 	c.InstallID = "test-install-id"
 	c.DataDir = tmpDir
+	c.TLSSkipVerify = true
 
 	if err := c.checkTLSFingerprint(conn); err != nil {
 		t.Fatalf("first TOFU connection should not error: %v", err)
@@ -621,6 +687,7 @@ func TestScenario_TLS_FingerprintPersistedAndLoadedOnRestart(t *testing.T) {
 	c1 := New("wss://localhost", "key")
 	c1.InstallID = "persist-test"
 	c1.DataDir = tmpDir
+	c1.TLSSkipVerify = true
 
 	if err := c1.checkTLSFingerprint(conn1); err != nil {
 		t.Fatalf("first connection should not error: %v", err)
@@ -634,6 +701,7 @@ func TestScenario_TLS_FingerprintPersistedAndLoadedOnRestart(t *testing.T) {
 	// ---- Simulate restart: a new client instance loads the state ----
 	c2 := New("wss://localhost", "key")
 	c2.DataDir = tmpDir
+	c2.TLSSkipVerify = true
 	if err := c2.ensureInstallID(); err != nil {
 		t.Fatalf("failed to load state: %v", err)
 	}
@@ -658,6 +726,7 @@ func TestScenario_TLS_TOFU_ReconnectSameCert_Passes(t *testing.T) {
 	defer ts.Close()
 
 	c := New("wss://localhost", "key")
+	c.TLSSkipVerify = true
 
 	// First connection -> record the fingerprint
 	conn1 := dialTLSWS(t, wsURL)
@@ -694,6 +763,7 @@ func TestScenario_TLS_TOFU_DetectsCertChange(t *testing.T) {
 	conn1 := dialTLSWS(t, wsURL1)
 
 	c := New("wss://localhost", "key")
+	c.TLSSkipVerify = true
 	if err := c.checkTLSFingerprint(conn1); err != nil {
 		t.Fatalf("first connection failed: %v", err)
 	}
