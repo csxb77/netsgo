@@ -19,6 +19,11 @@ type apiKeyResponse struct {
 	UseCount    int        `json:"use_count"`
 }
 
+type clientAuthRateLimitResponse struct {
+	Entries     []RateLimitSnapshot `json:"entries"`
+	GeneratedAt time.Time           `json:"generated_at"`
+}
+
 func sanitizeAPIKey(key APIKey) apiKeyResponse {
 	return apiKeyResponse{
 		ID:          key.ID,
@@ -120,6 +125,47 @@ func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
 	s.clearSessionCookie(w, r)
 
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// ========= Rate Limits =========
+
+func (s *Server) handleAPIAdminClientAuthRateLimits(w http.ResponseWriter, r *http.Request) {
+	if s.auth.clientLimiter == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "client_auth_limiter_unavailable", "client auth limiter unavailable")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		now := time.Now()
+		encodeJSON(w, http.StatusOK, clientAuthRateLimitResponse{
+			Entries:     s.auth.clientLimiter.Snapshot(now),
+			GeneratedAt: now,
+		})
+
+	case http.MethodDelete:
+		var req struct {
+			IP string `json:"ip"`
+		}
+		if err := decodeJSONRequestBody(r, &req); err != nil {
+			writeJSONRequestDecodeError(w, err)
+			return
+		}
+		ip := strings.TrimSpace(req.IP)
+		if ip == "" {
+			writeAPIError(w, http.StatusBadRequest, "missing_ip", "ip is required")
+			return
+		}
+		deleted := s.auth.clientLimiter.Delete(ip)
+		encodeJSON(w, http.StatusOK, map[string]any{
+			"success": true,
+			"deleted": deleted,
+			"ip":      ip,
+		})
+
+	default:
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "not allowed")
+	}
 }
 
 // ========= API Keys =========

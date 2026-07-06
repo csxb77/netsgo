@@ -1,6 +1,6 @@
 import { createRoute, Link, Outlet, redirect, useRouterState } from '@tanstack/react-router';
 import { motion } from 'motion/react';
-import { Shield, SlidersHorizontal } from 'lucide-react';
+import { Shield, ShieldAlert, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { dashboardRoute } from './dashboard';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -23,7 +23,11 @@ export const adminIndexRoute = createRoute({
 function AdminLayout() {
   const { t } = useTranslation();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const activeTab = pathname.includes('/security') ? 'security' : 'config';
+  const activeTab = pathname.includes('/security')
+    ? 'security'
+    : pathname.includes('/access-control')
+      ? 'access-control'
+      : 'config';
 
   return (
     <motion.div
@@ -53,6 +57,13 @@ function AdminLayout() {
                 label={t('admin.securityTab')}
                 to="/dashboard/admin/security"
                 value="security"
+              />
+              <AdminTabTrigger
+                active={activeTab === 'access-control'}
+                icon={ShieldAlert}
+                label={t('admin.accessControlTab')}
+                to="/dashboard/admin/access-control"
+                value="access-control"
               />
             </TabsList>
           </Tabs>

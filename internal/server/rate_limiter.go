@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +34,22 @@ type RateLimiter struct {
 	config  RateLimiterConfig
 	entries sync.Map // IP string -> *rateLimitEntry
 	stopCh  chan struct{}
+}
+
+// RateLimitSnapshot describes the current limiter state for one IP.
+type RateLimitSnapshot struct {
+	IP                string     `json:"ip"`
+	RequestCount      int        `json:"request_count"`
+	MaxRequests       int        `json:"max_requests"`
+	FailureCount      int        `json:"failure_count"`
+	MaxFailures       int        `json:"max_failures"`
+	Limited           bool       `json:"limited"`
+	Reason            string     `json:"reason,omitempty"`
+	RetryAfterSeconds int        `json:"retry_after_seconds"`
+	LockedUntil       *time.Time `json:"locked_until,omitempty"`
+	LastActivity      time.Time  `json:"last_activity"`
+	WindowSeconds     int        `json:"window_seconds"`
+	LockoutSeconds    int        `json:"lockout_seconds"`
 }
 
 // NewRateLimiter creates a new rate limiter.
@@ -115,6 +132,84 @@ func (rl *RateLimiter) ResetFailures(ip string) {
 	defer entry.mu.Unlock()
 
 	entry.failures = 0
+}
+
+// Delete removes all limiter state for the given IP.
+func (rl *RateLimiter) Delete(ip string) bool {
+	_, existed := rl.entries.LoadAndDelete(ip)
+	return existed
+}
+
+// Snapshot returns a stable view of all currently tracked IP entries.
+func (rl *RateLimiter) Snapshot(now time.Time) []RateLimitSnapshot {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	windowStart := now.Add(-rl.config.WindowSize)
+	snapshots := make([]RateLimitSnapshot, 0)
+
+	rl.entries.Range(func(key, value any) bool {
+		ip, ok := key.(string)
+		if !ok {
+			return true
+		}
+		entry, ok := value.(*rateLimitEntry)
+		if !ok {
+			return true
+		}
+
+		entry.mu.Lock()
+		validCount := 0
+		var earliestValid time.Time
+		for _, ts := range entry.timestamps {
+			if ts.After(windowStart) {
+				if validCount == 0 || ts.Before(earliestValid) {
+					earliestValid = ts
+				}
+				validCount++
+			}
+		}
+
+		snapshot := RateLimitSnapshot{
+			IP:             ip,
+			RequestCount:   validCount,
+			MaxRequests:    rl.config.MaxRequests,
+			FailureCount:   entry.failures,
+			MaxFailures:    rl.config.MaxFailures,
+			LastActivity:   entry.lastActivity,
+			WindowSeconds:  int(rl.config.WindowSize.Seconds()),
+			LockoutSeconds: int(rl.config.LockoutPeriod.Seconds()),
+		}
+
+		if now.Before(entry.lockedUntil) {
+			lockedUntil := entry.lockedUntil
+			snapshot.Limited = true
+			snapshot.Reason = "lockout"
+			snapshot.LockedUntil = &lockedUntil
+			snapshot.RetryAfterSeconds = retryAfterSeconds(entry.lockedUntil.Sub(now))
+		} else if rl.config.MaxRequests > 0 && validCount >= rl.config.MaxRequests && !earliestValid.IsZero() {
+			snapshot.Limited = true
+			snapshot.Reason = "window"
+			snapshot.RetryAfterSeconds = retryAfterSeconds(earliestValid.Add(rl.config.WindowSize).Sub(now))
+		}
+		entry.mu.Unlock()
+
+		snapshots = append(snapshots, snapshot)
+		return true
+	})
+
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].Limited != snapshots[j].Limited {
+			return snapshots[i].Limited
+		}
+		if !snapshots[i].LastActivity.Equal(snapshots[j].LastActivity) {
+			return snapshots[i].LastActivity.After(snapshots[j].LastActivity)
+		}
+		return snapshots[i].IP < snapshots[j].IP
+	})
+
+	return snapshots
 }
 
 // Stop stops the background cleanup goroutine.
@@ -287,9 +382,13 @@ func writeRateLimitResponse(w http.ResponseWriter, retryAfter time.Duration) {
 
 // retryAfterString converts a Duration to a seconds string.
 func retryAfterString(d time.Duration) string {
+	return strconv.Itoa(retryAfterSeconds(d))
+}
+
+func retryAfterSeconds(d time.Duration) int {
 	secs := int(d.Seconds())
 	if secs < 1 {
 		secs = 1
 	}
-	return strconv.Itoa(secs)
+	return secs
 }

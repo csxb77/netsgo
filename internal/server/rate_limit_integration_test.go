@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -356,6 +357,52 @@ func TestClient_RateLimitBlocksAfterFailures(t *testing.T) {
 	}
 	if !recoveredAuth.Success {
 		t.Fatalf("authentication should succeed after lockout expiry, got code=%s message=%s", recoveredAuth.Code, recoveredAuth.Message)
+	}
+}
+
+func TestAdminClientAuthRateLimits_ListAndDelete(t *testing.T) {
+	s, cleanup := setupTestServerWithDB(t, true)
+	defer cleanup()
+
+	s.auth.clientLimiter = NewRateLimiter(RateLimiterConfig{
+		WindowSize:    time.Minute,
+		MaxRequests:   100,
+		MaxFailures:   2,
+		LockoutPeriod: time.Hour,
+	})
+	defer s.auth.clientLimiter.Stop()
+
+	handler := s.StartHTTPOnly()
+	token := loginAdminTokenLocal(t, handler, "admin", "password123")
+	ip := "203.0.113.44"
+
+	s.auth.clientLimiter.RecordFailure(ip)
+	s.auth.clientLimiter.RecordFailure(ip)
+	if allowed, _ := s.auth.clientLimiter.Allow(ip); allowed {
+		t.Fatal("test setup should lock the IP before listing rate limits")
+	}
+
+	listResp := doMuxRequest(t, handler, http.MethodGet, "/api/admin/rate-limits/client-auth", token, nil)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("GET /api/admin/rate-limits/client-auth: want 200, got %d: %s", listResp.Code, listResp.Body.String())
+	}
+	var list clientAuthRateLimitResponse
+	if err := json.Unmarshal(listResp.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode rate-limit list response: %v", err)
+	}
+	if len(list.Entries) != 1 {
+		t.Fatalf("rate-limit list should contain 1 entry, got %d", len(list.Entries))
+	}
+	if list.Entries[0].IP != ip || !list.Entries[0].Limited || list.Entries[0].Reason != "lockout" {
+		t.Fatalf("unexpected rate-limit entry: %+v", list.Entries[0])
+	}
+
+	deleteResp := doMuxRequest(t, handler, http.MethodDelete, "/api/admin/rate-limits/client-auth", token, []byte(`{"ip":"203.0.113.44"}`))
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("DELETE /api/admin/rate-limits/client-auth: want 200, got %d: %s", deleteResp.Code, deleteResp.Body.String())
+	}
+	if allowed, _ := s.auth.clientLimiter.Allow(ip); !allowed {
+		t.Fatal("deleted IP should be allowed with a fresh client auth counter")
 	}
 }
 

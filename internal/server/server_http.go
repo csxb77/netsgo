@@ -46,6 +46,8 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/passkey/begin", s.handleAPIPasskeyLoginBegin)
 	mux.HandleFunc("POST /api/auth/passkey/finish", s.handleAPIPasskeyLoginFinish)
 	mux.HandleFunc("POST /api/auth/logout", s.RequireAuth(s.handleAPILogout))
+	mux.HandleFunc("GET /api/admin/rate-limits/client-auth", s.RequireAuth(s.handleAPIAdminClientAuthRateLimits))
+	mux.HandleFunc("DELETE /api/admin/rate-limits/client-auth", s.RequireAuth(s.handleAPIAdminClientAuthRateLimits))
 	mux.HandleFunc("GET /api/admin/keys", s.RequireAuth(s.handleAPIAdminKeys))
 	mux.HandleFunc("POST /api/admin/keys", s.RequireAuth(s.handleAPIAdminKeys))
 	mux.HandleFunc("PUT /api/admin/keys/{id}/{action}", s.RequireAuth(s.handleAPIAdminKeyItem))

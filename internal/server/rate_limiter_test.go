@@ -202,6 +202,50 @@ func TestRateLimiter_WindowSliding(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_SnapshotAndDelete(t *testing.T) {
+	rl := NewRateLimiter(RateLimiterConfig{
+		WindowSize:    time.Minute,
+		MaxRequests:   2,
+		MaxFailures:   100,
+		LockoutPeriod: time.Hour,
+	})
+	defer rl.Stop()
+
+	ip := "203.0.113.10"
+	for i := 0; i < 2; i++ {
+		allowed, _ := rl.Allow(ip)
+		if !allowed {
+			t.Fatalf("request #%d should be allowed", i+1)
+		}
+	}
+
+	snapshots := rl.Snapshot(time.Now())
+	if len(snapshots) != 1 {
+		t.Fatalf("Snapshot() returned %d entries, want 1", len(snapshots))
+	}
+	got := snapshots[0]
+	if got.IP != ip {
+		t.Fatalf("Snapshot()[0].IP = %q, want %q", got.IP, ip)
+	}
+	if !got.Limited || got.Reason != "window" {
+		t.Fatalf("Snapshot()[0] should report a window limit, got limited=%v reason=%q", got.Limited, got.Reason)
+	}
+	if got.RequestCount != 2 || got.MaxRequests != 2 {
+		t.Fatalf("Snapshot()[0] request counters = %d/%d, want 2/2", got.RequestCount, got.MaxRequests)
+	}
+
+	if !rl.Delete(ip) {
+		t.Fatal("Delete() should report that the entry existed")
+	}
+	if snapshots := rl.Snapshot(time.Now()); len(snapshots) != 0 {
+		t.Fatalf("Snapshot() after Delete returned %d entries, want 0", len(snapshots))
+	}
+	allowed, _ := rl.Allow(ip)
+	if !allowed {
+		t.Fatal("deleted IP should be allowed with a fresh counter")
+	}
+}
+
 func TestClientIP(t *testing.T) {
 	tests := []struct {
 		name       string

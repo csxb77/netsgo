@@ -8,6 +8,7 @@ import { dashboardClientRoute } from '@/routes/dashboard/clients.$clientId';
 import { loginRoute } from '@/routes/login';
 import { adminIndexRoute, adminRoute } from '@/routes/admin';
 
+import { adminAccessControlRoute } from '@/routes/admin/access-control';
 import { adminConfigRoute } from '@/routes/admin/config';
 import { adminSecurityRoute } from '@/routes/admin/security';
 
@@ -15,6 +16,7 @@ const adminRouteTree = adminRoute.addChildren([
   adminIndexRoute,
   adminConfigRoute,
   adminSecurityRoute,
+  adminAccessControlRoute,
 ]);
 
 const dashboardRouteTree = dashboardRoute.addChildren([
