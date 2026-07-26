@@ -5,7 +5,7 @@ import { dashboardRoute } from '@/routes/dashboard';
 import { ClientHeader } from '@/components/custom/client/ClientHeader';
 import { ClientInfoCard } from '@/components/custom/client/ClientInfoCard';
 import { TunnelTable } from '@/components/custom/tunnel/TunnelTable';
-import { ClientActivitySummary } from '@/components/custom/activity/ClientActivitySummary';
+import { ClientActivitySheet } from '@/components/custom/activity/ClientActivitySheet';
 import { TrafficChart } from '@/components/custom/chart/TrafficChart';
 import { useClients, useDeleteClient } from '@/hooks/use-clients';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -32,6 +32,7 @@ function ClientDetailPage() {
   const { data: clients, isLoading, isFetching } = useClients();
   const deleteClient = useDeleteClient();
   const [deleteTarget, setDeleteTarget] = useState<Client | null>(null);
+  const [activityOpen, setActivityOpen] = useState(false);
 
   const client = clients?.find((a) => a.id === clientId);
 
@@ -63,13 +64,18 @@ function ClientDetailPage() {
       initial="hidden"
       animate="show"
     >
-      <motion.div variants={fadeUp}><ClientHeader client={client} /></motion.div>
+      <motion.div variants={fadeUp}><ClientHeader client={client} onShowActivity={() => setActivityOpen(true)} /></motion.div>
       <motion.div variants={fadeUp}><ClientInfoCard client={client} onRequestDelete={setDeleteTarget} /></motion.div>
-      <motion.div variants={fadeUp}><ClientActivitySummary clientId={clientId} /></motion.div>
       <motion.div variants={fadeUp}><TunnelTable client={client} clients={clients ?? []} /></motion.div>
       <motion.div variants={fadeUp}>
         <TrafficChart clientId={clientId} tunnels={client.proxies ?? []} />
       </motion.div>
+      <ClientActivitySheet
+        key={clientId}
+        client={client}
+        open={activityOpen}
+        onOpenChange={setActivityOpen}
+      />
       <ConfirmDialog
         open={deleteTarget !== null}
         title={t('dashboard.deleteOfflineNode')}
