@@ -2,7 +2,8 @@ import { createRoute, useNavigate } from '@tanstack/react-router';
 import { motion } from 'motion/react';
 import { useTranslation } from 'react-i18next';
 
-import { ActivityFilters, type ActivityFilterValue } from '@/components/custom/activity/ActivityFilters';
+import { ActivityFilters } from '@/components/custom/activity/ActivityFilters';
+import type { ActivityFilterValue } from '@/components/custom/activity/severity-meta';
 import { ActivityTimeline } from '@/components/custom/activity/ActivityTimeline';
 import { dashboardRoute } from '@/routes/dashboard';
 import { requireActivityAdmin } from '@/lib/auth';
@@ -105,10 +106,12 @@ function ActivityPage() {
         <p className="mt-1 text-sm text-muted-foreground">{t('activity.pageDescription')}</p>
       </motion.div>
       <motion.div variants={fadeUp}>
-        <ActivityFilters value={filters} onChange={updateFilters} />
-      </motion.div>
-      <motion.div variants={fadeUp}>
-        <ActivityTimeline query={query} />
+        <section className="rounded-xl border border-border/40 bg-card/50 shadow-sm backdrop-blur-sm">
+          <header className="rounded-t-xl border-b border-border/40 bg-muted/20 px-3 py-2.5 sm:px-4">
+            <ActivityFilters value={filters} onChange={updateFilters} />
+          </header>
+          <ActivityTimeline query={query} />
+        </section>
       </motion.div>
     </motion.div>
   );
