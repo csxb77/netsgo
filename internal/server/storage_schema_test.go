@@ -416,7 +416,7 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 	if got := appliedMigrationNames(t, db, "schema_migrations"); !reflect.DeepEqual(got, wantStrictMigrationNames) {
 		t.Fatalf("strict applied migrations = %#v, want %#v", got, wantStrictMigrationNames)
 	}
-	if got := appliedMigrationNames(t, db, serverCompatibleMigrationTable); !reflect.DeepEqual(got, []string{"010_client_auth_control", "011_activity_events"}) {
+	if got := appliedMigrationNames(t, db, serverCompatibleMigrationTable); !reflect.DeepEqual(got, []string{"010_client_auth_control", "011_activity_events", "012_tunnel_resource_locks_constraints"}) {
 		t.Fatalf("compatible applied migrations = %#v", got)
 	}
 	if got := countTunnelRegisteredClientFKs(t, db); got != 0 {
@@ -455,6 +455,7 @@ func TestServerMigrationsLoadsEmbeddedFiles(t *testing.T) {
 		"009_tunnel_total_bandwidth",
 		"010_client_auth_control",
 		"011_activity_events",
+		"012_tunnel_resource_locks_constraints",
 	}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("migration names = %#v, want %#v", gotNames, wantNames)
@@ -614,8 +615,8 @@ func TestOpenServerDBSkipsAppliedEmbeddedMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ` + serverCompatibleMigrationTable).Scan(&compatibleCount); err != nil {
 		t.Fatalf("count compatible migrations failed: %v", err)
 	}
-	if strictCount != 9 || compatibleCount != 2 {
-		t.Fatalf("migration counts = strict %d, compatible %d; want 9 and 2", strictCount, compatibleCount)
+	if strictCount != 9 || compatibleCount != 3 {
+		t.Fatalf("migration counts = strict %d, compatible %d; want 9 and 3", strictCount, compatibleCount)
 	}
 }
 
@@ -642,6 +643,175 @@ func TestOpenServerDBKeepsClientAuthMigrationOutOfLegacyLedger(t *testing.T) {
 
 	if !sqliteTableColumnExists(t, legacyDB, "server_config", "client_auth_rate_limit_enabled") {
 		t.Fatal("compatible client auth column should remain available")
+	}
+}
+
+func TestOpenServerDBResourceLockMigrationRebuildsAndConstrainsLocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server", "netsgo.db")
+	migrations, err := serverMigrations()
+	if err != nil {
+		t.Fatalf("serverMigrations() error = %v", err)
+	}
+	compatible, strict := partitionServerMigrations(migrations)
+	legacyCompatible := make([]storage.Migration, 0, len(compatible)-1)
+	for _, migration := range compatible {
+		if migration.Name != "012_tunnel_resource_locks_constraints" {
+			legacyCompatible = append(legacyCompatible, migration)
+		}
+	}
+	legacyDB, err := storage.Open(path, strict)
+	if err != nil {
+		t.Fatalf("open legacy strict schema: %v", err)
+	}
+	if err := storage.ApplyCompatibleMigrations(legacyDB, serverCompatibleMigrationTable, legacyCompatible); err != nil {
+		t.Fatalf("apply legacy compatible migrations: %v", err)
+	}
+	serverTCP := validUnifiedTunnelInsertArgs("migration-server-tcp")
+	serverTCP[1], serverTCP[18] = "migration-server-tcp", 18081
+	clientSOCKS5 := validUnifiedTunnelInsertArgs("migration-client-socks5")
+	clientSOCKS5[1] = "migration-client-socks5"
+	clientSOCKS5[2] = "target-client"
+	clientSOCKS5[11] = TunnelTopologyClientToClient
+	clientSOCKS5[12] = "target-client"
+	clientSOCKS5[13], clientSOCKS5[14], clientSOCKS5[15] = "client", "ingress-client", TunnelIngressTypeSOCKS5Listen
+	clientSOCKS5[16], clientSOCKS5[17], clientSOCKS5[18] = `{"bind_ip":"127.0.0.1","port":19081}`, "127.0.0.1", 19081
+	clientSOCKS5[22], clientSOCKS5[23] = "target-client", TunnelTargetTypeSOCKS5ConnectHandler
+	clientSOCKS5[24], clientSOCKS5[25], clientSOCKS5[26], clientSOCKS5[28] = `{}`, "", 0, "target:client:target-client:socks5_connect_handler"
+	serverHTTP := validUnifiedTunnelInsertArgs("migration-server-http")
+	serverHTTP[1], serverHTTP[3], serverHTTP[6], serverHTTP[7] = "migration-server-http", protocol.ProxyTypeHTTP, 0, "Example.COM"
+	serverHTTP[15], serverHTTP[16], serverHTTP[17], serverHTTP[18], serverHTTP[19] = TunnelIngressTypeHTTPHost, `{"domain":"Example.COM"}`, "", 0, "Example.COM"
+	for _, args := range [][]any{serverTCP, clientSOCKS5, serverHTTP} {
+		if _, err := legacyDB.Exec(unifiedTunnelInsertSQL(), args...); err != nil {
+			t.Fatalf("seed tunnel %v: %v", args[0], err)
+		}
+	}
+	if _, err := legacyDB.Exec(`INSERT INTO tunnel_resource_locks (resource_key, tunnel_id, resource_kind, client_id, created_at) VALUES
+		('stale:wrong', 'migration-server-tcp', 'wrong_kind', '', '2000-01-01T00:00:00Z'),
+		('orphan:lock', 'missing-tunnel', 'wrong_kind', '', '2000-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed stale locks: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy DB: %v", err)
+	}
+
+	db, err := openServerDB(path)
+	if err != nil {
+		t.Fatalf("upgrade resource lock schema: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wantLocks := map[string]string{
+		"ingress:server:tcp:0.0.0.0:18081":                  "server_tcp_port",
+		"ingress:client:ingress-client:tcp:127.0.0.1:19081": "client_tcp_port",
+		"ingress:server:http_host:example.com":              "server_http_host",
+	}
+	rows, err := db.Query(`SELECT resource_key, resource_kind FROM tunnel_resource_locks ORDER BY resource_key`)
+	if err != nil {
+		t.Fatalf("query rebuilt locks: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	gotLocks := make(map[string]string)
+	for rows.Next() {
+		var key, kind string
+		if err := rows.Scan(&key, &kind); err != nil {
+			t.Fatalf("scan rebuilt lock: %v", err)
+		}
+		gotLocks[key] = kind
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rebuilt locks: %v", err)
+	}
+	if !reflect.DeepEqual(gotLocks, wantLocks) {
+		t.Fatalf("rebuilt locks = %#v, want %#v", gotLocks, wantLocks)
+	}
+	if got := countTunnelResourceLockFKs(t, db); got != 1 {
+		t.Fatalf("resource lock tunnel foreign keys = %d, want 1", got)
+	}
+	if _, err := db.Exec(`INSERT INTO tunnel_resource_locks (resource_key, tunnel_id, resource_kind, client_id, created_at) VALUES ('invalid:kind', 'migration-server-tcp', 'wrong_kind', '', '2000-01-01T00:00:00Z')`); err == nil {
+		t.Fatal("resource_kind CHECK accepted an unknown kind")
+	}
+	if _, err := db.Exec(`INSERT INTO tunnel_resource_locks (resource_key, tunnel_id, resource_kind, client_id, created_at) VALUES ('invalid:tunnel', 'missing-tunnel', 'server_tcp_port', '', '2000-01-01T00:00:00Z')`); err == nil {
+		t.Fatal("resource lock FK accepted an unknown tunnel")
+	}
+	if _, err := db.Exec(`DELETE FROM tunnels WHERE id = 'migration-server-tcp'`); err != nil {
+		t.Fatalf("delete tunnel for cascade: %v", err)
+	}
+	var remaining int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tunnel_resource_locks WHERE tunnel_id = 'migration-server-tcp'`).Scan(&remaining); err != nil {
+		t.Fatalf("count cascaded locks: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("resource lock cascade left %d row(s)", remaining)
+	}
+}
+
+func TestOpenServerDBResourceLockMigrationRemainsWritableByLegacySchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server", "netsgo.db")
+	db, err := openServerDB(path)
+	if err != nil {
+		t.Fatalf("openServerDB() error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close upgraded DB: %v", err)
+	}
+	migrations, err := serverMigrations()
+	if err != nil {
+		t.Fatalf("serverMigrations() error = %v", err)
+	}
+	_, strict := partitionServerMigrations(migrations)
+	legacyDB, err := storage.Open(path, strict)
+	if err != nil {
+		t.Fatalf("legacy strict migration ledger should remain readable after 012: %v", err)
+	}
+	defer func() { _ = legacyDB.Close() }()
+	if got := countTunnelResourceLockFKs(t, legacyDB); got != 1 {
+		t.Fatalf("legacy open lost resource lock FK, got %d", got)
+	}
+	args := validUnifiedTunnelInsertArgs("legacy-write-after-012")
+	args[1], args[18] = "legacy-write-after-012", 18082
+	if _, err := legacyDB.Exec(unifiedTunnelInsertSQL(), args...); err != nil {
+		t.Fatalf("legacy insert tunnel after 012: %v", err)
+	}
+	if _, err := legacyDB.Exec(`INSERT INTO tunnel_resource_locks (resource_key, tunnel_id, resource_kind, client_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"ingress:server:tcp:0.0.0.0:18082", "legacy-write-after-012", "server_tcp_port", "", "2000-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("legacy insert resource lock after 012: %v", err)
+	}
+	if _, err := legacyDB.Exec(`DELETE FROM tunnel_resource_locks WHERE tunnel_id = ?`, "legacy-write-after-012"); err != nil {
+		t.Fatalf("legacy delete resource lock after 012: %v", err)
+	}
+	if _, err := legacyDB.Exec(`DELETE FROM tunnels WHERE id = ?`, "legacy-write-after-012"); err != nil {
+		t.Fatalf("legacy delete tunnel after 012: %v", err)
+	}
+}
+
+func TestResourceLockMigrationDownRestoresLegacyShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server", "netsgo.db")
+	db, err := openServerDB(path)
+	if err != nil {
+		t.Fatalf("openServerDB() error = %v", err)
+	}
+	migrations, err := serverMigrations()
+	if err != nil {
+		t.Fatalf("serverMigrations() error = %v", err)
+	}
+	var migration storage.Migration
+	for _, candidate := range migrations {
+		if candidate.Name == "012_tunnel_resource_locks_constraints" {
+			migration = candidate
+			break
+		}
+	}
+	if migration.Name == "" {
+		t.Fatal("resource lock migration missing")
+	}
+	if _, err := db.Exec(migration.Down); err != nil {
+		t.Fatalf("apply resource lock migration down SQL: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if got := countTunnelResourceLockFKs(t, db); got != 0 {
+		t.Fatalf("down migration kept %d resource lock FK(s), want 0", got)
+	}
+	if _, err := db.Exec(`INSERT INTO tunnel_resource_locks (resource_key, tunnel_id, resource_kind, client_id, created_at) VALUES ('legacy:free-form', 'missing-tunnel', 'legacy_kind', '', '2000-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("down migration should restore unconstrained legacy writes: %v", err)
 	}
 }
 
@@ -946,6 +1116,17 @@ func countTunnelRegisteredClientFKs(t *testing.T, db interface {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_list('tunnels') WHERE "table" = 'registered_clients'`).Scan(&count); err != nil {
 		t.Fatalf("query tunnels foreign keys failed: %v", err)
+	}
+	return count
+}
+
+func countTunnelResourceLockFKs(t *testing.T, db interface {
+	QueryRow(query string, args ...any) *sql.Row
+}) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_list('tunnel_resource_locks') WHERE "table" = 'tunnels' AND "from" = 'tunnel_id' AND "to" = 'id' AND on_delete = 'CASCADE'`).Scan(&count); err != nil {
+		t.Fatalf("query tunnel resource lock foreign keys failed: %v", err)
 	}
 	return count
 }
