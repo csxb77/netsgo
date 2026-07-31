@@ -19,8 +19,8 @@ const dataChannelID uint16 = 0
 
 // p2pMuxStreamWindow is the yamux per-stream window for peer-direct sessions.
 // Single-stream yamux throughput is bounded by window/RTT; the default 256 KiB
-// window caps high-RTT WAN peer paths (DERP-relayed or NAT-traversed) at a few
-// hundred KiB/s, far below what the underlying WebRTC path can carry.
+// window caps TURN-relayed or other high-RTT WAN paths at a few hundred KiB/s,
+// far below what the underlying WebRTC path can carry.
 const p2pMuxStreamWindow = 4 * 1024 * 1024
 
 // p2pMuxConfig returns the yamux config for peer-direct sessions: the default
