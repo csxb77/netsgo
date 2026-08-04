@@ -81,7 +81,11 @@ func initTestAdminStore(t *testing.T, s *Server) {
 func issueAdminToken(t *testing.T, s *Server) string {
 	t.Helper()
 
-	session := mustCreateSession(t, s.auth.adminStore, "user-1", "admin", "admin", "127.0.0.1", "Go-http-client/1.1")
+	user, err := s.auth.adminStore.ValidateAdminPassword("admin", "password123")
+	if err != nil {
+		t.Fatalf("load test administrator: %v", err)
+	}
+	session := mustCreateSession(t, s.auth.adminStore, user.ID, user.Username, user.Role, "127.0.0.1", "Go-http-client/1.1")
 	token, err := s.GenerateAdminToken(session)
 	if err != nil {
 		t.Fatalf("failed to generate admin token: %v", err)
@@ -158,10 +162,11 @@ func TestControlAuthAcceptsNinetyDayInactiveTokenAfterUpgrade(t *testing.T) {
 	defer cleanup()
 
 	const installID = "install-upgrade-token"
-	token, _, err := s.auth.adminStore.ExchangeToken("test-key", installID, "client-upgrade-token", "192.0.2.10:4321")
+	exchange, err := s.auth.adminStore.RegisterClientAndExchangeToken("test-key", installID, protocol.ClientInfo{Hostname: "upgrade-host"}, "192.0.2.10:4321")
 	if err != nil {
 		t.Fatalf("exchange token: %v", err)
 	}
+	token := exchange.Token
 	ageClientTokenByInstallID(t, s.auth.adminStore, installID, 90*24*time.Hour)
 	if err := s.auth.adminStore.CleanExpiredTokens(); err != nil {
 		t.Fatalf("startup token cleanup: %v", err)
@@ -179,7 +184,7 @@ func TestControlAuthAcceptsNinetyDayInactiveTokenAfterUpgrade(t *testing.T) {
 	if !authResp.Success || authResp.Code != protocol.AuthCodeOK {
 		t.Fatalf("90-day token auth response = %+v", authResp)
 	}
-	if authResp.ClientID != "client-upgrade-token" {
+	if authResp.ClientID != exchange.Client.ID {
 		t.Fatalf("authenticated client ID = %q", authResp.ClientID)
 	}
 	if authResp.Token != "" {
@@ -566,7 +571,7 @@ func TestAPI_Status_AfterDisconnect(t *testing.T) {
 
 func TestAPI_Clients_Empty(t *testing.T) {
 	s := New(8080)
-	req := httptest.NewRequest(http.MethodGet, "/api/clients", nil)
+	req := withTestResourceScope(httptest.NewRequest(http.MethodGet, "/api/clients", nil), "test-owner")
 	w := httptest.NewRecorder()
 	s.handleAPIClients(w, req)
 

@@ -45,7 +45,7 @@ func newInitializedAdminStore(t *testing.T) *AdminStore {
 func countAdminSessions(t *testing.T, store *AdminStore) int {
 	t.Helper()
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM admin_sessions`).Scan(&count); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM user_sessions`).Scan(&count); err != nil {
 		t.Fatalf("count admin sessions: %v", err)
 	}
 	return count
@@ -53,14 +53,14 @@ func countAdminSessions(t *testing.T, store *AdminStore) int {
 
 func expireAdminSession(t *testing.T, store *AdminStore, sessionID string) {
 	t.Helper()
-	if _, err := store.db.Exec(`UPDATE admin_sessions SET expires_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), sessionID); err != nil {
+	if _, err := store.db.Exec(`UPDATE user_sessions SET expires_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), sessionID); err != nil {
 		t.Fatalf("expire admin session: %v", err)
 	}
 }
 
 func expireAllAdminSessions(t *testing.T, store *AdminStore) {
 	t.Helper()
-	if _, err := store.db.Exec(`UPDATE admin_sessions SET expires_at = ?`, formatTime(time.Now().Add(-time.Hour))); err != nil {
+	if _, err := store.db.Exec(`UPDATE user_sessions SET expires_at = ?`, formatTime(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatalf("expire admin sessions: %v", err)
 	}
 }
@@ -68,7 +68,7 @@ func expireAllAdminSessions(t *testing.T, store *AdminStore) {
 func adminUserLastLogin(t *testing.T, store *AdminStore, userID string) *time.Time {
 	t.Helper()
 	var raw sql.NullString
-	if err := store.db.QueryRow(`SELECT last_login FROM admin_users WHERE id = ?`, userID).Scan(&raw); err != nil {
+	if err := store.db.QueryRow(`SELECT last_login FROM users WHERE id = ?`, userID).Scan(&raw); err != nil {
 		t.Fatalf("load admin user last_login: %v", err)
 	}
 	lastLogin, err := parseOptionalTime(raw)
@@ -322,7 +322,7 @@ func TestAdminStore_ResetAdminUser(t *testing.T) {
 	}
 
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM admin_users`).Scan(&count); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		t.Fatalf("count admin users: %v", err)
 	}
 	if count != 1 {
@@ -994,7 +994,7 @@ func TestAdminStore_CreateSession_SaveFailureRollsBack(t *testing.T) {
 	store.failSaveErr = saveErr
 	store.failSaveCount = 1
 
-	session, err := store.CreateSession("user-1", "admin", "admin", "127.0.0.1", "ua")
+	session, err := store.CreateSession(user.ID, user.Username, user.Role, "127.0.0.1", "ua")
 	if !errors.Is(err, saveErr) {
 		t.Fatalf("CreateSession should return save error, got %v", err)
 	}

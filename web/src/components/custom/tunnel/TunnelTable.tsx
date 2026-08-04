@@ -27,6 +27,7 @@ import {
   type TunnelBatchAction,
 } from "@/hooks/use-tunnel-mutations";
 import type { Client } from "@/types";
+import type { ResourceScope } from "@/lib/resource-scope";
 import { getClientDisplayName } from "@/lib/client-utils";
 import {
   getTrafficSeriesKey,
@@ -41,20 +42,22 @@ import {
 } from "@/components/custom/tunnel/TunnelTable.helpers";
 
 interface TunnelTableProps {
+  scope: ResourceScope;
   client: Client;
   clients?: Client[];
 }
 
-export function TunnelTable({ client, clients = [client] }: TunnelTableProps) {
+export function TunnelTable({ scope, client, clients = [client] }: TunnelTableProps) {
   const { t } = useTranslation();
   const [createOpen, setCreateOpen] = useState(false);
-  const batchTunnelAction = useBatchTunnelAction();
+  const batchTunnelAction = useBatchTunnelAction(scope);
   const {
     data: trafficData,
     isLoading: isTraffic24hLoading,
     isError: isTraffic24hError,
-  } = useClientTraffic(client.id, "24h");
+  } = useClientTraffic(scope, client.id, "24h");
   const { data: ownerTunnels } = useClientTunnelsByRole(
+    scope,
     client.id,
     CLIENT_DETAIL_TUNNEL_ROLE,
   );
@@ -112,6 +115,7 @@ export function TunnelTable({ client, clients = [client] }: TunnelTableProps) {
   return (
     <>
       <TunnelListTable
+        scope={scope}
         tunnels={tunnels}
         clients={clients}
         title={t("dashboard.childTunnels")}
@@ -185,6 +189,7 @@ export function TunnelTable({ client, clients = [client] }: TunnelTableProps) {
         }
       />
       <TunnelDialog
+        scope={scope}
         mode="create"
         clientId={client.id}
         clients={clients}

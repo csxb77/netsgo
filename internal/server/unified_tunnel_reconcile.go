@@ -143,6 +143,21 @@ func (s *Server) reconcileUnifiedTunnel(tunnelID, reason string) error {
 
 func (s *Server) reconcileStoredUnifiedTunnel(stored StoredTunnel, reason string) error {
 	_ = reason // reserved for runtime diagnostics and retry scheduling.
+	// Desired running state is not authorization. A disabled or unresolved
+	// owner must never regain a tunnel runtime merely because the periodic
+	// reconciler, a client reconnect, or server restart reaches this code path.
+	if stored.DesiredState == protocol.ProxyDesiredStateRunning {
+		operational, err := s.isStoredTunnelOwnerOperational(stored)
+		if err != nil {
+			return err
+		}
+		if !operational {
+			if err := s.unprovisionStoredUnifiedTunnel(stored, "owner_disabled", true); err != nil {
+				return err
+			}
+			return s.updateStoredTunnelRuntime(stored, protocol.ProxyRuntimeStateOffline, "")
+		}
+	}
 	switch stored.Topology {
 	case TunnelTopologyClientToClient:
 		return s.reconcileClientRelayTunnel(stored)
@@ -151,6 +166,23 @@ func (s *Server) reconcileStoredUnifiedTunnel(stored StoredTunnel, reason string
 	default:
 		return fmt.Errorf("unsupported tunnel topology %q", stored.Topology)
 	}
+}
+
+// isStoredTunnelOwnerOperational resolves the persisted user owner for every
+// runtime reconcile. Missing storage, an empty owner, a missing user, and an
+// unknown status all fail closed; only an explicit active user returns true.
+func (s *Server) isStoredTunnelOwnerOperational(stored StoredTunnel) (bool, error) {
+	if s == nil || s.auth == nil || s.auth.adminStore == nil {
+		return false, fmt.Errorf("user store is unavailable while reconciling tunnel")
+	}
+	if strings.TrimSpace(stored.OwnerUserID) == "" {
+		return false, fmt.Errorf("tunnel %q has no user owner", stored.ID)
+	}
+	operational, err := s.auth.adminStore.IsUserOperational(stored.OwnerUserID)
+	if err != nil {
+		return false, fmt.Errorf("resolve tunnel owner %q: %w", stored.OwnerUserID, err)
+	}
+	return operational, nil
 }
 
 func (s *Server) scheduleUnifiedTunnelReconcile(stored StoredTunnel, reason string) {

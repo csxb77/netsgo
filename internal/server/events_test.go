@@ -141,6 +141,50 @@ loop:
 	}
 }
 
+func TestSSEConnectionRegistryTargetsSessionAndUser(t *testing.T) {
+	s := New(0)
+	firstContext, firstCancel := context.WithCancel(context.Background())
+	secondContext, secondCancel := context.WithCancel(context.Background())
+	otherContext, otherCancel := context.WithCancel(context.Background())
+	defer firstCancel()
+	defer secondCancel()
+	defer otherCancel()
+
+	registry := s.getSSEConnectionRegistry()
+	firstRelease := registry.register("user-a", "session-a-1", firstCancel)
+	secondRelease := registry.register("user-a", "session-a-2", secondCancel)
+	otherRelease := registry.register("user-b", "session-b-1", otherCancel)
+	defer firstRelease()
+	defer secondRelease()
+	defer otherRelease()
+
+	s.cancelSSEForSession("session-a-1", "test")
+	select {
+	case <-firstContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("session cancellation did not close its SSE context")
+	}
+	select {
+	case <-secondContext.Done():
+		t.Fatal("session cancellation closed another session for the same user")
+	case <-otherContext.Done():
+		t.Fatal("session cancellation closed another user")
+	default:
+	}
+
+	s.cancelSSEForUser("user-a", "test")
+	select {
+	case <-secondContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("user cancellation did not close remaining user SSE context")
+	}
+	select {
+	case <-otherContext.Done():
+		t.Fatal("user cancellation closed another user")
+	default:
+	}
+}
+
 func TestHandleSSE_DisconnectCleanup(t *testing.T) {
 	s := New(0)
 	// mock auth: SSE 不需要认证 (实际中前面会有 RequireAuth)，这里直接调 handleSSE

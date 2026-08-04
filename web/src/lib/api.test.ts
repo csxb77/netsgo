@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { shouldLogoutOnAPIError, tunnelApi } from './api';
+import { SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
 
 describe('shouldLogoutOnAPIError', () => {
   test('logs out when the server reports an expired or missing session', () => {
@@ -36,7 +37,7 @@ describe('tunnelApi.migrate', () => {
     }) as typeof fetch;
 
     try {
-      await tunnelApi.migrate('tunnel/with space', {
+      await tunnelApi.migrate(SELF_RESOURCE_SCOPE, 'tunnel/with space', {
         expected_revision: 12,
         target_client_id: 'client-next',
       });

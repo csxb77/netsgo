@@ -28,21 +28,41 @@ func openServerDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	compatible, strict := partitionServerMigrations(migrations)
-	db, err := storage.Open(path, strict)
+	_, strict := partitionServerMigrations(migrations)
+	if err := storage.PreflightStrictMigrations(path, "schema_migrations", strict); err != nil {
+		return nil, err
+	}
+	db, err := storage.OpenConfigured(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := storage.ApplyCompatibleMigrations(db, serverCompatibleMigrationTable, compatible); err != nil {
+	if err := storage.ApplyMigrationPlan(db, serverMigrationPlan(migrations)); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
 }
 
+func serverMigrationPlan(migrations []storage.Migration) []storage.MigrationPlanItem {
+	plan := make([]storage.MigrationPlanItem, 0, len(migrations))
+	for _, migration := range migrations {
+		compatible := isCompatibleServerMigration(migration.Name)
+		ledger := "schema_migrations"
+		if compatible {
+			ledger = serverCompatibleMigrationTable
+		}
+		plan = append(plan, storage.MigrationPlanItem{
+			Migration: migration,
+			Ledger:    ledger,
+			Strict:    !compatible,
+		})
+	}
+	return plan
+}
+
 func partitionServerMigrations(migrations []storage.Migration) (compatible, strict []storage.Migration) {
 	for _, migration := range migrations {
-		if migration.Name == "010_client_auth_control" || migration.Name == "011_activity_events" {
+		if isCompatibleServerMigration(migration.Name) {
 			compatible = append(compatible, migration)
 			continue
 		}
@@ -51,8 +71,21 @@ func partitionServerMigrations(migrations []storage.Migration) (compatible, stri
 	return compatible, strict
 }
 
+func isCompatibleServerMigration(name string) bool {
+	return name == "010_client_auth_control" || name == "011_activity_events"
+}
+
 func serverMigrations() ([]storage.Migration, error) {
-	return loadMigrations(serverMigrationFS, serverMigrationDir)
+	migrations, err := loadMigrations(serverMigrationFS, serverMigrationDir)
+	if err != nil {
+		return nil, err
+	}
+	for index := range migrations {
+		if migrations[index].Name == "012_multi_user_ownership" {
+			migrations[index].ValidateTx = validateMultiUserOwnershipMigrationTx
+		}
+	}
+	return migrations, nil
 }
 
 func loadMigrations(fsys fs.FS, dir string) ([]storage.Migration, error) {

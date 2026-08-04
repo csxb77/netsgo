@@ -6,6 +6,7 @@ import { ActivityItem } from './ActivityItem';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useActivity } from '@/hooks/use-activity';
+import type { ActivityReadScope } from '@/lib/api';
 import { activityDayKey, formatActivityDay } from '@/lib/activity-format';
 import type { ActivityItem as ActivityItemType, ActivityQuery } from '@/types';
 
@@ -44,9 +45,17 @@ function TimelineState({ icon: Icon, title, description, action }: {
   );
 }
 
-export function ActivityTimeline({ query, compact = false }: { query: ActivityQuery; compact?: boolean }) {
+export function ActivityTimeline({
+  readScope,
+  query,
+  compact = false,
+}: {
+  readScope: ActivityReadScope;
+  query: ActivityQuery;
+  compact?: boolean;
+}) {
   const { t } = useTranslation();
-  const activity = useActivity(query);
+  const activity = useActivity(readScope, query);
 
   const groups = useMemo(() => {
     const byDay = new Map<string, ActivityItemType[]>();

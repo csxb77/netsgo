@@ -87,7 +87,7 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.auth.adminStore.ValidateAdminPassword(req.Username, req.Password)
+	user, err := s.auth.adminStore.ValidateUserPassword(req.Username, req.Password)
 	if err != nil {
 		if s.auth.loginLimiter != nil {
 			s.auth.loginLimiter.RecordFailure(ip)
@@ -97,7 +97,7 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("Admin user logged in", "user", user.Username, "module", "auth")
+	slog.Info("Web user logged in", "user", user.Username, "is_admin", user.IsAdmin, "module", "auth")
 	if s.auth.loginLimiter != nil {
 		s.auth.loginLimiter.ResetFailures(ip)
 	}
@@ -125,6 +125,7 @@ func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "logout_persist_failed", "failed to persist logout")
 		return
 	}
+	s.cancelSSEForSession(info.SessionID, "logout")
 	s.publishActivityID(activityID)
 	slog.Info("Admin user logged out", "user", info.Username, "module", "auth")
 
@@ -202,10 +203,18 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
 		return
 	}
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
-		keys := s.auth.adminStore.GetAPIKeys()
+		keys, err := s.auth.adminStore.GetAPIKeysForUser(scope.OwnerUserID)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "api_key_list_failed", "failed to list api keys")
+			return
+		}
 		encodeJSON(w, http.StatusOK, sanitizeAPIKeys(keys))
 
 	case http.MethodPost:
@@ -237,7 +246,7 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, "api_key_generate_failed", "failed to generate api key")
 			return
 		}
-		key, activityID, err := s.auth.adminStore.AddAPIKeyWithActivity(req.Name, rawKey, req.Permissions, expiresAt, req.MaxUses, s.activityActorForRequest(r))
+		key, activityID, err := s.auth.adminStore.AddAPIKeyForUserWithActivity(scope.OwnerUserID, req.Name, rawKey, req.Permissions, expiresAt, req.MaxUses, s.activityActorForRequest(r))
 		if err != nil {
 			encodeJSON(w, http.StatusBadRequest, map[string]any{
 				"error":   err.Error(),
@@ -284,6 +293,10 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
 		return
 	}
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 
 	keyID := r.PathValue("id")
 	action := r.PathValue("action")
@@ -301,7 +314,7 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		activityID, err := s.auth.adminStore.SetAPIKeyActiveWithActivity(keyID, active, s.activityActorForRequest(r))
+		activityID, err := s.auth.adminStore.SetAPIKeyActiveForUserWithActivity(scope.OwnerUserID, keyID, active, s.activityActorForRequest(r))
 		if err != nil {
 			writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
 			return
@@ -317,7 +330,7 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 		encodeJSON(w, http.StatusOK, map[string]any{"success": true})
 
 	case http.MethodDelete:
-		activityID, err := s.auth.adminStore.DeleteAPIKeyWithActivity(keyID, s.activityActorForRequest(r))
+		activityID, err := s.auth.adminStore.DeleteAPIKeyForUserWithActivity(scope.OwnerUserID, keyID, s.activityActorForRequest(r))
 		if err != nil {
 			writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
 			return

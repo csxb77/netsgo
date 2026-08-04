@@ -21,7 +21,11 @@ type consoleData struct {
 }
 
 func (s *Server) collectConsoleData() consoleData {
-	clients := s.collectClientViews()
+	return s.collectConsoleDataForUser("")
+}
+
+func (s *Server) collectConsoleDataForUser(ownerUserID string) consoleData {
+	clients := s.collectClientViewsForUser(ownerUserID)
 	return consoleData{
 		Clients: clients,
 		Summary: summarizeConsoleClients(clients),

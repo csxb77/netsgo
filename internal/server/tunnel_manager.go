@@ -251,7 +251,51 @@ func (s *Server) emitTunnelChangedLocked(clientID string, tunnel protocol.ProxyC
 		"action":    action,
 		"tunnel":    tunnel,
 	}
-	s.events.PublishJSON("tunnel_changed", payload)
+	ownerUserID := s.tunnelEventScopeUserID(clientID, tunnel)
+	if ownerUserID == "" {
+		log.Printf("⚠️ suppressing unscoped tunnel_changed action=%s client_id=%s tunnel_id=%s", action, clientID, tunnel.ID)
+		return
+	}
+	s.events.PublishScopedJSON("tunnel_changed", ownerUserID, payload)
+}
+
+// tunnelEventScopeUserID resolves event delivery from durable ownership first,
+// then from the logical connection and registered client fallback. An event
+// whose owner cannot be resolved is deliberately suppressed instead of being
+// widened into an administrator-global browser broadcast.
+func (s *Server) tunnelEventScopeUserID(clientID string, tunnel protocol.ProxyConfig) string {
+	if s.store != nil && tunnel.ID != "" {
+		stored, err := s.store.GetTunnelByID(tunnel.ID)
+		if err == nil && stored.OwnerUserID != "" {
+			return stored.OwnerUserID
+		}
+		if err != nil && !errors.Is(err, ErrTunnelNotFound) {
+			log.Printf("⚠️ failed to resolve tunnel event owner: tunnel_id=%s err=%v", tunnel.ID, err)
+		}
+	}
+
+	candidates := []string{clientID, tunnel.OwnerClientID, tunnel.ClientID}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if value, ok := s.clients.Load(candidate); ok {
+			if ownerUserID := value.(*ClientConn).OwnerUserID; ownerUserID != "" {
+				return ownerUserID
+			}
+		}
+		if s.auth != nil && s.auth.adminStore != nil {
+			if registered, ok := s.auth.adminStore.GetRegisteredClient(candidate); ok && registered.OwnerUserID != "" {
+				return registered.OwnerUserID
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Server) emitTunnelChangedIfStored(clientID string, tunnel protocol.ProxyConfig, action string) {

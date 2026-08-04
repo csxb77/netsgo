@@ -32,7 +32,11 @@ type Server struct {
 	activityBootID                      string              // random per complete server start; scopes lifecycle dedupe keys
 	serverDBCloseOnce                   sync.Once
 	serverDBCloseErr                    error
+	sseConnectionMu                     sync.Mutex
+	sseConnections                      *sseConnectionRegistry
 	clientTunnelMutationMu              sync.Mutex        // serializes registered-client deletion with tunnel target migration
+	userManagementMu                    sync.Mutex        // serializes user status/admin/delete transactions and last-admin checks
+	userLifecycleLocks                  sync.Map          // userID -> *sync.Mutex; serializes one user's runtime convergence
 	serverConfigMutationMu              sync.Mutex        // serializes config persistence with port-policy enforcement
 	tunnelEventMu                       sync.Mutex        // preserves tunnel_changed ordering across state checks and publication
 	startTime                           time.Time         // server start time
@@ -77,7 +81,10 @@ type Server struct {
 
 // ClientConn represents a connected client.
 type ClientConn struct {
-	ID             string
+	ID string
+	// OwnerUserID is resolved exclusively by Server control-channel
+	// authentication. It is never accepted from a Client protocol message.
+	OwnerUserID    string
 	InstallID      string
 	Info           protocol.ClientInfo
 	infoMu         sync.RWMutex
@@ -112,6 +119,7 @@ func New(port int) *Server {
 		Port:                        port,
 		AllowLoopbackManagementHost: true,
 		events:                      NewEventBus(),
+		sseConnections:              newSSEConnectionRegistry(),
 		trafficAccumulator:          newTrafficAccumulator(),
 		auth:                        newAuthService(),
 		sessions:                    newSessionManager(),

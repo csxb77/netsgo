@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -18,6 +19,37 @@ func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_activity_query", err.Error())
 		return
+	}
+	if resourceScope, ok := resourceScopeFromContext(r.Context()); ok {
+		// Self and administrator-target routes own the scope in middleware; a
+		// query parameter must never widen it.
+		query.ScopeUserID = resourceScope.OwnerUserID
+	} else if rawUserID := r.URL.Query().Get("user_id"); rawUserID != "" {
+		// Only the administrator-global route reaches this branch. Validate the
+		// selected target so a typo is not indistinguishable from an empty log.
+		principal := GetPrincipalFromContext(r.Context())
+		if principal == nil || !principal.IsAdmin {
+			writeAPIError(w, http.StatusForbidden, "activity_read_forbidden", "administrator access required")
+			return
+		}
+		userID, normalizeErr := normalizeActivityUserID(rawUserID, "scope")
+		if normalizeErr != nil || userID == "" {
+			writeAPIError(w, http.StatusBadRequest, "invalid_activity_user", "user_id is invalid")
+			return
+		}
+		if s.auth == nil || s.auth.adminStore == nil {
+			writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
+			return
+		}
+		if _, getErr := s.auth.adminStore.GetUser(userID); getErr != nil {
+			if errors.Is(getErr, ErrUserNotFound) {
+				writeAPIError(w, http.StatusNotFound, "user_not_found", "user not found")
+				return
+			}
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
+			return
+		}
+		query.ScopeUserID = userID
 	}
 	page, err := s.activityStore.Query(query)
 	if err != nil {

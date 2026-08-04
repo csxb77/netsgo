@@ -9,6 +9,10 @@ import (
 )
 
 func (s *Server) handleUpdateDisplayName(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
 	if clientID == "" {
 		writeAPIError(w, http.StatusBadRequest, "missing_client_id", "missing client id")
@@ -25,6 +29,10 @@ func (s *Server) handleUpdateDisplayName(w http.ResponseWriter, r *http.Request)
 
 	if s.auth.adminStore == nil {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store unavailable")
+		return
+	}
+	if _, ok := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !ok {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
 		return
 	}
 
@@ -55,6 +63,10 @@ func validateBandwidthSettings(settings protocol.BandwidthSettings) error {
 }
 
 func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
 	if clientID == "" {
 		writeAPIError(w, http.StatusBadRequest, "missing_client_id", "missing client id")
@@ -87,6 +99,10 @@ func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store unavailable")
 		return
 	}
+	if _, ok := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !ok {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
+		return
+	}
 
 	activityID, err := s.auth.adminStore.UpdateClientBandwidthSettingsWithActivity(clientID, settings, s.activityActorForRequest(r))
 	if err != nil {
@@ -114,6 +130,10 @@ func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
 	if clientID == "" {
 		writeAPIError(w, http.StatusBadRequest, "missing_client_id", "missing client id")
@@ -121,6 +141,10 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.auth.adminStore == nil {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store unavailable")
+		return
+	}
+	if _, ok := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !ok {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
 		return
 	}
 	s.clientTunnelMutationMu.Lock()

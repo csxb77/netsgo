@@ -277,10 +277,14 @@ func TestAPI_ProtectedRoutes_LoginLogoutAndSingleSession(t *testing.T) {
 func TestAPI_AdminKeys_CreateAndList(t *testing.T) {
 	s, cleanup := setupTestServerWithDB(t, true)
 	defer cleanup()
+	admin, err := s.auth.adminStore.ValidateAdminPassword("admin", "password123")
+	if err != nil {
+		t.Fatalf("load test administrator: %v", err)
+	}
 
 	// 1. Create API key (POST)
 	body := []byte(`{"name":"test-key","permissions":["connect"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewReader(body))
+	req := withTestResourceScope(httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewReader(body)), admin.ID)
 	w := httptest.NewRecorder()
 	s.handleAPIAdminKeys(w, req)
 
@@ -312,7 +316,7 @@ func TestAPI_AdminKeys_CreateAndList(t *testing.T) {
 	}
 
 	// 2. Get API keys (GET)
-	req2 := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
+	req2 := withTestResourceScope(httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil), admin.ID)
 	w2 := httptest.NewRecorder()
 	s.handleAPIAdminKeys(w2, req2)
 
@@ -339,12 +343,16 @@ func TestAPI_AdminKeys_CreateAndList(t *testing.T) {
 func TestAPI_AdminKeys_CreateFailsWhenPersistFails(t *testing.T) {
 	s, cleanup := setupTestServerWithDB(t, true)
 	defer cleanup()
+	admin, err := s.auth.adminStore.ValidateAdminPassword("admin", "password123")
+	if err != nil {
+		t.Fatalf("load test administrator: %v", err)
+	}
 
 	s.auth.adminStore.failSaveErr = errors.New("save failed")
 	s.auth.adminStore.failSaveCount = 1
 
 	body := []byte(`{"name":"test-key","permissions":["connect"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewReader(body))
+	req := withTestResourceScope(httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewReader(body)), admin.ID)
 	w := httptest.NewRecorder()
 
 	s.handleAPIAdminKeys(w, req)

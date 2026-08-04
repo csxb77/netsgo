@@ -146,6 +146,37 @@ func (s *Server) invalidateLogicalSessionIfCurrentWithCause(clientID string, gen
 	return s.invalidateLogicalSessionIfCurrentLocked(clientID, generation, cause)
 }
 
+// invalidateLogicalSessionsForUser closes every currently published logical
+// Client session owned by userID. It deliberately reuses the single-session
+// invalidation path so control WebSockets, data yamux sessions, P2P state, and
+// runtime allocations converge together instead of becoming separate cleanup
+// mechanisms.
+func (s *Server) invalidateLogicalSessionsForUser(userID, reason string) int {
+	if userID == "" {
+		return 0
+	}
+
+	type sessionRef struct {
+		clientID   string
+		generation uint64
+	}
+	refs := make([]sessionRef, 0)
+	s.RangeClients(func(clientID string, client *ClientConn) bool {
+		if client.OwnerUserID == userID {
+			refs = append(refs, sessionRef{clientID: clientID, generation: client.generation})
+		}
+		return true
+	})
+
+	invalidated := 0
+	for _, ref := range refs {
+		if s.invalidateLogicalSessionIfCurrent(ref.clientID, ref.generation, reason) {
+			invalidated++
+		}
+	}
+	return invalidated
+}
+
 func (s *Server) invalidateLogicalSessionIfCurrentLocked(clientID string, generation uint64, cause clientDisconnectCause) bool {
 	value, ok := s.clients.Load(clientID)
 	if !ok {
@@ -206,7 +237,7 @@ func (s *Server) invalidateLogicalSessionIfCurrentLocked(clientID string, genera
 		s.publishActivityID(activityID)
 		info := client.GetInfo()
 		log.Printf("🔌 Client disconnected: %s [ID: %s, reason=%s]", info.Hostname, client.ID, cause.ReasonCode)
-		s.events.PublishJSON("client_offline", map[string]any{
+		s.events.PublishScopedJSON("client_offline", client.OwnerUserID, map[string]any{
 			"client_id": client.ID,
 		})
 	}

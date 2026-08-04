@@ -322,6 +322,7 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 	}
 
 	if s.events != nil {
+		s.cancelAllSSE("server_shutdown")
 		s.events.Close()
 		log.Printf("📡 SSE event bus closed")
 	}

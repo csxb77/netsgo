@@ -15,6 +15,8 @@ type authSuccessPayload struct {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 		Role     string `json:"role"`
+		IsAdmin  bool   `json:"is_admin"`
+		Status   string `json:"status"`
 	} `json:"user"`
 }
 
@@ -24,19 +26,28 @@ func newAuthSuccessPayload(token string, user AdminUser) authSuccessPayload {
 	payload.User.ID = user.ID
 	payload.User.Username = user.Username
 	payload.User.Role = user.Role
+	payload.User.IsAdmin = user.IsAdmin
+	payload.User.Status = string(user.Status)
 	return payload
 }
 
 func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request, user AdminUser) {
-	actor := NewActivityActor("admin", user.ID, user.Username, s.clientIP(r), "")
+	actorType := "user"
+	if user.IsAdmin {
+		actorType = "admin"
+	}
+	actor := NewActivityActor(actorType, user.ID, user.Username, s.clientIP(r), "")
 	if raw, secretErr := s.auth.adminStore.GetJWTSecret(); secretErr == nil {
-		actor = NewActivityActor("admin", user.ID, user.Username, s.clientIP(r), string(raw))
+		actor = NewActivityActor(actorType, user.ID, user.Username, s.clientIP(r), string(raw))
 	}
 	session, activityID, err := s.auth.adminStore.CreateSessionWithActivity(user.ID, user.Username, user.Role, r.RemoteAddr, r.UserAgent(), actor)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "session_persist_failed", "failed to persist session")
 		return
 	}
+	// Creating a login session replaces every prior session for this user.
+	// Terminate any old event streams only after that replacement committed.
+	s.cancelSSEForUser(user.ID, "login_session_replaced")
 	s.publishActivityID(activityID)
 	token, err := s.GenerateAdminToken(session)
 	if err != nil {
@@ -346,6 +357,7 @@ func (s *Server) handleAPIAdminSecurityUsername(w http.ResponseWriter, r *http.R
 		writeAPIError(w, http.StatusBadRequest, "username_update_failed", err.Error())
 		return
 	}
+	s.cancelSSEForUser(user.ID, "admin_username_changed")
 	s.publishActivityID(activityID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true})
@@ -378,6 +390,7 @@ func (s *Server) handleAPIAdminSecurityPassword(w http.ResponseWriter, r *http.R
 		writeAPIError(w, http.StatusBadRequest, "password_update_failed", err.Error())
 		return
 	}
+	s.cancelSSEForUser(user.ID, "admin_password_changed")
 	s.publishActivityID(activityID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true})
@@ -439,6 +452,7 @@ func (s *Server) handleAPIAdminSecurityTOTPConfirm(w http.ResponseWriter, r *htt
 		writeAPIError(w, http.StatusBadRequest, "totp_confirm_failed", err.Error())
 		return
 	}
+	s.cancelSSEForUser(user.ID, "totp_enabled")
 	s.publishActivityID(activityID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{
@@ -474,6 +488,7 @@ func (s *Server) handleAPIAdminSecurityTOTPDisable(w http.ResponseWriter, r *htt
 		writeAPIError(w, http.StatusInternalServerError, "totp_disable_failed", "failed to disable totp")
 		return
 	}
+	s.cancelSSEForUser(user.ID, "totp_disabled")
 	s.publishActivityID(activityID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true})
@@ -505,6 +520,7 @@ func (s *Server) handleAPIAdminSecurityRecoveryRegenerate(w http.ResponseWriter,
 		writeAPIError(w, http.StatusInternalServerError, "recovery_codes_regenerate_failed", "failed to regenerate recovery codes")
 		return
 	}
+	s.cancelSSEForUser(user.ID, "recovery_codes_regenerated")
 	s.publishActivityID(activityID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true, "recovery_codes": codes})
@@ -574,6 +590,7 @@ func (s *Server) handleAPIAdminSecurityPasskeyItem(w http.ResponseWriter, r *htt
 			writeAPIError(w, http.StatusBadRequest, "passkey_delete_failed", err.Error())
 			return
 		}
+		s.cancelSSEForUser(user.ID, "passkey_deleted")
 		s.publishActivityID(activityID)
 		s.clearSessionCookie(w, r)
 		encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true})
@@ -717,6 +734,7 @@ func (s *Server) handleAPIAdminSecurityPasskeyFinish(w http.ResponseWriter, r *h
 		writeAPIError(w, http.StatusInternalServerError, "passkey_register_failed", "failed to save passkey")
 		return
 	}
+	s.cancelSSEForUser(user.ID, "passkey_added")
 	s.publishActivityID(activityID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true, "passkey": sanitizePasskey(*passkey)})
@@ -770,7 +788,7 @@ func sanitizePasskey(passkey AdminPasskey) adminPasskeyResponse {
 }
 
 func (s *Server) maybeBeginMFALogin(w http.ResponseWriter, r *http.Request, user *AdminUser) bool {
-	if user == nil || !user.TOTPEnabled {
+	if user == nil || !user.IsAdmin || !user.TOTPEnabled {
 		return false
 	}
 	challenge, err := s.auth.adminStore.StoreAuthChallenge(user.ID, adminAuthChallengeKindMFA, "{}", nil, adminAuthChallengeDefaultTTL)

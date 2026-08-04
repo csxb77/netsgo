@@ -117,6 +117,7 @@ func (s *Server) deleteRegisteredClientWithActivity(clientID string, actor Activ
 	payload := newActivityPayload(ActivityCategoryClient, "deleted", ActivitySummaryArgs{ClientName: activityClientDisplayName(client), Count: len(tunnels)})
 	clientEventID, err := s.activityStore.appendTx(tx, ActivityEventSpec{
 		OccurredAt: time.Now().UTC(), Category: ActivityCategoryClient, Action: "deleted", Source: "server", Actor: actor, Payload: payload,
+		ScopeUserID: client.OwnerUserID, SubjectUserID: client.OwnerUserID,
 		Clients: []ActivityClientSubject{{ClientID: client.ID, Relation: "subject", DisplayName: client.DisplayName, Hostname: client.Info.Hostname}},
 	})
 	if err != nil {

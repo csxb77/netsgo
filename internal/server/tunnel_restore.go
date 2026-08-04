@@ -190,7 +190,7 @@ func (s *Server) restoreTunnels(client *ClientConn) {
 	}
 
 	if restoredCount > 0 && s.isCurrentLive(client.ID, client.generation) {
-		s.events.PublishJSON("tunnel_changed", map[string]any{
+		s.events.PublishScopedJSON("tunnel_changed", client.OwnerUserID, map[string]any{
 			"client_id": client.ID,
 			"action":    "restored_batch",
 			"count":     restoredCount,

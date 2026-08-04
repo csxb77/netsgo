@@ -28,7 +28,7 @@ function activitySummary(item: ActivityItemType, t: TFunction) {
   });
 }
 
-const namedActorTypes = new Set(['admin', 'client', 'system', 'security']);
+const namedActorTypes = new Set(['admin', 'user', 'client', 'system', 'security']);
 
 // 摘要文案通常已经点名了操作方和实体，重复渲染同一个名字只会制造噪音。
 function actorLabel(item: ActivityItemType, summary: string, t: TFunction) {

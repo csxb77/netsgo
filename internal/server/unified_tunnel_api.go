@@ -184,7 +184,11 @@ func (s *Server) handleUnifiedTunnelItem(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleUnifiedTunnelAction(w http.ResponseWriter, r *http.Request) {
-	current, ok, err := s.findUnifiedTunnelSpecByID(r.PathValue("tunnel_id"))
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
+	current, ok, err := s.findUnifiedTunnelSpecByIDForUser(scope.OwnerUserID, r.PathValue("tunnel_id"))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_lookup_failed", err.Error())
 		return
@@ -261,8 +265,12 @@ func canResumeUnifiedTunnelSpec(spec tunnelSpecAPI) bool {
 		(desiredState == protocol.ProxyDesiredStateRunning && spec.RuntimeState == protocol.ProxyRuntimeStateError)
 }
 
-func (s *Server) handleListUnifiedTunnels(w http.ResponseWriter, _ *http.Request) {
-	tunnels, err := s.allUnifiedTunnelSpecs()
+func (s *Server) handleListUnifiedTunnels(w http.ResponseWriter, r *http.Request) {
+	scope, ok := requireResourceScope(w, r)
+	if !ok {
+		return
+	}
+	tunnels, err := s.allUnifiedTunnelSpecsForUser(scope.OwnerUserID)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_list_failed", err.Error())
 		return
@@ -271,7 +279,11 @@ func (s *Server) handleListUnifiedTunnels(w http.ResponseWriter, _ *http.Request
 }
 
 func (s *Server) handleGetUnifiedTunnel(w http.ResponseWriter, r *http.Request) {
-	spec, ok, err := s.findUnifiedTunnelSpecByID(r.PathValue("tunnel_id"))
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
+	spec, ok, err := s.findUnifiedTunnelSpecByIDForUser(scope.OwnerUserID, r.PathValue("tunnel_id"))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_lookup_failed", err.Error())
 		return
@@ -284,7 +296,15 @@ func (s *Server) handleGetUnifiedTunnel(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleClientTunnels(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
+	if _, exists := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !exists {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
+		return
+	}
 	role := strings.TrimSpace(r.URL.Query().Get("role"))
 	if role == "" {
 		role = "owner"
@@ -294,7 +314,7 @@ func (s *Server) handleClientTunnels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tunnels, err := s.allUnifiedTunnelProxyConfigs()
+	tunnels, err := s.allUnifiedTunnelProxyConfigsForUser(scope.OwnerUserID)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_list_failed", err.Error())
 		return
@@ -341,13 +361,17 @@ func unifiedTunnelProxyConfigMatchesClientRole(tunnel protocol.ProxyConfig, clie
 }
 
 func (s *Server) handleCreateUnifiedTunnel(w http.ResponseWriter, r *http.Request) {
+	scope, ok := requireResourceScope(w, r)
+	if !ok {
+		return
+	}
 	var req tunnelCreateRequestAPI
 	if err := decodeJSONRequestBody(r, &req); err != nil {
 		writeJSONRequestDecodeError(w, err)
 		return
 	}
 
-	config, activityID, err := s.createUnifiedStoredTunnel(req, s.activityActorForRequest(r))
+	config, activityID, err := s.createUnifiedStoredTunnelForUser(scope.OwnerUserID, req, s.activityActorForRequest(r))
 	if err != nil {
 		status, payload := tunnelMutationErrorStatusAndBody(err)
 		encodeJSON(w, status, payload)
@@ -359,7 +383,11 @@ func (s *Server) handleCreateUnifiedTunnel(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleUpdateUnifiedTunnel(w http.ResponseWriter, r *http.Request) {
 	tunnelID := r.PathValue("tunnel_id")
-	current, ok, err := s.findUnifiedTunnelSpecByID(tunnelID)
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
+	current, ok, err := s.findUnifiedTunnelSpecByIDForUser(scope.OwnerUserID, tunnelID)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_lookup_failed", err.Error())
 		return
@@ -398,7 +426,11 @@ func (s *Server) handleUpdateUnifiedTunnel(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleUnifiedTunnelMigrate(w http.ResponseWriter, r *http.Request) {
-	current, ok, err := s.findUnifiedTunnelSpecByID(r.PathValue("tunnel_id"))
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
+	current, ok, err := s.findUnifiedTunnelSpecByIDForUser(scope.OwnerUserID, r.PathValue("tunnel_id"))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_lookup_failed", err.Error())
 		return
@@ -585,7 +617,11 @@ func revisionConflictPayload(message string, currentRevision int64) map[string]a
 }
 
 func (s *Server) handleDeleteUnifiedTunnel(w http.ResponseWriter, r *http.Request) {
-	current, ok, err := s.findUnifiedTunnelSpecByID(r.PathValue("tunnel_id"))
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
+	current, ok, err := s.findUnifiedTunnelSpecByIDForUser(scope.OwnerUserID, r.PathValue("tunnel_id"))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "tunnel_lookup_failed", err.Error())
 		return
@@ -883,6 +919,10 @@ func validateEndpointConfigComplexity(raw json.RawMessage) error {
 }
 
 func (s *Server) createUnifiedStoredTunnel(req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
+	return s.createUnifiedStoredTunnelForUser("", req, actor)
+}
+
+func (s *Server) createUnifiedStoredTunnelForUser(ownerUserID string, req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
 	if err := prepareHTTPHostMutationRequest(&req, nil); err != nil {
 		return StoredTunnel{}, 0, err
 	}
@@ -896,7 +936,12 @@ func (s *Server) createUnifiedStoredTunnel(req tunnelCreateRequestAPI, actor Act
 	if s.store == nil {
 		return StoredTunnel{}, 0, fmt.Errorf("tunnel store not initialized")
 	}
-	activityID, err := s.store.AddTunnelWithActivity(stored, actor)
+	var activityID int64
+	if ownerUserID != "" {
+		activityID, err = s.store.AddTunnelForUser(ownerUserID, stored, &actor)
+	} else {
+		activityID, err = s.store.AddTunnelWithActivity(stored, actor)
+	}
 	if err != nil {
 		return StoredTunnel{}, 0, err
 	}
@@ -936,6 +981,7 @@ func (s *Server) updateUnifiedStoredTunnel(current tunnelSpecAPI, expectedRevisi
 	}
 	stored.Revision = expectedRevision + 1
 	stored.CreatedAt = existing.CreatedAt
+	stored.OwnerUserID = existing.OwnerUserID
 	stored.UpdatedAt = time.Now().UTC()
 	stored.DesiredState = existing.DesiredState
 	stored.RuntimeState = protocol.ProxyRuntimeStateOffline
@@ -1585,6 +1631,9 @@ func computedRuntimeStateForStoredTunnel(stored StoredTunnel, s *Server) string 
 	if stored.DesiredState == protocol.ProxyDesiredStateStopped {
 		return protocol.ProxyRuntimeStateIdle
 	}
+	if s.ownerDisabledIssueForStoredTunnel(stored) != nil {
+		return protocol.ProxyRuntimeStateOffline
+	}
 	if !requiredTunnelClientsReady(stored, s) {
 		return protocol.ProxyRuntimeStateOffline
 	}
@@ -1620,13 +1669,42 @@ func computedRuntimeStateForStoredTunnel(stored StoredTunnel, s *Server) string 
 }
 
 func (s *Server) issuesForStoredTunnel(stored StoredTunnel) []protocol.TunnelIssue {
-	if stored.DesiredState == protocol.ProxyDesiredStateStopped || !requiredTunnelClientsReady(stored, s) {
+	if stored.DesiredState == protocol.ProxyDesiredStateStopped {
+		return nil
+	}
+	if ownerIssue := s.ownerDisabledIssueForStoredTunnel(stored); ownerIssue != nil {
+		return []protocol.TunnelIssue{*ownerIssue}
+	}
+	if !requiredTunnelClientsReady(stored, s) {
 		return nil
 	}
 	if issues := s.capabilityIssuesForStoredTunnel(stored); len(issues) > 0 {
 		return issues
 	}
 	return s.unifiedRuntime.issuesForStoredTunnel(stored, true)
+}
+
+// ownerDisabledIssueForStoredTunnel projects a user-lifecycle restriction as
+// a derived runtime issue. It deliberately does not persist an asset error:
+// re-enabling the owner removes the projection without changing the tunnel
+// configuration or desired state.
+func (s *Server) ownerDisabledIssueForStoredTunnel(stored StoredTunnel) *protocol.TunnelIssue {
+	if s == nil || stored.OwnerUserID == "" || s.auth == nil || s.auth.adminStore == nil {
+		return nil
+	}
+	operational, err := s.auth.adminStore.IsUserOperational(stored.OwnerUserID)
+	if err != nil || operational {
+		return nil
+	}
+	return &protocol.TunnelIssue{
+		Code:       protocol.TunnelIssueCodeOwnerDisabled,
+		Scope:      "owner",
+		ClientID:   stored.OwnerClientID,
+		Severity:   "warning",
+		Message:    "Tunnel owner is disabled",
+		Retryable:  true,
+		ObservedAt: time.Now().UTC(),
+	}
 }
 
 func (s *Server) capabilityIssuesForStoredTunnel(stored StoredTunnel) []protocol.TunnelIssue {
@@ -1736,10 +1814,17 @@ func unifiedTunnelViewKey(id, clientID, name string) string {
 }
 
 func (s *Server) allUnifiedTunnelSpecs() ([]tunnelSpecAPI, error) {
+	return s.allUnifiedTunnelSpecsForUser("")
+}
+
+func (s *Server) allUnifiedTunnelSpecsForUser(ownerUserID string) ([]tunnelSpecAPI, error) {
 	byID := map[string]tunnelSpecAPI{}
 
 	if s.store != nil {
 		stored, err := s.store.GetAllTunnels()
+		if ownerUserID != "" {
+			stored, err = s.store.GetTunnelsByUserID(ownerUserID)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1767,10 +1852,17 @@ func (s *Server) allUnifiedTunnelSpecs() ([]tunnelSpecAPI, error) {
 }
 
 func (s *Server) allUnifiedTunnelProxyConfigs() ([]protocol.ProxyConfig, error) {
+	return s.allUnifiedTunnelProxyConfigsForUser("")
+}
+
+func (s *Server) allUnifiedTunnelProxyConfigsForUser(ownerUserID string) ([]protocol.ProxyConfig, error) {
 	byID := map[string]protocol.ProxyConfig{}
 
 	if s.store != nil {
 		stored, err := s.store.GetAllTunnels()
+		if ownerUserID != "" {
+			stored, err = s.store.GetTunnelsByUserID(ownerUserID)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1798,12 +1890,19 @@ func (s *Server) allUnifiedTunnelProxyConfigs() ([]protocol.ProxyConfig, error) 
 }
 
 func (s *Server) findUnifiedTunnelSpecByID(id string) (tunnelSpecAPI, bool, error) {
+	return s.findUnifiedTunnelSpecByIDForUser("", id)
+}
+
+func (s *Server) findUnifiedTunnelSpecByIDForUser(ownerUserID, id string) (tunnelSpecAPI, bool, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return tunnelSpecAPI{}, false, nil
 	}
 	if s.store != nil {
 		stored, err := s.store.GetTunnelByID(id)
+		if ownerUserID != "" {
+			stored, err = s.store.GetTunnelByIDForUser(ownerUserID, id)
+		}
 		if err == nil {
 			return specFromStoredTunnel(stored, s), true, nil
 		}

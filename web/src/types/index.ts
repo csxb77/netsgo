@@ -542,10 +542,39 @@ export interface APIKey {
   use_count: number;
 }
 
-export interface AdminUser {
+export interface Principal {
   id: string;
   username: string;
-  role: string;
+  is_admin: boolean;
+}
+
+export interface UserActionCapabilities {
+  can_change_admin?: boolean;
+  can_disable?: boolean;
+  can_enable?: boolean;
+  can_delete?: boolean;
+  can_update_username?: boolean;
+  can_update_password?: boolean;
+  can_revoke_sessions?: boolean;
+}
+
+export interface ManagedUser extends Principal {
+  status: 'active' | 'disabled' | string;
+  created_at: string;
+  updated_at: string;
+  last_login?: string;
+  operational: boolean;
+  actions?: UserActionCapabilities;
+}
+
+export interface UserListResponse {
+  items: ManagedUser[];
+  next_cursor?: string | null;
+  has_more: boolean;
+}
+
+/** Administrator-security endpoints may return this narrower account view. */
+export interface AdminUser extends Principal {
   created_at: string;
   last_login?: string;
 }
@@ -554,23 +583,15 @@ export interface AdminUser {
 
 
 export interface LoginResponse {
-  token: string;
-  user: {
-    id: string;
-    username: string;
-    role: string;
-  };
+  token?: string;
+  user: Principal;
   mfa_required?: false;
 }
 
 export interface MFALoginResponse {
   mfa_required: true;
   mfa_token: string;
-  user: {
-    id: string;
-    username: string;
-    role: string;
-  };
+  user: Principal;
 }
 
 export type AuthLoginResponse = LoginResponse | MFALoginResponse;
@@ -677,7 +698,7 @@ export type ActivityCategory = 'client' | 'tunnel' | 'p2p' | 'admin' | 'security
 export type ActivityScope = 'global' | 'client' | 'tunnel';
 
 export interface ActivityActor {
-  type: 'admin' | 'client' | 'system' | 'security' | 'unknown';
+  type: 'admin' | 'user' | 'client' | 'system' | 'security' | 'unknown';
   id?: string;
   name?: string;
   ip_hash?: string;

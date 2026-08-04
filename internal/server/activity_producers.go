@@ -15,13 +15,17 @@ func (s *Server) activityActorForRequest(r *http.Request) ActivityActor {
 	if info == nil {
 		return ActivityActor{Type: "unknown"}
 	}
+	actorType := "user"
+	if info.IsAdmin {
+		actorType = "admin"
+	}
 	secret := ""
 	if s.auth != nil && s.auth.adminStore != nil {
 		if raw, err := s.auth.adminStore.GetJWTSecret(); err == nil {
 			secret = string(raw)
 		}
 	}
-	return NewActivityActor("admin", info.UserID, info.Username, s.clientIP(r), secret)
+	return NewActivityActor(actorType, info.UserID, info.Username, s.clientIP(r), secret)
 }
 
 func tunnelActivitySpec(action string, tunnel StoredTunnel, actor ActivityActor) ActivityEventSpec {
@@ -58,13 +62,15 @@ func tunnelActivitySpec(action string, tunnel StoredTunnel, actor ActivityActor)
 		})
 	}
 	return ActivityEventSpec{
-		OccurredAt: time.Now().UTC(),
-		Category:   ActivityCategoryTunnel,
-		Action:     action,
-		Source:     "server",
-		Actor:      actor,
-		Payload:    payload,
-		Clients:    clients,
+		OccurredAt:    time.Now().UTC(),
+		Category:      ActivityCategoryTunnel,
+		Action:        action,
+		Source:        "server",
+		Actor:         actor,
+		ScopeUserID:   tunnel.OwnerUserID,
+		SubjectUserID: tunnel.OwnerUserID,
+		Payload:       payload,
+		Clients:       clients,
 		Tunnels: []ActivityTunnelSubject{{
 			TunnelID: tunnel.ID,
 			Relation: "subject",
@@ -114,6 +120,10 @@ func (s *Server) publishActivityID(id int64) {
 	item, err := s.activityStore.GetByID(id)
 	if err != nil {
 		log.Printf("⚠️ Failed to load committed activity event %d: %v", id, err)
+		return
+	}
+	if item.ScopeUserID != "" {
+		s.events.PublishScopedJSON("activity_event", item.ScopeUserID, item)
 		return
 	}
 	s.events.PublishJSON("activity_event", item)

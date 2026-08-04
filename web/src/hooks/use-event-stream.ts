@@ -1,14 +1,17 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { QueryClient } from '@tanstack/react-query';
 import { useRouterState } from '@tanstack/react-router';
-import { activityApi, api } from '@/lib/api';
+import { activityApi, api, scopedConsoleSnapshotPath, scopedEventStreamPath, type ActivityReadScope } from '@/lib/api';
 import { EMPTY_CONSOLE_SUMMARY } from '@/lib/console-summary';
 import { useConnectionStore } from '@/stores/connection-store';
 import type { ConnectionStatus } from '@/stores/connection-store';
 import { useAuthStore } from '@/stores/auth-store';
+import { clearClientSessionAndRedirect } from '@/lib/session';
+import { useDashboardResourceScope } from '@/hooks/use-dashboard-scope';
 import { buildClientTrafficQueryKey } from '@/hooks/use-client-traffic';
-import { prependActivityToMatchingQueries } from '@/hooks/use-activity';
+import { activityReadScopeKey, prependActivityToMatchingQueries } from '@/hooks/use-activity';
+import { resourceScopeKey, scopedQueryKey, SELF_RESOURCE_SCOPE, type ResourceScope } from '@/lib/resource-scope';
 import type {
   Client,
   ActivityItem,
@@ -302,7 +305,12 @@ function snapshotDiagnostic(eventType: string, snapshot: ConsoleSnapshot, snapsh
   };
 }
 
-function applyConsoleSnapshot(queryClient: EventStreamQueryClient, snapshotState: EventStreamSnapshotState, snapshot: ConsoleSnapshot) {
+function applyConsoleSnapshot(
+  queryClient: EventStreamQueryClient,
+  scope: ResourceScope,
+  snapshotState: EventStreamSnapshotState,
+  snapshot: ConsoleSnapshot,
+) {
   const generatedAt = snapshotGeneratedAtMillis(snapshot);
   if (generatedAt !== undefined) {
     const appliedGeneratedAt = snapshotState.appliedGeneratedAt;
@@ -314,11 +322,11 @@ function applyConsoleSnapshot(queryClient: EventStreamQueryClient, snapshotState
 
   const summary = snapshotSummary(snapshot);
   if (Array.isArray(snapshot.clients)) {
-    queryClient.setQueryData<Client[]>(['clients'], snapshot.clients);
+    queryClient.setQueryData<Client[]>(scopedQueryKey(scope, 'clients'), snapshot.clients);
   }
-  queryClient.setQueryData<ConsoleSummary>(['console-summary'], summary);
+  queryClient.setQueryData<ConsoleSummary>(scopedQueryKey(scope, 'console-summary'), summary);
   if (snapshot.server_status) {
-    queryClient.setQueryData<ServerStatus>(['server-status'], {
+    queryClient.setQueryData<ServerStatus>(scopedQueryKey(scope, 'server-status'), {
       ...snapshot.server_status,
       summary,
     });
@@ -326,12 +334,16 @@ function applyConsoleSnapshot(queryClient: EventStreamQueryClient, snapshotState
   return true;
 }
 
-async function resyncConsoleSnapshot(queryClient: EventStreamQueryClient, snapshotState: EventStreamSnapshotState) {
+async function resyncConsoleSnapshot(
+  queryClient: EventStreamQueryClient,
+  scope: ResourceScope,
+  snapshotState: EventStreamSnapshotState,
+) {
   const snapshotRequestId = ++snapshotState.requestSeq;
   logEventStreamDiagnostic('snapshot_request_start', { eventType: 'snapshot_request', snapshotRequestId });
   let snapshot: ConsoleSnapshot;
   try {
-    snapshot = await api.get<ConsoleSnapshot>('/api/console/snapshot');
+    snapshot = await api.get<ConsoleSnapshot>(scopedConsoleSnapshotPath(scope));
   } catch (error) {
     if (snapshotRequestId !== snapshotState.requestSeq) {
       logEventStreamDiagnostic('snapshot_request_stale', { eventType: 'snapshot_request', snapshotRequestId });
@@ -344,19 +356,22 @@ async function resyncConsoleSnapshot(queryClient: EventStreamQueryClient, snapsh
     logEventStreamDiagnostic('snapshot_request_stale', diagnostic);
     return false;
   }
-  const applied = applyConsoleSnapshot(queryClient, snapshotState, snapshot);
+  const applied = applyConsoleSnapshot(queryClient, scope, snapshotState, snapshot);
   logEventStreamDiagnostic(applied ? 'snapshot_request_apply' : 'snapshot_request_stale', diagnostic);
   return applied;
 }
 
-function invalidateConsoleSnapshotQueries(queryClient: EventStreamQueryClient) {
-  queryClient.invalidateQueries({ queryKey: ['clients'] });
-  queryClient.invalidateQueries({ queryKey: ['console-summary'] });
-  queryClient.invalidateQueries({ queryKey: ['server-status'] });
+function invalidateConsoleSnapshotQueries(queryClient: EventStreamQueryClient, scope: ResourceScope) {
+  queryClient.invalidateQueries({ queryKey: ['users', resourceScopeKey(scope)] });
 }
 
-function resyncConsoleSnapshotSafely(queryClient: EventStreamQueryClient, snapshotState: EventStreamSnapshotState, setStatus?: (status: ConnectionStatus) => void) {
-  return resyncConsoleSnapshot(queryClient, snapshotState)
+function resyncConsoleSnapshotSafely(
+  queryClient: EventStreamQueryClient,
+  scope: ResourceScope,
+  snapshotState: EventStreamSnapshotState,
+  setStatus?: (status: ConnectionStatus) => void,
+) {
+  return resyncConsoleSnapshot(queryClient, scope, snapshotState)
     .then((applied) => {
       if (applied) {
         setStatus?.('connected');
@@ -364,24 +379,28 @@ function resyncConsoleSnapshotSafely(queryClient: EventStreamQueryClient, snapsh
     })
     .catch((error) => {
       console.warn('Failed to resync console snapshot:', error);
-      invalidateConsoleSnapshotQueries(queryClient);
+      invalidateConsoleSnapshotQueries(queryClient, scope);
       setStatus?.('reconnecting');
     });
 }
 
-function applyRealtimeTraffic(queryClient: EventStreamQueryClient, client: TrafficRealtimeEvent['clients'][number]) {
+function applyRealtimeTraffic(
+  queryClient: EventStreamQueryClient,
+  scope: ResourceScope,
+  client: TrafficRealtimeEvent['clients'][number],
+) {
   const traffic: ClientTrafficResponse = {
     resolution: client.resolution,
     items: client.items ?? [],
   };
-  const baseKey = buildClientTrafficQueryKey(client.client_id, '60s');
+  const baseKey = buildClientTrafficQueryKey(scope, client.client_id, '60s');
   queryClient.setQueryData<ClientTrafficResponse>(baseKey, traffic);
 
   const realtimeQueries = queryClient.getQueryCache().findAll({
-    queryKey: ['client-traffic', client.client_id, '60s'],
+    queryKey: scopedQueryKey(scope, 'client-traffic', client.client_id, '60s'),
   });
   for (const query of realtimeQueries) {
-    const tunnelName = typeof query.queryKey[3] === 'string' ? query.queryKey[3] : '';
+    const tunnelName = typeof query.queryKey[5] === 'string' ? query.queryKey[5] : '';
     queryClient.setQueryData<ClientTrafficResponse>(
       query.queryKey,
       tunnelName
@@ -401,29 +420,37 @@ function getTunnelChangedClientIds(event: TunnelChangedEvent) {
   ].filter((clientId): clientId is string => Boolean(clientId))));
 }
 
-function invalidateActivityQueries(queryClient: EventStreamQueryClient) {
-  queryClient.invalidateQueries({ queryKey: ['activity'] });
+function invalidateActivityQueries(queryClient: EventStreamQueryClient, readScope: ActivityReadScope) {
+  queryClient.invalidateQueries({ queryKey: ['users', activityReadScopeKey(readScope), 'activity'] });
 }
 
-function scheduleActivityRecoveryRetry(queryClient: EventStreamQueryClient, state: ActivityRecoveryState) {
+function scheduleActivityRecoveryRetry(
+  queryClient: EventStreamQueryClient,
+  readScope: ActivityReadScope,
+  state: ActivityRecoveryState,
+) {
   if (state.cancelled || state.retryTimer) return;
   const delay = activityRecoveryRetryDelays[Math.min(state.retryAttempt, activityRecoveryRetryDelays.length - 1)];
   state.retryAttempt += 1;
   state.retryTimer = setTimeout(() => {
     state.retryTimer = undefined;
-    void recoverActivityGap(queryClient, state);
+    void recoverActivityGap(queryClient, readScope, state);
   }, delay);
 }
 
-export async function recoverActivityGap(queryClient: EventStreamQueryClient, state: ActivityRecoveryState) {
+export async function recoverActivityGap(
+  queryClient: EventStreamQueryClient,
+  readScope: ActivityReadScope,
+  state: ActivityRecoveryState,
+) {
   if (state.cancelled || state.running || state.lastScannedId === undefined || state.targetId <= state.lastScannedId) return;
   state.running = true;
   try {
     while (!state.cancelled && state.lastScannedId !== undefined && state.targetId > state.lastScannedId) {
       const targetAtStart = state.targetId;
-      const page: ActivityPage = await activityApi.recovery(state.lastScannedId);
+      const page: ActivityPage = await activityApi.recovery(readScope, state.lastScannedId);
       for (const item of [...page.items].reverse()) {
-        prependActivityToMatchingQueries(queryClient, item);
+        prependActivityToMatchingQueries(queryClient, readScope, item);
         state.hints.delete(item.id);
       }
       if (page.next_cursor && page.next_cursor > state.lastScannedId) {
@@ -438,39 +465,49 @@ export async function recoverActivityGap(queryClient: EventStreamQueryClient, st
     state.retryAttempt = 0;
     for (const [id, hint] of state.hints) {
       if (state.lastScannedId !== undefined && id <= state.lastScannedId) {
-        prependActivityToMatchingQueries(queryClient, hint);
+        prependActivityToMatchingQueries(queryClient, readScope, hint);
         state.hints.delete(id);
       }
     }
   } catch (error) {
     console.warn('Failed to recover activity gap:', error);
-    scheduleActivityRecoveryRetry(queryClient, state);
+    scheduleActivityRecoveryRetry(queryClient, readScope, state);
   } finally {
     state.running = false;
     if (!state.cancelled && !state.retryTimer && state.lastScannedId !== undefined && state.targetId > state.lastScannedId) {
-      void recoverActivityGap(queryClient, state);
+      void recoverActivityGap(queryClient, readScope, state);
     }
   }
 }
 
-function applyActivityReady(queryClient: EventStreamQueryClient, state: ActivityRecoveryState, ready: ActivityReadyPayload) {
+function applyActivityReady(
+  queryClient: EventStreamQueryClient,
+  readScope: ActivityReadScope,
+  state: ActivityRecoveryState,
+  ready: ActivityReadyPayload,
+) {
   if (state.lastScannedId === undefined) {
     state.lastScannedId = ready.activity_cursor;
     state.targetId = Math.max(state.targetId, ready.activity_cursor);
     for (const id of state.hints.keys()) if (id <= ready.activity_cursor) state.hints.delete(id);
-    invalidateActivityQueries(queryClient);
+    invalidateActivityQueries(queryClient, readScope);
     return;
   }
   state.targetId = Math.max(state.targetId, ready.activity_cursor);
-  void recoverActivityGap(queryClient, state);
+  void recoverActivityGap(queryClient, readScope, state);
 }
 
-function applyActivityHint(queryClient: EventStreamQueryClient, state: ActivityRecoveryState, item: ActivityItem) {
-  prependActivityToMatchingQueries(queryClient, item);
+function applyActivityHint(
+  queryClient: EventStreamQueryClient,
+  readScope: ActivityReadScope,
+  state: ActivityRecoveryState,
+  item: ActivityItem,
+) {
+  prependActivityToMatchingQueries(queryClient, readScope, item);
   state.targetId = Math.max(state.targetId, item.id);
   if (state.hints.size >= activityHintBufferLimit && !state.hints.has(item.id)) {
     state.hints.clear();
-    invalidateActivityQueries(queryClient);
+    invalidateActivityQueries(queryClient, readScope);
   } else {
     state.hints.set(item.id, item);
   }
@@ -478,7 +515,7 @@ function applyActivityHint(queryClient: EventStreamQueryClient, state: ActivityR
     clearTimeout(state.retryTimer);
     state.retryTimer = undefined;
   }
-  void recoverActivityGap(queryClient, state);
+  void recoverActivityGap(queryClient, readScope, state);
 }
 
 export function applyEventForDiagnostics(
@@ -488,40 +525,44 @@ export function applyEventForDiagnostics(
   eventType: string,
   data: string,
   activityState?: ActivityRecoveryState,
+  readScope: ActivityReadScope = SELF_RESOURCE_SCOPE,
 ) {
+  const resourceScope = readScope.kind === 'admin-global' ? null : readScope;
   switch (eventType) {
     case 'ready': {
       if (!activityState) return;
       const parsed = parseEventPayload(data, isActivityReadyPayload);
       if (!parsed) {
-        invalidateActivityQueries(queryClient);
+        invalidateActivityQueries(queryClient, readScope);
         return;
       }
-      applyActivityReady(queryClient, activityState, parsed);
+      applyActivityReady(queryClient, readScope, activityState, parsed);
       return;
     }
     case 'activity_event': {
       if (!activityState) return;
       const parsed = parseEventPayload(data, isActivityItem);
       if (!parsed) {
-        invalidateActivityQueries(queryClient);
+        invalidateActivityQueries(queryClient, readScope);
         return;
       }
-      applyActivityHint(queryClient, activityState, parsed);
+      applyActivityHint(queryClient, readScope, activityState, parsed);
       return;
     }
     case 'snapshot': {
+      if (!resourceScope) return;
       const parsed = parseEventPayload(data, isConsoleSnapshot);
       if (parsed) {
-        const applied = applyConsoleSnapshot(queryClient, snapshotState, parsed);
+        const applied = applyConsoleSnapshot(queryClient, resourceScope, snapshotState, parsed);
         logEventStreamDiagnostic(applied ? 'sse_snapshot_apply' : 'sse_snapshot_stale', snapshotDiagnostic(eventType, parsed));
       }
       return;
     }
     case 'stats_update': {
+      if (!resourceScope) return;
       const parsed = parseEventPayload(data, isStatsUpdateEvent);
       if (parsed) {
-        queryClient.setQueryData<Client[]>(['clients'], (old) =>
+        queryClient.setQueryData<Client[]>(scopedQueryKey(resourceScope, 'clients'), (old) =>
           old?.map((client) =>
             client.id === parsed.client_id ? { ...client, stats: parsed.stats } : client,
           ),
@@ -530,24 +571,26 @@ export function applyEventForDiagnostics(
       return;
     }
     case 'traffic_realtime': {
+      if (!resourceScope) return;
       const parsed = parseEventPayload(data, isTrafficRealtimeEvent);
       if (!parsed) {
         return;
       }
       for (const client of parsed.clients) {
-        applyRealtimeTraffic(queryClient, client);
+        applyRealtimeTraffic(queryClient, resourceScope, client);
       }
       return;
     }
     case 'client_online':
       {
+        if (!resourceScope) return;
         const parsed = parseEventPayload(data, isClientOnlineEvent);
         if (!parsed) {
-          queryClient.invalidateQueries({ queryKey: ['clients'] });
+          queryClient.invalidateQueries({ queryKey: scopedQueryKey(resourceScope, 'clients') });
           return;
         }
         const info = parsed.info as Client['info'];
-        queryClient.setQueryData<Client[]>(['clients'], (old) => {
+        queryClient.setQueryData<Client[]>(scopedQueryKey(resourceScope, 'clients'), (old) => {
           const base = old ?? [];
           const exists = base.some((client) => client.id === parsed.client_id);
           if (!exists) {
@@ -568,30 +611,32 @@ export function applyEventForDiagnostics(
             client.id === parsed.client_id ? { ...client, info, online: true } : client,
           );
         });
-        void resyncConsoleSnapshotSafely(queryClient, snapshotState, setStatus);
+        void resyncConsoleSnapshotSafely(queryClient, resourceScope, snapshotState, setStatus);
       }
       return;
     case 'client_offline':
       {
+        if (!resourceScope) return;
         const parsed = parseEventPayload(data, isClientOfflineEvent);
         if (!parsed) {
-          queryClient.invalidateQueries({ queryKey: ['clients'] });
+          queryClient.invalidateQueries({ queryKey: scopedQueryKey(resourceScope, 'clients') });
           return;
         }
-        queryClient.setQueryData<Client[]>(['clients'], (old) =>
+        queryClient.setQueryData<Client[]>(scopedQueryKey(resourceScope, 'clients'), (old) =>
           old?.map((client) =>
             client.id === parsed.client_id ? { ...client, online: false } : client,
           ),
         );
-        void resyncConsoleSnapshotSafely(queryClient, snapshotState, setStatus);
+        void resyncConsoleSnapshotSafely(queryClient, resourceScope, snapshotState, setStatus);
       }
       return;
     case 'tunnel_changed':
       {
+        if (!resourceScope) return;
         const parsed = parseEventPayload(data, isTunnelChangedEvent);
         if (!parsed) {
           logEventStreamDiagnostic('tunnel_changed_invalid', { eventType });
-          queryClient.invalidateQueries({ queryKey: ['clients'] });
+          queryClient.invalidateQueries({ queryKey: scopedQueryKey(resourceScope, 'clients') });
           return;
         }
         logEventStreamDiagnostic('tunnel_changed_apply', {
@@ -605,7 +650,7 @@ export function applyEventForDiagnostics(
         });
         const migratedOut = parsed.action === 'migrated_out';
         const relatedClientIds = migratedOut ? [parsed.client_id] : getTunnelChangedClientIds(parsed);
-        queryClient.setQueryData<Client[]>(['clients'], (old) =>
+        queryClient.setQueryData<Client[]>(scopedQueryKey(resourceScope, 'clients'), (old) =>
           old?.map((client) => {
             if (!relatedClientIds.includes(client.id)) {
               return client;
@@ -635,9 +680,9 @@ export function applyEventForDiagnostics(
             };
           }),
         );
-        queryClient.invalidateQueries({ queryKey: ['client-tunnels'] });
-        queryClient.invalidateQueries({ queryKey: ['client-traffic'] });
-        void resyncConsoleSnapshotSafely(queryClient, snapshotState, setStatus);
+        queryClient.invalidateQueries({ queryKey: ['users', resourceScopeKey(resourceScope), 'client-tunnels'] });
+        queryClient.invalidateQueries({ queryKey: ['users', resourceScopeKey(resourceScope), 'client-traffic'] });
+        void resyncConsoleSnapshotSafely(queryClient, resourceScope, snapshotState, setStatus);
       }
       return;
     default:
@@ -681,11 +726,34 @@ export function useEventStream() {
   const queryClient = useQueryClient();
   const setStatus = useConnectionStore((state) => state.setStatus);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const principal = useAuthStore((state) => state.user);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const shouldConnect = isAuthenticated && pathname !== '/login';
+  const selectedActivityUserId = useRouterState({
+    select: (state) => {
+      const value = state.location.search.user_id;
+      return typeof value === 'string' && value.length > 0 ? value : undefined;
+    },
+  });
+  const resourceScope = useDashboardResourceScope();
+  const resourceScopeKind = resourceScope?.kind;
+  const resourceScopeUserId = resourceScope?.kind === 'admin-user' ? resourceScope.userId : undefined;
+  const eventScope = useMemo<ActivityReadScope | null>(() => {
+    if (resourceScopeKind === 'self') return SELF_RESOURCE_SCOPE;
+    if (resourceScopeKind === 'admin-user' && resourceScopeUserId) {
+      return { kind: 'admin-user', userId: resourceScopeUserId };
+    }
+    if (principal?.is_admin && pathname.startsWith('/dashboard/activity')) {
+      if (selectedActivityUserId) {
+        return { kind: 'admin-user', userId: selectedActivityUserId };
+      }
+      return { kind: 'admin-global' };
+    }
+    return null;
+  }, [pathname, principal?.is_admin, resourceScopeKind, resourceScopeUserId, selectedActivityUserId]);
+  const shouldConnect = isAuthenticated && eventScope !== null;
 
   useEffect(() => {
-    if (!shouldConnect) {
+    if (!shouldConnect || !eventScope) {
       setStatus('disconnected');
       return;
     }
@@ -704,7 +772,7 @@ export function useEventStream() {
           const isReconnect = hasConnected;
           setStatus(hasConnected ? 'reconnecting' : 'connecting');
 
-          const response = await fetch('/api/events', {
+          const response = await fetch(scopedEventStreamPath(eventScope), {
             method: 'GET',
             headers: {
               Accept: 'text/event-stream',
@@ -714,8 +782,7 @@ export function useEventStream() {
           });
 
           if (response.status === 401) {
-            useAuthStore.getState().logout();
-            window.location.hash = '#/login';
+            clearClientSessionAndRedirect();
             setStatus('disconnected');
             return;
           }
@@ -724,8 +791,8 @@ export function useEventStream() {
             throw new Error(`event stream failed: ${response.status}`);
           }
 
-          if (isReconnect) {
-            await resyncConsoleSnapshotSafely(queryClient, snapshotState, setStatus);
+          if (isReconnect && eventScope.kind !== 'admin-global') {
+            await resyncConsoleSnapshotSafely(queryClient, eventScope, snapshotState, setStatus);
           }
 
           hasConnected = true;
@@ -745,7 +812,15 @@ export function useEventStream() {
             }
 
             buffer += decoder.decode(value, { stream: true });
-            buffer = parseSSE(buffer, (eventType, data) => applyEventForDiagnostics(queryClient, setStatus, snapshotState, eventType, data, activityState));
+            buffer = parseSSE(buffer, (eventType, data) => applyEventForDiagnostics(
+              queryClient,
+              setStatus,
+              snapshotState,
+              eventType,
+              data,
+              activityState,
+              eventScope,
+            ));
           }
         } catch (error) {
           if (cancelled) {
@@ -770,5 +845,5 @@ export function useEventStream() {
       activeController?.abort();
       setStatus('disconnected');
     };
-  }, [queryClient, setStatus, shouldConnect]);
+  }, [queryClient, eventScope, setStatus, shouldConnect]);
 }

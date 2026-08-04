@@ -34,6 +34,9 @@ func (s *Server) appendSecurityActivity(r *http.Request, action, reason string, 
 		OccurredAt: time.Now().UTC(), Category: ActivityCategorySecurity, Action: action, Source: "server", Actor: actor,
 		DedupeKey: fmt.Sprintf("security:%s:%s:%s:%d", action, normalizeActivityReason(action, reason), dedupeSubject, bucket), Payload: payload,
 	}
+	if related != nil {
+		spec.SubjectUserID = related.UserID
+	}
 	id, err := s.activityStore.Append(spec)
 	if err != nil {
 		log.Printf("⚠️ Failed to persist security activity [%s/%s]: %v", action, reason, err)
@@ -53,6 +56,8 @@ func (s *Server) recordAuthFailure(r *http.Request, action, reason string) {
 
 func clientTokenFailureReason(err error) (string, string) {
 	switch {
+	case errors.Is(err, ErrUserDisabled):
+		return protocol.AuthCodeUserDisabled, "user_disabled"
 	case errors.Is(err, ErrClientTokenRevoked):
 		return protocol.AuthCodeRevokedToken, "revoked_token"
 	case errors.Is(err, ErrClientTokenExpired):
@@ -66,6 +71,8 @@ func clientTokenFailureReason(err error) (string, string) {
 
 func clientKeyFailureReason(err error) (string, string) {
 	switch {
+	case errors.Is(err, ErrUserDisabled):
+		return protocol.AuthCodeUserDisabled, "user_disabled"
 	case errors.Is(err, ErrClientKeyDisabled):
 		return protocol.AuthCodeDisabledKey, "disabled_key"
 	case errors.Is(err, ErrClientKeyExpired):

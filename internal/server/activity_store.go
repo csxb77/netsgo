@@ -165,6 +165,14 @@ var activityCatalog = map[ActivityCategory]map[string]activityCatalogEntry{
 		"activity_retention_changed":           {ActivitySeverityInfo, "activity.admin.activity_retention_changed"},
 		"client_auth_rate_limit_changed":       {ActivitySeverityInfo, "activity.admin.client_auth_rate_limit_changed"},
 		"client_auth_rate_limit_entry_cleared": {ActivitySeverityInfo, "activity.admin.client_auth_rate_limit_entry_cleared"},
+		"user_created":                         {ActivitySeverityInfo, "activity.admin.user_created"},
+		"user_username_changed":                {ActivitySeverityInfo, "activity.admin.user_username_changed"},
+		"user_password_reset":                  {ActivitySeverityInfo, "activity.admin.user_password_reset"},
+		"user_admin_granted":                   {ActivitySeverityInfo, "activity.admin.user_admin_granted"},
+		"user_admin_revoked":                   {ActivitySeverityInfo, "activity.admin.user_admin_revoked"},
+		"user_disabled":                        {ActivitySeverityInfo, "activity.admin.user_disabled"},
+		"user_enabled":                         {ActivitySeverityInfo, "activity.admin.user_enabled"},
+		"user_sessions_revoked":                {ActivitySeverityInfo, "activity.admin.user_sessions_revoked"},
 		"api_key_created":                      {ActivitySeverityInfo, "activity.admin.api_key_created"},
 		"api_key_enabled":                      {ActivitySeverityInfo, "activity.admin.api_key_enabled"},
 		"api_key_disabled":                     {ActivitySeverityInfo, "activity.admin.api_key_disabled"},
@@ -193,7 +201,7 @@ var activityCatalog = map[ActivityCategory]map[string]activityCatalogEntry{
 }
 
 var activityReasonAllowlist = map[string]map[string]struct{}{
-	"offline":                      makeStringSet("normal_closure", "server_shutdown", "transport_error", "timeout", "data_channel_closed", "replaced", "unknown"),
+	"offline":                      makeStringSet("normal_closure", "server_shutdown", "transport_error", "timeout", "user_disabled", "data_channel_closed", "replaced", "unknown"),
 	"runtime_error":                makeStringSet("start_failed", "restore_failed", "reconcile_failed", "unknown"),
 	"failed":                       makeStringSet("negotiation_failed", "direct_only_failed", "lease_unhealthy", "lease_expired", "unknown"),
 	"fallback":                     makeStringSet("negotiation_failed", "lease_unhealthy", "lease_expired", "unknown"),
@@ -204,7 +212,7 @@ var activityReasonAllowlist = map[string]map[string]struct{}{
 	"mfa_rate_limited":             makeStringSet("rate_limited"),
 	"passkey_login_failed":         makeStringSet("invalid_challenge", "origin_mismatch", "invalid_response", "assertion_failed"),
 	"session_environment_mismatch": makeStringSet("environment_mismatch"),
-	"client_auth_failed":           makeStringSet("invalid_token", "revoked_token", "expired_token", "install_mismatch", "invalid_key", "disabled_key", "expired_key", "max_uses_exceeded", "concurrent_session"),
+	"client_auth_failed":           makeStringSet("invalid_token", "revoked_token", "expired_token", "install_mismatch", "invalid_key", "disabled_key", "expired_key", "max_uses_exceeded", "user_disabled", "concurrent_session"),
 	"client_auth_rate_limited":     makeStringSet("rate_limited"),
 }
 
@@ -273,10 +281,17 @@ type ActivityEventSpec struct {
 	Action     string
 	Source     string
 	Actor      ActivityActor
-	DedupeKey  string
-	Payload    activityPayload
-	Clients    []ActivityClientSubject
-	Tunnels    []ActivityTunnelSubject
+	// ScopeUserID is the sole user range allowed to read this event. An empty
+	// value is reserved for administrator-global events.
+	ScopeUserID string
+	// SubjectUserID identifies the user materially involved in the event. It
+	// is deliberately independent from visibility and is used for audit
+	// integrity and user deletion.
+	SubjectUserID string
+	DedupeKey     string
+	Payload       activityPayload
+	Clients       []ActivityClientSubject
+	Tunnels       []ActivityTunnelSubject
 }
 
 type ActivityItem struct {
@@ -292,18 +307,23 @@ type ActivityItem struct {
 	Payload        json.RawMessage         `json:"payload"`
 	Clients        []ActivityClientSubject `json:"clients"`
 	Tunnels        []ActivityTunnelSubject `json:"tunnels"`
+	// Scope metadata is used only by server-side query and SSE filtering. It
+	// must never become a browser-provided authorization input.
+	ScopeUserID   string `json:"-"`
+	SubjectUserID string `json:"-"`
 }
 
 type ActivityQuery struct {
-	Scope      ActivityScope
-	ScopeID    string
-	BeforeID   int64
-	AfterID    int64
-	Limit      int
-	Severities []ActivitySeverity
-	Categories []ActivityCategory
-	From       *time.Time
-	To         *time.Time
+	Scope       ActivityScope
+	ScopeID     string
+	ScopeUserID string
+	BeforeID    int64
+	AfterID     int64
+	Limit       int
+	Severities  []ActivitySeverity
+	Categories  []ActivityCategory
+	From        *time.Time
+	To          *time.Time
 }
 
 type ActivityPage struct {
@@ -438,17 +458,21 @@ func (s *ActivityStore) appendTx(tx *sql.Tx, spec ActivityEventSpec) (int64, err
 	if err != nil {
 		return 0, err
 	}
+	if err := resolveActivityUserScopeTx(tx, &prepared); err != nil {
+		return 0, err
+	}
 
 	result, err := tx.Exec(`INSERT INTO activity_events (
 		occurred_at_ns, recorded_at_ns, severity, category, action, source,
 		actor_type, actor_id, actor_name, actor_ip_hash, actor_ip_prefix,
-		dedupe_key, payload_version, payload_json
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		scope_user_id, subject_user_id, dedupe_key, payload_version, payload_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT DO NOTHING`,
 		prepared.occurredAt.UnixNano(), prepared.recordedAt.UnixNano(),
 		prepared.severity, prepared.category, prepared.action, prepared.source,
 		prepared.actor.Type, prepared.actor.ID, prepared.actor.Name,
 		prepared.actor.IPHash, prepared.actor.IPPrefix,
+		nullIfEmpty(prepared.scopeUserID), nullIfEmpty(prepared.subjectUserID),
 		nullIfEmpty(prepared.dedupeKey), prepared.payloadVersion, string(prepared.payloadJSON),
 	)
 	if err != nil {
@@ -500,6 +524,8 @@ type preparedActivitySpec struct {
 	action         string
 	source         string
 	actor          ActivityActor
+	scopeUserID    string
+	subjectUserID  string
 	dedupeKey      string
 	payloadVersion int
 	payloadJSON    []byte
@@ -551,6 +577,14 @@ func (s *ActivityStore) prepareSpec(spec ActivityEventSpec) (preparedActivitySpe
 	if err != nil {
 		return preparedActivitySpec{}, err
 	}
+	scopeUserID, err := normalizeActivityUserID(spec.ScopeUserID, "scope")
+	if err != nil {
+		return preparedActivitySpec{}, err
+	}
+	subjectUserID, err := normalizeActivityUserID(spec.SubjectUserID, "subject")
+	if err != nil {
+		return preparedActivitySpec{}, err
+	}
 	clients, err := normalizeActivityClientSubjects(spec.Clients)
 	if err != nil {
 		return preparedActivitySpec{}, err
@@ -568,9 +602,151 @@ func (s *ActivityStore) prepareSpec(spec ActivityEventSpec) (preparedActivitySpe
 	return preparedActivitySpec{
 		occurredAt: occurredAt, recordedAt: recordedAt, severity: severity,
 		category: spec.Category, action: spec.Action, source: spec.Source,
-		actor: actor, dedupeKey: spec.DedupeKey, payloadVersion: payloadVersion,
+		actor: actor, scopeUserID: scopeUserID, subjectUserID: subjectUserID,
+		dedupeKey: spec.DedupeKey, payloadVersion: payloadVersion,
 		payloadJSON: payloadJSON, clients: clients, tunnels: tunnels,
 	}, nil
+}
+
+func normalizeActivityUserID(value, field string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > activityIDMaxBytes || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return "", fmt.Errorf("invalid activity %s user ID", field)
+	}
+	return value, nil
+}
+
+// resolveActivityUserScopeTx makes the persisted event self-contained. A
+// producer can pass explicit scope metadata, otherwise an unambiguous current
+// resource owner is used. This keeps a deleted resource's history scoped when
+// its producer captured the owner before deletion, while still covering
+// lifecycle events that only carry client/tunnel subjects.
+func resolveActivityUserScopeTx(tx *sql.Tx, prepared *preparedActivitySpec) error {
+	if tx == nil || prepared == nil {
+		return errors.New("activity user scope transaction and spec must not be nil")
+	}
+
+	inferredOwner, err := resolveActivityResourceOwnerTx(tx, prepared.clients, prepared.tunnels)
+	if err != nil {
+		return err
+	}
+	if prepared.scopeUserID != "" && inferredOwner != "" && prepared.scopeUserID != inferredOwner {
+		return errors.New("activity scope user does not match resource owner")
+	}
+	if prepared.scopeUserID == "" {
+		prepared.scopeUserID = inferredOwner
+	}
+	if prepared.scopeUserID == "" && prepared.actor.Type == "user" {
+		if prepared.actor.ID == "" {
+			return errors.New("user activity actor must have an ID")
+		}
+		prepared.scopeUserID = prepared.actor.ID
+	}
+	if prepared.scopeUserID != "" {
+		if err := ensureActivityUserExistsTx(tx, prepared.scopeUserID, "scope"); err != nil {
+			return err
+		}
+	}
+
+	if prepared.subjectUserID == "" && prepared.scopeUserID != "" {
+		prepared.subjectUserID = prepared.scopeUserID
+	}
+	if prepared.subjectUserID == "" && prepared.actor.ID != "" && (prepared.actor.Type == "admin" || prepared.actor.Type == "user") {
+		exists, err := activityUserExistsTx(tx, prepared.actor.ID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			prepared.subjectUserID = prepared.actor.ID
+		}
+	}
+	if prepared.subjectUserID != "" {
+		if err := ensureActivityUserExistsTx(tx, prepared.subjectUserID, "subject"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveActivityResourceOwnerTx(tx *sql.Tx, clients []ActivityClientSubject, tunnels []ActivityTunnelSubject) (string, error) {
+	owners := make(map[string]struct{}, 1)
+	for _, subject := range tunnels {
+		owner, err := activityTunnelOwnerTx(tx, subject.TunnelID)
+		if err != nil {
+			return "", err
+		}
+		if owner != "" {
+			owners[owner] = struct{}{}
+		}
+	}
+	for _, subject := range clients {
+		owner, err := activityClientOwnerTx(tx, subject.ClientID)
+		if err != nil {
+			return "", err
+		}
+		if owner != "" {
+			owners[owner] = struct{}{}
+		}
+	}
+	if len(owners) == 0 {
+		return "", nil
+	}
+	if len(owners) != 1 {
+		return "", errors.New("activity subjects do not have a single user owner")
+	}
+	for owner := range owners {
+		return owner, nil
+	}
+	return "", nil
+}
+
+func activityTunnelOwnerTx(tx *sql.Tx, tunnelID string) (string, error) {
+	var owner sql.NullString
+	err := tx.QueryRow(`SELECT owner_user_id FROM tunnels WHERE id = ?`, tunnelID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve activity tunnel owner: %w", err)
+	}
+	return owner.String, nil
+}
+
+func activityClientOwnerTx(tx *sql.Tx, clientID string) (string, error) {
+	var owner sql.NullString
+	err := tx.QueryRow(`SELECT owner_user_id FROM registered_clients WHERE id = ?`, clientID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve activity client owner: %w", err)
+	}
+	return owner.String, nil
+}
+
+func ensureActivityUserExistsTx(tx *sql.Tx, userID, field string) error {
+	exists, err := activityUserExistsTx(tx, userID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("activity %s user does not exist", field)
+	}
+	return nil
+}
+
+func activityUserExistsTx(tx *sql.Tx, userID string) (bool, error) {
+	var exists int
+	err := tx.QueryRow(`SELECT 1 FROM users WHERE id = ?`, userID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve activity user: %w", err)
+	}
+	return true, nil
 }
 
 func validActivitySeverity(severity ActivitySeverity) bool {
@@ -597,7 +773,7 @@ func validActivityCode(value string) bool {
 
 func normalizeActivityActor(actor ActivityActor) (ActivityActor, error) {
 	switch actor.Type {
-	case "admin", "client", "system", "security", "unknown":
+	case "admin", "user", "client", "system", "security", "unknown":
 	default:
 		return ActivityActor{}, fmt.Errorf("unsupported activity actor type %q", actor.Type)
 	}
@@ -761,6 +937,26 @@ func (s *ActivityStore) MaxID() (int64, error) {
 	return id, nil
 }
 
+// MaxIDForUser returns a cursor that is meaningful only inside one user's
+// activity range. It intentionally excludes global events and other users so
+// an SSE reconnect cannot use a foreign cursor as a recovery boundary.
+func (s *ActivityStore) MaxIDForUser(userID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("activity store is not initialized")
+	}
+	if _, err := normalizeActivityUserID(userID, "scope"); err != nil || userID == "" {
+		if err != nil {
+			return 0, err
+		}
+		return 0, errors.New("activity scope user ID must not be empty")
+	}
+	var id int64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM activity_events WHERE scope_user_id = ?`, userID).Scan(&id); err != nil {
+		return 0, fmt.Errorf("read scoped activity maximum id: %w", err)
+	}
+	return id, nil
+}
+
 func (s *ActivityStore) Query(query ActivityQuery) (ActivityPage, error) {
 	if s == nil || s.db == nil {
 		return ActivityPage{}, errors.New("activity store is not initialized")
@@ -805,6 +1001,13 @@ func (s *ActivityStore) Query(query ActivityQuery) (ActivityPage, error) {
 		args = append(args, query.ScopeID)
 	default:
 		return ActivityPage{}, fmt.Errorf("unsupported activity scope %q", query.Scope)
+	}
+	if query.ScopeUserID != "" {
+		if _, err := normalizeActivityUserID(query.ScopeUserID, "scope"); err != nil {
+			return ActivityPage{}, err
+		}
+		where = append(where, `e.scope_user_id = ?`)
+		args = append(args, query.ScopeUserID)
 	}
 
 	if query.BeforeID > 0 {
@@ -902,7 +1105,8 @@ func appendActivityCategoryFilter(where []string, args []any, values []ActivityC
 func (s *ActivityStore) queryRows(predicate string, args []any, order string, limit int) ([]ActivityItem, error) {
 	query := `SELECT e.id, e.occurred_at_ns, e.recorded_at_ns, e.severity, e.category,
 		e.action, e.source, e.actor_type, e.actor_id, e.actor_name,
-		e.actor_ip_hash, e.actor_ip_prefix, e.payload_version, e.payload_json
+		e.actor_ip_hash, e.actor_ip_prefix, e.scope_user_id, e.subject_user_id,
+		e.payload_version, e.payload_json
 		FROM activity_events e WHERE ` + predicate + ` ORDER BY ` + order + ` LIMIT ?`
 	queryArgs := append(slices.Clone(args), limit)
 	rows, err := s.db.Query(query, queryArgs...)
@@ -914,9 +1118,11 @@ func (s *ActivityStore) queryRows(predicate string, args []any, order string, li
 		var item ActivityItem
 		var occurredNS, recordedNS int64
 		var payload string
+		var scopeUserID, subjectUserID sql.NullString
 		if err := rows.Scan(&item.ID, &occurredNS, &recordedNS, &item.Severity, &item.Category,
 			&item.Action, &item.Source, &item.Actor.Type, &item.Actor.ID, &item.Actor.Name,
-			&item.Actor.IPHash, &item.Actor.IPPrefix, &item.PayloadVersion, &payload); err != nil {
+			&item.Actor.IPHash, &item.Actor.IPPrefix, &scopeUserID, &subjectUserID,
+			&item.PayloadVersion, &payload); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan activity event: %w", err)
 		}
@@ -927,6 +1133,8 @@ func (s *ActivityStore) queryRows(predicate string, args []any, order string, li
 		item.OccurredAt = time.Unix(0, occurredNS).UTC()
 		item.RecordedAt = time.Unix(0, recordedNS).UTC()
 		item.Payload = json.RawMessage(payload)
+		item.ScopeUserID = scopeUserID.String
+		item.SubjectUserID = subjectUserID.String
 		item.Clients = []ActivityClientSubject{}
 		item.Tunnels = []ActivityTunnelSubject{}
 		items = append(items, item)

@@ -21,6 +21,8 @@ func normalizeClientDisconnectCause(reason string) clientDisconnectCause {
 		return clientDisconnectCause{ReasonCode: "normal_closure", Expected: true}
 	case "pending_data_timeout":
 		return clientDisconnectCause{ReasonCode: "timeout"}
+	case "user_disabled", "owner_not_operational":
+		return clientDisconnectCause{ReasonCode: "user_disabled", Expected: true}
 	case "data_session_closed":
 		return clientDisconnectCause{ReasonCode: "data_channel_closed"}
 	case "auth_response_failed", "data_session_start_failed", "control_loop_exit":
@@ -45,14 +47,16 @@ func (s *Server) clientLifecycleSpec(client *ClientConn, action string, cause cl
 		severity = ActivitySeverityWarning
 	}
 	return ActivityEventSpec{
-		OccurredAt: time.Now().UTC(),
-		Severity:   severity,
-		Category:   ActivityCategoryClient,
-		Action:     action,
-		Source:     "server",
-		Actor:      ActivityActor{Type: "client", ID: client.ID, Name: name},
-		DedupeKey:  fmt.Sprintf("%s:%s:%d:%s", s.activityBootID, client.ID, client.generation, action),
-		Payload:    payload,
+		OccurredAt:    time.Now().UTC(),
+		Severity:      severity,
+		Category:      ActivityCategoryClient,
+		Action:        action,
+		Source:        "server",
+		Actor:         ActivityActor{Type: "client", ID: client.ID, Name: name},
+		ScopeUserID:   client.OwnerUserID,
+		SubjectUserID: client.OwnerUserID,
+		DedupeKey:     fmt.Sprintf("%s:%s:%d:%s", s.activityBootID, client.ID, client.generation, action),
+		Payload:       payload,
 		Clients: []ActivityClientSubject{{
 			ClientID: client.ID, Relation: "subject", Hostname: info.Hostname,
 		}},

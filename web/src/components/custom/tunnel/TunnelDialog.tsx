@@ -39,6 +39,7 @@ import { parseMbpsInputToBps } from '@/lib/format';
 import { useServerStatus } from '@/hooks/use-server-status';
 import { getClientDisplayName } from '@/lib/client-utils';
 import { cn } from '@/lib/utils';
+import type { ResourceScope } from '@/lib/resource-scope';
 import type { Client, PortRange, TransportPolicy, TunnelFormType, TunnelTopology } from '@/types';
 import { i18n } from '@/i18n';
 import { useTranslation } from 'react-i18next';
@@ -51,6 +52,7 @@ import {
 } from '@/lib/source-cidrs';
 
 interface TunnelDialogCreateProps {
+  scope: ResourceScope;
   mode: 'create';
   clientId: string;
   clients?: Client[];
@@ -62,6 +64,7 @@ interface TunnelDialogCreateProps {
 }
 
 interface TunnelDialogEditProps {
+  scope: ResourceScope;
   mode: 'edit';
   tunnel: TunnelDialogEditData | null;
   clients?: Client[];
@@ -387,8 +390,8 @@ function TunnelDialogForm({
   const parsedRemotePort = isHttp ? 0 : parsePortInput(remotePort);
   const parsedSocks5DialTimeout = Number.parseInt(socks5DialTimeout, 10);
 
-  const createTunnel = useCreateTunnel();
-  const updateTunnel = useUpdateTunnel();
+  const createTunnel = useCreateTunnel(props.scope);
+  const updateTunnel = useUpdateTunnel(props.scope);
   const mutation = isEdit ? updateTunnel : createTunnel;
   const portErrorMessage = t('tunnels.portInvalid');
 
@@ -408,7 +411,7 @@ function TunnelDialogForm({
     }
   };
 
-  const { data: status } = useServerStatus({
+  const { data: status } = useServerStatus(props.scope, {
     enabled: open,
     refetchOnMount: 'always',
     staleTime: 0,

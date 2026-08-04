@@ -73,6 +73,7 @@ type StoredTunnel struct {
 	TransportPolicy string       `json:"transport_policy,omitempty"`
 	ActualTransport string       `json:"actual_transport,omitempty"`
 	P2P             P2PState     `json:"p2p,omitempty"`
+	OwnerUserID     string       `json:"owner_user_id,omitempty"`
 	CreatedByUserID string       `json:"created_by_user_id,omitempty"`
 	UpdatedAt       time.Time    `json:"updated_at,omitempty"`
 }
@@ -319,7 +320,7 @@ func (s *TunnelStore) maybeFailSave() error {
 	return nil
 }
 
-const tunnelSelectColumns = `id, client_id, name, type, local_ip, local_port, remote_port, domain, ingress_bps, egress_bps, total_bps, created_at, desired_state, runtime_state, error, hostname, binding, revision, topology, owner_client_id, ingress_location, ingress_client_id, ingress_type, ingress_config, target_location, target_client_id, target_type, target_config, transport_policy, actual_transport, p2p_state, p2p_error, p2p_session_id, created_by_user_id, updated_at`
+const tunnelSelectColumns = `id, client_id, name, type, local_ip, local_port, remote_port, domain, ingress_bps, egress_bps, total_bps, created_at, desired_state, runtime_state, error, hostname, binding, revision, topology, owner_client_id, ingress_location, ingress_client_id, ingress_type, ingress_config, target_location, target_client_id, target_type, target_config, transport_policy, actual_transport, p2p_state, p2p_error, p2p_session_id, created_by_user_id, owner_user_id, updated_at`
 
 func prefixedTunnelSelectColumns(prefix string) string {
 	columns := strings.Split(tunnelSelectColumns, ", ")
@@ -335,6 +336,7 @@ func scanStoredTunnel(row dbScanner) (StoredTunnel, error) {
 	var ingressLocation, ingressClientID, ingressType, ingressConfig string
 	var targetLocation, targetClientID, targetType, targetConfig string
 	var p2pState, p2pError, p2pSessionID string
+	var createdByUserID, ownerUserID sql.NullString
 	err := row.Scan(
 		&tunnel.ID,
 		&tunnel.ClientID,
@@ -369,11 +371,18 @@ func scanStoredTunnel(row dbScanner) (StoredTunnel, error) {
 		&p2pState,
 		&p2pError,
 		&p2pSessionID,
-		&tunnel.CreatedByUserID,
+		&createdByUserID,
+		&ownerUserID,
 		&updatedAt,
 	)
 	if err != nil {
 		return StoredTunnel{}, err
+	}
+	if createdByUserID.Valid {
+		tunnel.CreatedByUserID = createdByUserID.String
+	}
+	if ownerUserID.Valid {
+		tunnel.OwnerUserID = ownerUserID.String
 	}
 	if createdAt != "" {
 		parsed, err := parseTime(createdAt)
@@ -568,6 +577,17 @@ func (s *TunnelStore) AddTunnel(tunnel StoredTunnel) error {
 	return err
 }
 
+// AddTunnelForUser persists a tunnel in an explicit user scope.  Its endpoint
+// clients must already belong to the same user; the caller cannot use an
+// arbitrary owner from a request body.
+func (s *TunnelStore) AddTunnelForUser(ownerUserID string, tunnel StoredTunnel, actor *ActivityActor) (int64, error) {
+	if ownerUserID == "" {
+		return 0, fmt.Errorf("tunnel owner user id must not be empty")
+	}
+	tunnel.OwnerUserID = ownerUserID
+	return s.addTunnel(tunnel, actor)
+}
+
 func (s *TunnelStore) addTunnel(tunnel StoredTunnel, actor *ActivityActor) (int64, error) {
 	if tunnel.ID == "" {
 		id, err := generateUUIDE()
@@ -604,6 +624,19 @@ func (s *TunnelStore) addTunnel(tunnel StoredTunnel, actor *ActivityActor) (int6
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
+	if tunnel.OwnerUserID == "" {
+		ownerUserID, err := tunnelOwnerUserIDInTx(tx, tunnel.OwnerClientID)
+		if err != nil {
+			return 0, err
+		}
+		tunnel.OwnerUserID = ownerUserID
+	}
+	if err := ensureOperationalUserInTx(tx, tunnel.OwnerUserID); err != nil {
+		return 0, err
+	}
+	if err := validateTunnelClientOwnershipInTx(tx, tunnel); err != nil {
+		return 0, err
+	}
 
 	if err := insertTunnelTx(tx, tunnel); err != nil {
 		return 0, err
@@ -1034,6 +1067,12 @@ func (s *TunnelStore) replaceTunnelByID(clientID, id string, expectedRevision in
 	if replacement.CreatedAt.IsZero() {
 		replacement.CreatedAt = existing.CreatedAt
 	}
+	if replacement.OwnerUserID == "" {
+		replacement.OwnerUserID = existing.OwnerUserID
+	}
+	if replacement.OwnerUserID != existing.OwnerUserID {
+		return 0, fmt.Errorf("replacement owner_user_id cannot change")
+	}
 	if replacement.UpdatedAt.IsZero() {
 		replacement.UpdatedAt = time.Now().UTC()
 	}
@@ -1050,6 +1089,12 @@ func (s *TunnelStore) replaceTunnelByID(clientID, id string, expectedRevision in
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
+	if err := ensureOperationalUserInTx(tx, existing.OwnerUserID); err != nil {
+		return 0, err
+	}
+	if err := validateTunnelClientOwnershipInTx(tx, replacement); err != nil {
+		return 0, err
+	}
 
 	result, err := tx.Exec(`UPDATE tunnels SET
 		name = ?, type = ?, local_ip = ?, local_port = ?, remote_port = ?, domain = ?,
@@ -1165,6 +1210,7 @@ func (s *TunnelStore) migrateTunnelTargetByID(id string, expectedRevision int64,
 	replacement.Revision = expectedRevision + 1
 	replacement.CreatedAt = existing.CreatedAt
 	replacement.CreatedByUserID = existing.CreatedByUserID
+	replacement.OwnerUserID = existing.OwnerUserID
 	replacement.Hostname = existing.Hostname
 	replacement.Binding = existing.Binding
 	if replacement.UpdatedAt.IsZero() {
@@ -1196,6 +1242,12 @@ func (s *TunnelStore) migrateTunnelTargetByID(id string, expectedRevision int64,
 		if err == sql.ErrNoRows {
 			return StoredTunnel{}, StoredTunnel{}, 0, ErrTunnelTargetClientNotFound
 		}
+		return StoredTunnel{}, StoredTunnel{}, 0, err
+	}
+	if err := ensureOperationalUserInTx(tx, existing.OwnerUserID); err != nil {
+		return StoredTunnel{}, StoredTunnel{}, 0, err
+	}
+	if err := validateTunnelClientOwnershipInTx(tx, replacement); err != nil {
 		return StoredTunnel{}, StoredTunnel{}, 0, err
 	}
 
@@ -1321,6 +1373,28 @@ func (s *TunnelStore) GetTunnelsByClientID(clientID string) ([]StoredTunnel, err
 	return tunnels, nil
 }
 
+func (s *TunnelStore) GetTunnelsByUserID(ownerUserID string) ([]StoredTunnel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT `+tunnelSelectColumns+` FROM tunnels WHERE owner_user_id = ? ORDER BY created_at DESC, name`, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	tunnels := make([]StoredTunnel, 0)
+	for rows.Next() {
+		tunnel, err := scanStoredTunnel(rows)
+		if err != nil {
+			return nil, err
+		}
+		tunnels = append(tunnels, tunnel)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tunnels, nil
+}
+
 func (s *TunnelStore) DeleteTunnelsByClientID(clientID string) error {
 	_, err := s.DeleteTunnelsByClientIDReturningDeleted(clientID)
 	return err
@@ -1414,6 +1488,19 @@ func (s *TunnelStore) GetTunnelByID(id string) (StoredTunnel, error) {
 	defer s.mu.RUnlock()
 
 	tunnel, err := scanStoredTunnel(s.db.QueryRow(`SELECT `+tunnelSelectColumns+` FROM tunnels WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return StoredTunnel{}, ErrTunnelNotFound
+	}
+	if err != nil {
+		return StoredTunnel{}, err
+	}
+	return tunnel, nil
+}
+
+func (s *TunnelStore) GetTunnelByIDForUser(ownerUserID, id string) (StoredTunnel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tunnel, err := scanStoredTunnel(s.db.QueryRow(`SELECT `+tunnelSelectColumns+` FROM tunnels WHERE id = ? AND owner_user_id = ?`, id, ownerUserID))
 	if err == sql.ErrNoRows {
 		return StoredTunnel{}, ErrTunnelNotFound
 	}
@@ -1594,15 +1681,63 @@ func validateUnifiedTunnelSpec(t StoredTunnel) error {
 	return nil
 }
 
+func tunnelOwnerUserIDInTx(tx *sql.Tx, clientID string) (string, error) {
+	if clientID == "" {
+		return "", fmt.Errorf("tunnel owner client id must not be empty")
+	}
+	var ownerUserID sql.NullString
+	err := tx.QueryRow(`SELECT owner_user_id FROM registered_clients WHERE id = ?`, clientID).Scan(&ownerUserID)
+	if err == sql.ErrNoRows {
+		return "", ErrTunnelTargetClientNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load tunnel owner client: %w", err)
+	}
+	if !ownerUserID.Valid || ownerUserID.String == "" {
+		return "", fmt.Errorf("registered client %q has no user owner", clientID)
+	}
+	return ownerUserID.String, nil
+}
+
+func validateTunnelClientOwnershipInTx(tx *sql.Tx, tunnel StoredTunnel) error {
+	if tunnel.OwnerUserID == "" {
+		return fmt.Errorf("tunnel owner user id must not be empty")
+	}
+	clientIDs := []string{tunnel.Target.ClientID}
+	if tunnel.Ingress.Location == "client" {
+		clientIDs = append(clientIDs, tunnel.Ingress.ClientID)
+	}
+	for _, clientID := range clientIDs {
+		ownerUserID, err := tunnelOwnerUserIDInTx(tx, clientID)
+		if err != nil {
+			return err
+		}
+		if ownerUserID != tunnel.OwnerUserID {
+			return fmt.Errorf("tunnel endpoint client %q belongs to another user", clientID)
+		}
+	}
+	return nil
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func insertTunnelTx(tx *sql.Tx, tunnel StoredTunnel) error {
+	if tunnel.OwnerUserID == "" {
+		return fmt.Errorf("tunnel owner user id must not be empty")
+	}
 	_, err := tx.Exec(`INSERT INTO tunnels (
 		id, client_id, name, type, local_ip, local_port, remote_port, domain, hostname, binding,
 		revision, topology, owner_client_id,
 		ingress_location, ingress_client_id, ingress_type, ingress_config, ingress_bind_ip, ingress_port, ingress_domain, ingress_path,
 		target_location, target_client_id, target_type, target_config, target_host, target_port, target_path, target_resource_key,
 		transport_policy, actual_transport, p2p_state, p2p_error, p2p_session_id,
-		ingress_bps, egress_bps, total_bps, desired_state, runtime_state, error, created_by_user_id, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ingress_bps, egress_bps, total_bps, desired_state, runtime_state, error, created_by_user_id, owner_user_id, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tunnel.ID,
 		tunnel.ClientID,
 		tunnel.Name,
@@ -1643,7 +1778,8 @@ func insertTunnelTx(tx *sql.Tx, tunnel StoredTunnel) error {
 		tunnel.DesiredState,
 		storageRuntimeStateFromProtocol(tunnel.RuntimeState),
 		tunnel.Error,
-		tunnel.CreatedByUserID,
+		nullableString(tunnel.CreatedByUserID),
+		tunnel.OwnerUserID,
 		formatTime(tunnel.CreatedAt),
 		formatTime(tunnel.UpdatedAt),
 	)

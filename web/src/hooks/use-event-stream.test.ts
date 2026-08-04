@@ -2,8 +2,17 @@ import { describe, expect, test } from 'bun:test';
 import { QueryClient } from '@tanstack/react-query';
 
 import type { ActivityItem, Client, ProxyConfig } from '@/types';
+import { SELF_RESOURCE_SCOPE, scopedQueryKey } from '@/lib/resource-scope';
+import { buildActivityQueryKey } from './use-activity';
 
 import { applyEventForDiagnostics, createActivityRecoveryState, createEventStreamSnapshotState } from './use-event-stream';
+
+const selfScope = SELF_RESOURCE_SCOPE;
+const clientsKey = scopedQueryKey(selfScope, 'clients');
+const consoleSummaryKey = scopedQueryKey(selfScope, 'console-summary');
+const serverStatusKey = scopedQueryKey(selfScope, 'server-status');
+const clientTunnelKey = (clientId: string, role: string) => scopedQueryKey(selfScope, 'client-tunnels', clientId, role);
+const clientTrafficKey = (clientId: string, range: string, tunnel = '') => scopedQueryKey(selfScope, 'client-traffic', clientId, range, tunnel);
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -133,7 +142,7 @@ function activity(id: number): ActivityItem {
 describe('use-event-stream diagnostics', () => {
   test('keeps newer tunnel_changed state when an older console snapshot resolves later', async () => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData<Client[]>(['clients'], [createClient('pending')]);
+    queryClient.setQueryData<Client[]>(clientsKey, [createClient('pending')]);
 
     const originalFetch = globalThis.fetch;
     const requests: Deferred<Response>[] = [];
@@ -152,16 +161,16 @@ describe('use-event-stream diagnostics', () => {
       applyEventForDiagnostics(queryClient, (status) => statuses.push(status), snapshotState, 'tunnel_changed', tunnelChangedEvent('exposed', 'restored'));
       await waitForRequests(requests, 2);
 
-      expect(queryClient.getQueryData<Client[]>(['clients'])?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+      expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
 
       requests[1].resolve(snapshotResponse('exposed'));
       await flushAsyncWork();
-      expect(queryClient.getQueryData<Client[]>(['clients'])?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+      expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
 
       requests[0].resolve(snapshotResponse('pending'));
       await flushAsyncWork();
 
-      expect(queryClient.getQueryData<Client[]>(['clients'])?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+      expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
       expect(statuses).toEqual(['connected']);
     } finally {
       globalThis.fetch = originalFetch;
@@ -181,7 +190,7 @@ describe('use-event-stream diagnostics', () => {
         'snapshot',
         snapshotPayload('exposed', '2026-05-08T01:00:02Z'),
       );
-      expect(queryClient.getQueryData<Client[]>(['clients'])?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+      expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
 
       applyEventForDiagnostics(
         queryClient,
@@ -191,7 +200,7 @@ describe('use-event-stream diagnostics', () => {
         snapshotPayload('pending', '2026-05-08T01:00:01Z'),
       );
 
-      expect(queryClient.getQueryData<Client[]>(['clients'])?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+      expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
     } finally {
       queryClient.clear();
     }
@@ -240,7 +249,7 @@ describe('use-event-stream diagnostics', () => {
       createClientWithTunnels(oldOwnerId, []),
       createClientWithTunnels(newOwnerId, [migratedTunnel]),
     ];
-    queryClient.setQueryData<Client[]>(['clients'], [
+    queryClient.setQueryData<Client[]>(clientsKey, [
       createClientWithTunnels(oldOwnerId, [oldTunnel]),
       createClientWithTunnels(newOwnerId, []),
     ]);
@@ -263,7 +272,7 @@ describe('use-event-stream diagnostics', () => {
         tunnelChangedPayload(oldOwnerId, 'migrated_out', oldTunnel),
       );
 
-      let clients = queryClient.getQueryData<Client[]>(['clients']);
+      let clients = queryClient.getQueryData<Client[]>(clientsKey);
       expect(clients?.find((client) => client.id === oldOwnerId)?.proxies).toEqual([]);
       expect(clients?.find((client) => client.id === newOwnerId)?.proxies).toEqual([]);
 
@@ -275,7 +284,7 @@ describe('use-event-stream diagnostics', () => {
         tunnelChangedPayload(newOwnerId, 'migrated_in', migratedTunnel),
       );
 
-      clients = queryClient.getQueryData<Client[]>(['clients']);
+      clients = queryClient.getQueryData<Client[]>(clientsKey);
       expect(clients?.find((client) => client.id === oldOwnerId)?.proxies).toEqual([]);
       expect(clients?.find((client) => client.id === newOwnerId)?.proxies).toEqual([migratedTunnel]);
 
@@ -335,18 +344,18 @@ describe('use-event-stream diagnostics', () => {
       createClientWithTunnels(oldOwnerId, []),
       createClientWithTunnels(newOwnerId, [migratedTunnel]),
     ];
-    queryClient.setQueryData<Client[]>(['clients'], [
+    queryClient.setQueryData<Client[]>(clientsKey, [
       createClientWithTunnels(ingressId, [oldTunnel]),
       createClientWithTunnels(oldOwnerId, [oldTunnel]),
       createClientWithTunnels(newOwnerId, []),
     ]);
-    queryClient.setQueryData(['client-tunnels', oldOwnerId, 'owner'], [oldTunnel]);
-    queryClient.setQueryData(['client-tunnels', newOwnerId, 'owner'], []);
-    queryClient.setQueryData(['client-tunnels', ingressId, 'ingress'], [oldTunnel]);
-    queryClient.setQueryData(['client-traffic', oldOwnerId, '60s', ''], { resolution: 'second', items: [] });
-    queryClient.setQueryData(['client-traffic', newOwnerId, '60s', 'demo'], { resolution: 'second', items: [] });
-    queryClient.setQueryData(['console-summary'], { marker: 'stale-summary' });
-    queryClient.setQueryData(['server-status'], { marker: 'stale-status' });
+    queryClient.setQueryData(clientTunnelKey(oldOwnerId, 'owner'), [oldTunnel]);
+    queryClient.setQueryData(clientTunnelKey(newOwnerId, 'owner'), []);
+    queryClient.setQueryData(clientTunnelKey(ingressId, 'ingress'), [oldTunnel]);
+    queryClient.setQueryData(clientTrafficKey(oldOwnerId, '60s'), { resolution: 'second', items: [] });
+    queryClient.setQueryData(clientTrafficKey(newOwnerId, '60s', 'demo'), { resolution: 'second', items: [] });
+    queryClient.setQueryData(consoleSummaryKey, { marker: 'stale-summary' });
+    queryClient.setQueryData(serverStatusKey, { marker: 'stale-status' });
 
     const originalFetch = globalThis.fetch;
     const requests: Deferred<Response>[] = [];
@@ -366,7 +375,7 @@ describe('use-event-stream diagnostics', () => {
         tunnelChangedPayload(oldOwnerId, 'migrated_out', oldTunnel),
       );
 
-      let clients = queryClient.getQueryData<Client[]>(['clients']);
+      let clients = queryClient.getQueryData<Client[]>(clientsKey);
       expect(clients?.find((client) => client.id === oldOwnerId)?.proxies).toEqual([]);
       expect(clients?.find((client) => client.id === ingressId)?.proxies).toEqual([oldTunnel]);
 
@@ -378,19 +387,19 @@ describe('use-event-stream diagnostics', () => {
         tunnelChangedPayload(newOwnerId, 'migrated_in', migratedTunnel),
       );
 
-      clients = queryClient.getQueryData<Client[]>(['clients']);
+      clients = queryClient.getQueryData<Client[]>(clientsKey);
       expect(clients?.find((client) => client.id === oldOwnerId)?.proxies).toEqual([]);
       expect(clients?.find((client) => client.id === ingressId)?.proxies).toEqual([migratedTunnel]);
       expect(clients?.find((client) => client.id === newOwnerId)?.proxies).toEqual([migratedTunnel]);
-      expect(queryClient.getQueryState(['client-tunnels', oldOwnerId, 'owner'])?.isInvalidated).toBe(true);
-      expect(queryClient.getQueryState(['client-tunnels', newOwnerId, 'owner'])?.isInvalidated).toBe(true);
-      expect(queryClient.getQueryState(['client-tunnels', ingressId, 'ingress'])?.isInvalidated).toBe(true);
-      expect(queryClient.getQueryState(['client-traffic', oldOwnerId, '60s', ''])?.isInvalidated).toBe(true);
-      expect(queryClient.getQueryState(['client-traffic', newOwnerId, '60s', 'demo'])?.isInvalidated).toBe(true);
-      expect(queryClient.getQueryData(['console-summary'])).toEqual({ marker: 'stale-summary' });
-      expect(queryClient.getQueryData(['server-status'])).toEqual({ marker: 'stale-status' });
-      expect(queryClient.getQueryState(['console-summary'])?.isInvalidated).toBe(false);
-      expect(queryClient.getQueryState(['server-status'])?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(clientTunnelKey(oldOwnerId, 'owner'))?.isInvalidated).toBe(true);
+      expect(queryClient.getQueryState(clientTunnelKey(newOwnerId, 'owner'))?.isInvalidated).toBe(true);
+      expect(queryClient.getQueryState(clientTunnelKey(ingressId, 'ingress'))?.isInvalidated).toBe(true);
+      expect(queryClient.getQueryState(clientTrafficKey(oldOwnerId, '60s'))?.isInvalidated).toBe(true);
+      expect(queryClient.getQueryState(clientTrafficKey(newOwnerId, '60s', 'demo'))?.isInvalidated).toBe(true);
+      expect(queryClient.getQueryData(consoleSummaryKey)).toEqual({ marker: 'stale-summary' });
+      expect(queryClient.getQueryData(serverStatusKey)).toEqual({ marker: 'stale-status' });
+      expect(queryClient.getQueryState(consoleSummaryKey)?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(serverStatusKey)?.isInvalidated).toBe(false);
 
       await waitForRequests(requests, 2);
       requests[0].resolve(clientsSnapshotResponse(finalClients));
@@ -419,12 +428,12 @@ describe('use-event-stream diagnostics', () => {
       createClientWithTunnels(oldOwnerId, []),
       createClientWithTunnels(newOwnerId, [migratedTunnel]),
     ];
-    queryClient.setQueryData<Client[]>(['clients'], [
+    queryClient.setQueryData<Client[]>(clientsKey, [
       createClientWithTunnels(oldOwnerId, [oldTunnel]),
       createClientWithTunnels(newOwnerId, []),
     ]);
-    queryClient.setQueryData(['console-summary'], { marker: 'fresh-summary' });
-    queryClient.setQueryData(['server-status'], { marker: 'fresh-status' });
+    queryClient.setQueryData(consoleSummaryKey, { marker: 'fresh-summary' });
+    queryClient.setQueryData(serverStatusKey, { marker: 'fresh-status' });
 
     const originalFetch = globalThis.fetch;
     const requests: Deferred<Response>[] = [];
@@ -460,15 +469,15 @@ describe('use-event-stream diagnostics', () => {
       requests[0].reject(new Error('stale migrated_out resync failed'));
       await flushAsyncWork();
 
-      expect(queryClient.getQueryData<Client[]>(['clients'])).toEqual(finalClients);
-      expect(queryClient.getQueryData(['console-summary'])).toEqual({ marker: 'fresh-summary' });
-      expect(queryClient.getQueryData(['server-status'])).toEqual({
+      expect(queryClient.getQueryData<Client[]>(clientsKey)).toEqual(finalClients);
+      expect(queryClient.getQueryData(consoleSummaryKey)).toEqual({ marker: 'fresh-summary' });
+      expect(queryClient.getQueryData(serverStatusKey)).toEqual({
         marker: 'fresh-status',
         summary: { marker: 'fresh-summary' },
       });
-      expect(queryClient.getQueryState(['clients'])?.isInvalidated).toBe(false);
-      expect(queryClient.getQueryState(['console-summary'])?.isInvalidated).toBe(false);
-      expect(queryClient.getQueryState(['server-status'])?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(clientsKey)?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(consoleSummaryKey)?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(serverStatusKey)?.isInvalidated).toBe(false);
       expect(statuses).toEqual(['connected']);
     } finally {
       globalThis.fetch = originalFetch;
@@ -479,7 +488,12 @@ describe('use-event-stream diagnostics', () => {
     const queryClient = new QueryClient();
     const snapshotState = createEventStreamSnapshotState();
     const activityState = createActivityRecoveryState();
-    const activityKey = ['activity', 'global', null, 50, ['error', 'info', 'warning'], [], null, null] as const;
+    const activityKey = buildActivityQueryKey(selfScope, {
+      scope: 'global',
+      limit: 50,
+      severities: ['error', 'info', 'warning'],
+      categories: [],
+    });
     queryClient.setQueryData(activityKey, { pages: [{ items: [], has_more: false, direction: 'before' }], pageParams: [undefined] });
     const originalFetch = globalThis.fetch;
     const calls: string[] = [];

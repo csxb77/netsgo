@@ -12,10 +12,21 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { getClientDisplayName } from '@/lib/client-utils';
 import type { ActivityQuery, Client } from '@/types';
+import type { ResourceScope } from '@/lib/resource-scope';
 
 const allTunnelsValue = '__all__';
 
-export function ClientActivitySheet({ client, open, onOpenChange }: { client: Client; open: boolean; onOpenChange: (open: boolean) => void }) {
+export function ClientActivitySheet({
+  scope,
+  client,
+  open,
+  onOpenChange,
+}: {
+  scope: ResourceScope;
+  client: Client;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const { t } = useTranslation();
   const [tunnelId, setTunnelId] = useState(allTunnelsValue);
   const [filters, setFilters] = useState<ActivityFilterValue>(defaultActivityFilter);
@@ -64,6 +75,7 @@ export function ClientActivitySheet({ client, open, onOpenChange }: { client: Cl
                   scope: tunnelScoped ? 'tunnel' : 'client',
                   client_id: tunnelScoped ? undefined : client.id,
                   tunnel_id: tunnelScoped ? tunnelId : undefined,
+                  user_id: scope.kind === 'admin-user' ? scope.userId : undefined,
                   severity: filters.severities,
                   category: filters.categories,
                 }}
@@ -76,7 +88,7 @@ export function ClientActivitySheet({ client, open, onOpenChange }: { client: Cl
           <ActivityFilters value={filters} onChange={setFilters} showRange={false} />
         </div>
         <ScrollArea className="min-h-0 flex-1 pb-6">
-          {open ? <ActivityTimeline query={query} /> : null}
+          {open ? <ActivityTimeline readScope={scope} query={query} /> : null}
         </ScrollArea>
       </SheetContent>
     </Sheet>

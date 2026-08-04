@@ -26,7 +26,7 @@ func (s *AdminStore) UpdateAdminUsernameWithActivity(userID, username string, ac
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 	var before string
-	if err := tx.QueryRow(`SELECT username FROM admin_users WHERE id = ?`, userID).Scan(&before); err != nil {
+	if err := tx.QueryRow(`SELECT username FROM users WHERE id = ?`, userID).Scan(&before); err != nil {
 		return 0, err
 	}
 	if before == username {
@@ -35,10 +35,10 @@ func (s *AdminStore) UpdateAdminUsernameWithActivity(userID, username string, ac
 		}
 		return 0, nil
 	}
-	if _, err := tx.Exec(`UPDATE admin_users SET username = ? WHERE id = ?`, username, userID); err != nil {
+	if _, err := tx.Exec(`UPDATE users SET username = ? WHERE id = ?`, username, userID); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
@@ -73,7 +73,7 @@ func (s *AdminStore) UpdateAdminPasswordWithActivity(userID, currentPassword, ne
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-	user, err := scanAdminUser(tx.QueryRow(`SELECT `+adminUserSelectColumns()+` FROM admin_users WHERE id = ?`, userID))
+	user, err := scanAdminUser(tx.QueryRow(`SELECT `+adminUserSelectColumns()+` FROM users WHERE id = ? AND is_admin = 1`, userID))
 	if err != nil {
 		return 0, err
 	}
@@ -83,10 +83,10 @@ func (s *AdminStore) UpdateAdminPasswordWithActivity(userID, currentPassword, ne
 	if currentPassword != "" && bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)) != nil {
 		return 0, errCurrentPassword
 	}
-	if _, err := tx.Exec(`UPDATE admin_users SET password_hash = ? WHERE id = ?`, string(hash), userID); err != nil {
+	if _, err := tx.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, string(hash), userID); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
@@ -145,13 +145,13 @@ func (s *AdminStore) ConfirmTOTPSetupWithActivity(userID, challengeID, code stri
 		}
 		return nil, 0, sql.ErrNoRows
 	}
-	if _, err := tx.Exec(`UPDATE admin_users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, metadata.Secret, userID); err != nil {
+	if _, err := tx.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, metadata.Secret, userID); err != nil {
 		return nil, 0, err
 	}
 	if err := replaceRecoveryCodesInTx(tx, userID, codes); err != nil {
 		return nil, 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return nil, 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
@@ -172,7 +172,7 @@ func (s *AdminStore) ConfirmTOTPSetupWithActivity(userID, challengeID, code stri
 
 func (s *AdminStore) DisableTOTPWithActivity(userID string, actor ActivityActor) (int64, error) {
 	return s.securitySimpleActivity(userID, "totp_disabled", actor, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`UPDATE admin_users SET totp_enabled = 0, totp_secret = '' WHERE id = ?`, userID); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET totp_enabled = 0, totp_secret = '' WHERE id = ?`, userID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM admin_totp_recovery_codes WHERE user_id = ?`, userID); err != nil {
@@ -198,7 +198,7 @@ func (s *AdminStore) RegenerateRecoveryCodesWithActivity(userID string, actor Ac
 	if err := replaceRecoveryCodesInTx(tx, userID, codes); err != nil {
 		return nil, 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return nil, 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
@@ -242,7 +242,7 @@ func (s *AdminStore) AddPasskeyWithActivity(userID, name, credentialID string, c
 	if _, err := tx.Exec(`INSERT INTO admin_passkeys (id, user_id, name, credential_id, credential_json, rp_id, origin, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`, passkey.ID, passkey.UserID, passkey.Name, passkey.CredentialID, passkey.CredentialJSON, passkey.RPID, passkey.Origin, formatTime(passkey.CreatedAt)); err != nil {
 		return nil, 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return nil, 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
@@ -312,7 +312,7 @@ func (s *AdminStore) securitySimpleActivity(userID, action string, actor Activit
 		return 0, err
 	}
 	if revokeSessions {
-		if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+		if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 			return 0, err
 		}
 		if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {

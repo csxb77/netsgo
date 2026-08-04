@@ -37,13 +37,19 @@ type AdminClaims struct {
 	jwt.RegisteredClaims
 }
 
-// SessionInfo 从 Context 中提取的 session 信息（替代旧的 AdminClaims）
-type SessionInfo struct {
+// RequestPrincipal is reconstructed from user_sessions JOIN users for every
+// request.  Role is a presentation compatibility field; IsAdmin is the only
+// authorization flag and never comes from a JWT claim.
+type RequestPrincipal struct {
 	SessionID string
 	UserID    string
 	Username  string
+	IsAdmin   bool
 	Role      string
 }
+
+// SessionInfo is retained as a source-compatible alias for existing handlers.
+type SessionInfo = RequestPrincipal
 
 // GenerateAdminToken 生成一个新的 JWT Token（绑定 session）
 func (s *Server) GenerateAdminToken(session *AdminSession) (string, error) {
@@ -70,7 +76,7 @@ func (s *Server) GenerateAdminToken(session *AdminSession) (string, error) {
 //  2. Cookie netsgo_session — 浏览器 Web 面板
 //
 // JWT 只作为 session 载体，真正的权限判定来自 session 状态
-func (s *Server) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) RequirePrincipal(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -121,10 +127,11 @@ func (s *Server) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// session 有效 → 注入用户信息到 Context
-		info := &SessionInfo{
+		info := &RequestPrincipal{
 			SessionID: session.ID,
 			UserID:    session.UserID,
 			Username:  session.Username,
+			IsAdmin:   session.Role == "admin",
 			Role:      session.Role,
 		}
 		ctx := context.WithValue(r.Context(), sessionContextKey, info)
@@ -132,10 +139,27 @@ func (s *Server) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// RequireAuth remains the compatibility name for handlers that allow any
+// authenticated operational user.  New code should use RequirePrincipal.
+func (s *Server) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.RequirePrincipal(next)
+}
+
+func (s *Server) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.RequirePrincipal(func(w http.ResponseWriter, r *http.Request) {
+		principal := GetPrincipalFromContext(r.Context())
+		if principal == nil || !principal.IsAdmin {
+			writeAPIError(w, http.StatusForbidden, "administrator_access_required", "administrator access required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) RequireActivityRead(next http.HandlerFunc) http.HandlerFunc {
 	return s.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
-		info := GetSessionFromContext(r.Context())
-		if info == nil || info.Role != "admin" {
+		info := GetPrincipalFromContext(r.Context())
+		if info == nil || !info.IsAdmin {
 			writeAPIError(w, http.StatusForbidden, "activity_read_forbidden", "administrator access required")
 			return
 		}
@@ -151,6 +175,14 @@ const sessionContextKey contextKey = "session_info"
 // GetSessionFromContext 从 Context 中提取当前请求的 session 信息
 func GetSessionFromContext(ctx context.Context) *SessionInfo {
 	info, ok := ctx.Value(sessionContextKey).(*SessionInfo)
+	if !ok {
+		return nil
+	}
+	return info
+}
+
+func GetPrincipalFromContext(ctx context.Context) *RequestPrincipal {
+	info, ok := ctx.Value(sessionContextKey).(*RequestPrincipal)
 	if !ok {
 		return nil
 	}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -95,6 +96,18 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 	if ip == "" {
 		ip = remoteIP(remoteAddr)
 	}
+	// A Client connection is a user-owned runtime resource. Do not retain the
+	// old unmanaged path when the stores required to resolve that owner have
+	// not been installed yet.
+	if s.auth == nil || s.auth.adminStore == nil {
+		_ = writeAuthResult(conn, protocol.AuthResponse{
+			Success:   false,
+			Message:   "authentication temporarily unavailable",
+			Code:      protocol.AuthCodeServerUninitialized,
+			Retryable: true,
+		})
+		return nil, fmt.Errorf("authentication failed: required stores are unavailable")
+	}
 	if allowed, retryAfter := s.auth.allowClientAuthentication(ip); !allowed {
 		log.Printf("🚫 Client authentication rate limited [%s, client_ip=%s]: wait %v", remoteAddr, ip, retryAfter)
 		slog.Warn("Client authentication rate limited", "ip", ip, "module", "security")
@@ -144,58 +157,81 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 
 	var newToken string
 	var clientID string
+	var ownerUserID string
 	var bandwidthSettings protocol.BandwidthSettings
 	var clientTokenID string
 
 	var registrationActivityID int64
-	if s.auth.adminStore != nil {
-		initialized, err := s.auth.adminStore.IsInitializedE()
+	initialized, err := s.auth.adminStore.IsInitializedE()
+	if err != nil {
+		log.Printf("⚠️ Server initialization state unavailable, rejecting client connection [%s]: %v", remoteAddr, err)
+		slog.Warn("Rejected client connection because initialization state could not be read", "ip", ip, "module", "security")
+		_ = writeAuthResult(conn, protocol.AuthResponse{
+			Success:   false,
+			Message:   "authentication temporarily unavailable",
+			Code:      protocol.AuthCodeServerUninitialized,
+			Retryable: true,
+		})
+		return nil, fmt.Errorf("authentication failed: initialization state unavailable: %w", err)
+	}
+	if !initialized {
+		log.Printf("⚠️ Server not initialized, rejecting client connection [%s]", remoteAddr)
+		slog.Warn("Rejected client connection because server is not initialized", "ip", ip, "module", "security")
+		_ = writeAuthResult(conn, protocol.AuthResponse{
+			Success:   false,
+			Message:   "authentication failed",
+			Code:      protocol.AuthCodeServerUninitialized,
+			Retryable: true,
+		})
+		return nil, fmt.Errorf("authentication failed")
+	}
+
+	if authReq.Token != "" {
+		clientToken, err := s.auth.adminStore.ValidateClientToken(authReq.Token, authReq.InstallID)
 		if err != nil {
-			log.Printf("⚠️ Server initialization state unavailable, rejecting client connection [%s]: %v", remoteAddr, err)
-			slog.Warn("Rejected client connection because initialization state could not be read", "ip", ip, "module", "security")
+			code, reason := clientTokenFailureReason(err)
+			s.recordAuthFailure(r, "client_auth_failed", reason)
 			_ = writeAuthResult(conn, protocol.AuthResponse{
-				Success:   false,
-				Message:   "authentication temporarily unavailable",
-				Code:      protocol.AuthCodeServerUninitialized,
-				Retryable: true,
-			})
-			return nil, fmt.Errorf("authentication failed: initialization state unavailable: %w", err)
-		}
-		if !initialized {
-			log.Printf("⚠️ Server not initialized, rejecting client connection [%s]", remoteAddr)
-			slog.Warn("Rejected client connection because server is not initialized", "ip", ip, "module", "security")
-			_ = writeAuthResult(conn, protocol.AuthResponse{
-				Success:   false,
-				Message:   "authentication failed",
-				Code:      protocol.AuthCodeServerUninitialized,
-				Retryable: true,
+				Success:    false,
+				Message:    "authentication failed",
+				Code:       code,
+				ClearToken: true,
 			})
 			return nil, fmt.Errorf("authentication failed")
 		}
 
-		if authReq.Token != "" {
-			clientToken, err := s.auth.adminStore.ValidateClientToken(authReq.Token, authReq.InstallID)
-			if err != nil {
-				code, reason := clientTokenFailureReason(err)
-				s.recordAuthFailure(r, "client_auth_failed", reason)
+		clientID = clientToken.ClientID
+		clientTokenID = clientToken.ID
+		registered, ok := s.auth.adminStore.GetRegisteredClient(clientID)
+		if !ok || registered.OwnerUserID == "" {
+			return nil, s.rejectClientOwnerAuthentication(conn, r, fmt.Errorf("client owner could not be resolved"))
+		}
+		ownerUserID = registered.OwnerUserID
+		if err := s.ensureClientOwnerOperational(ownerUserID); err != nil {
+			return nil, s.rejectClientOwnerAuthentication(conn, r, err)
+		}
+		bandwidthSettings = registeredClientBandwidthSettings(registered)
+		if current, loaded := s.clients.Load(clientID); loaded {
+			currentClient := current.(*ClientConn)
+			if currentClient.getState() != clientStateClosing {
+				log.Printf("⚠️ Concurrent token connection rejected: client_id=%s, install_id=%s, remote=%s", clientID, authReq.InstallID, remoteAddr)
 				_ = writeAuthResult(conn, protocol.AuthResponse{
-					Success:    false,
-					Message:    "authentication failed",
-					Code:       code,
-					ClearToken: true,
+					Success:   false,
+					Message:   "authentication failed",
+					Code:      protocol.AuthCodeConcurrentSession,
+					Retryable: true,
 				})
+				s.recordAuthFailure(r, "client_auth_failed", "concurrent_session")
 				return nil, fmt.Errorf("authentication failed")
 			}
+		}
 
-			clientID = clientToken.ClientID
-			clientTokenID = clientToken.ID
-			if registered, ok := s.auth.adminStore.GetRegisteredClient(clientID); ok {
-				bandwidthSettings = registeredClientBandwidthSettings(registered)
-			}
-			if current, loaded := s.clients.Load(clientID); loaded {
+		log.Printf("🔑 Client token authenticated [install_id=%s]", authReq.InstallID)
+	} else {
+		if registered, ok := s.auth.adminStore.GetRegisteredClientByInstallID(authReq.InstallID); ok {
+			if current, loaded := s.clients.Load(registered.ID); loaded {
 				currentClient := current.(*ClientConn)
 				if currentClient.getState() != clientStateClosing {
-					log.Printf("⚠️ Concurrent token connection rejected: client_id=%s, install_id=%s, remote=%s", clientID, authReq.InstallID, remoteAddr)
 					_ = writeAuthResult(conn, protocol.AuthResponse{
 						Success:   false,
 						Message:   "authentication failed",
@@ -206,49 +242,36 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 					return nil, fmt.Errorf("authentication failed")
 				}
 			}
-
-			log.Printf("🔑 Client token authenticated [install_id=%s]", authReq.InstallID)
-		} else {
-			if registered, ok := s.auth.adminStore.GetRegisteredClientByInstallID(authReq.InstallID); ok {
-				if current, loaded := s.clients.Load(registered.ID); loaded {
-					currentClient := current.(*ClientConn)
-					if currentClient.getState() != clientStateClosing {
-						_ = writeAuthResult(conn, protocol.AuthResponse{
-							Success:   false,
-							Message:   "authentication failed",
-							Code:      protocol.AuthCodeConcurrentSession,
-							Retryable: true,
-						})
-						s.recordAuthFailure(r, "client_auth_failed", "concurrent_session")
-						return nil, fmt.Errorf("authentication failed")
-					}
-				}
-			}
-
-			exchange, err := s.auth.adminStore.RegisterClientAndExchangeToken(authReq.Key, authReq.InstallID, authReq.Client, ip)
-			if err != nil {
-				code, reason := clientKeyFailureReason(err)
-				s.recordAuthFailure(r, "client_auth_failed", reason)
-				log.Printf("❌ Failed to exchange client key for token [%s]: %v", remoteAddr, err)
-				_ = writeAuthResult(conn, protocol.AuthResponse{
-					Success: false,
-					Message: "authentication failed",
-					Code:    code,
-				})
-				return nil, fmt.Errorf("authentication failed")
-			}
-			clientID = exchange.Client.ID
-			bandwidthSettings = registeredClientBandwidthSettings(exchange.Client)
-
-			newToken = exchange.Token
-			clientTokenID = exchange.TokenRow.ID
-			log.Printf("🔑 Client key exchanged for token successfully [install_id=%s]", authReq.InstallID)
-			registrationActivityID = exchange.ActivityID
 		}
-	}
 
-	if clientID == "" {
-		clientID = "unmanaged-" + authReq.InstallID
+		exchange, err := s.auth.adminStore.RegisterClientAndExchangeToken(authReq.Key, authReq.InstallID, authReq.Client, ip)
+		if err != nil {
+			code, reason := clientKeyFailureReason(err)
+			retryable := errors.Is(err, ErrUserDisabled)
+			if retryable {
+				code, reason = protocol.AuthCodeUserDisabled, "user_disabled"
+			}
+			s.recordAuthFailure(r, "client_auth_failed", reason)
+			log.Printf("❌ Failed to exchange client key for token [%s]: %v", remoteAddr, err)
+			_ = writeAuthResult(conn, protocol.AuthResponse{
+				Success:   false,
+				Message:   "authentication failed",
+				Code:      code,
+				Retryable: retryable,
+			})
+			return nil, fmt.Errorf("authentication failed")
+		}
+		clientID = exchange.Client.ID
+		ownerUserID = exchange.Client.OwnerUserID
+		if err := s.ensureClientOwnerOperational(ownerUserID); err != nil {
+			return nil, s.rejectClientOwnerAuthentication(conn, r, err)
+		}
+		bandwidthSettings = registeredClientBandwidthSettings(exchange.Client)
+
+		newToken = exchange.Token
+		clientTokenID = exchange.TokenRow.ID
+		log.Printf("🔑 Client key exchanged for token successfully [install_id=%s]", authReq.InstallID)
+		registrationActivityID = exchange.ActivityID
 	}
 
 	dataToken, err := generateDataToken()
@@ -256,8 +279,16 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 		return nil, err
 	}
 
+	// Recheck after all authentication side effects and immediately before
+	// publishing the logical session. This closes the normal disable race
+	// between token/key validation and the ClientConn becoming visible.
+	if err := s.ensureClientOwnerOperational(ownerUserID); err != nil {
+		return nil, s.rejectClientOwnerAuthentication(conn, r, err)
+	}
+
 	client := &ClientConn{
 		ID:             clientID,
+		OwnerUserID:    ownerUserID,
 		InstallID:      authReq.InstallID,
 		Info:           authReq.Client,
 		RemoteAddr:     ip,
@@ -294,6 +325,48 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 
 	s.startPendingDataTimer(client)
 	return client, nil
+}
+
+// ensureClientOwnerOperational resolves the unified user policy from the
+// authoritative store. A missing store, owner, or user record is deliberately
+// an error rather than an implicit active user.
+func (s *Server) ensureClientOwnerOperational(ownerUserID string) error {
+	if s == nil || s.auth == nil || s.auth.adminStore == nil {
+		return fmt.Errorf("required user store is unavailable")
+	}
+	if ownerUserID == "" {
+		return fmt.Errorf("client owner is empty")
+	}
+	operational, err := s.auth.adminStore.IsUserOperational(ownerUserID)
+	if err != nil {
+		return fmt.Errorf("resolve client owner: %w", err)
+	}
+	if !operational {
+		return ErrUserDisabled
+	}
+	return nil
+}
+
+func (s *Server) rejectClientOwnerAuthentication(conn *websocket.Conn, r *http.Request, err error) error {
+	if errors.Is(err, ErrUserDisabled) {
+		s.recordAuthFailure(r, "client_auth_failed", "user_disabled")
+		_ = writeAuthResult(conn, protocol.AuthResponse{
+			Success:   false,
+			Message:   "authentication failed",
+			Code:      protocol.AuthCodeUserDisabled,
+			Retryable: true,
+		})
+		return fmt.Errorf("authentication failed: user is disabled")
+	}
+
+	log.Printf("⚠️ Client owner resolution unavailable [%s]: %v", r.RemoteAddr, err)
+	_ = writeAuthResult(conn, protocol.AuthResponse{
+		Success:   false,
+		Message:   "authentication temporarily unavailable",
+		Code:      protocol.AuthCodeServerUninitialized,
+		Retryable: true,
+	})
+	return fmt.Errorf("authentication failed: owner resolution unavailable: %w", err)
 }
 
 func writeAuthResult(conn *websocket.Conn, authResp protocol.AuthResponse) error {

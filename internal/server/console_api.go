@@ -89,18 +89,30 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIConsoleSnapshot(w http.ResponseWriter, r *http.Request) {
-	snapshot := s.collectSnapshot()
+	scope, ok := requireResourceScope(w, r)
+	if !ok {
+		return
+	}
+	snapshot := s.collectSnapshotForUser(scope.OwnerUserID)
 	log.Printf("🔎 console_snapshot clients=%d tunnels=%s", len(snapshot.Clients), summarizeSnapshotTunnelStates(snapshot.Clients))
 	encodeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) handleAPIClients(w http.ResponseWriter, r *http.Request) {
-	encodeJSON(w, http.StatusOK, s.collectClientViews())
+	scope, ok := requireResourceScope(w, r)
+	if !ok {
+		return
+	}
+	encodeJSON(w, http.StatusOK, s.collectClientViewsForUser(scope.OwnerUserID))
 }
 
 func (s *Server) collectSnapshot() consoleSnapshot {
+	return s.collectSnapshotForUser("")
+}
+
+func (s *Server) collectSnapshotForUser(ownerUserID string) consoleSnapshot {
 	now := time.Now()
-	data := s.collectConsoleData()
+	data := s.collectConsoleDataForUser(ownerUserID)
 	status := s.getCachedServerStatus()
 	status.Summary = data.Summary
 	return consoleSnapshot{
@@ -119,10 +131,23 @@ func (s *Server) collectConsoleStatus() serverStatusView {
 }
 
 func (s *Server) collectClientViews() []clientView {
+	return s.collectClientViewsForUser("")
+}
+
+func (s *Server) collectClientViewsForUser(ownerUserID string) []clientView {
 	views := make(map[string]clientView)
 
 	if s.auth.adminStore != nil {
-		for _, registered := range s.auth.adminStore.GetRegisteredClients() {
+		registeredClients := s.auth.adminStore.GetRegisteredClients()
+		if ownerUserID != "" {
+			var err error
+			registeredClients, err = s.auth.adminStore.GetRegisteredClientsForUser(ownerUserID)
+			if err != nil {
+				log.Printf("⚠️ failed to list scoped registered clients: %v", err)
+				registeredClients = nil
+			}
+		}
+		for _, registered := range registeredClients {
 			lastSeen := registered.LastSeen
 			view := clientView{
 				ID:          registered.ID,
@@ -149,6 +174,9 @@ func (s *Server) collectClientViews() []clientView {
 
 	s.clients.Range(func(_, value any) bool {
 		client := value.(*ClientConn)
+		if ownerUserID != "" && client.OwnerUserID != ownerUserID {
+			return true
+		}
 		if !client.isLive() {
 			return true
 		}

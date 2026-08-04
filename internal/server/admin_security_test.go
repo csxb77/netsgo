@@ -15,7 +15,7 @@ func adminUserTOTPState(t *testing.T, store *AdminStore, userID string) (bool, s
 	t.Helper()
 	var enabled int
 	var secret string
-	if err := store.db.QueryRow(`SELECT totp_enabled, totp_secret FROM admin_users WHERE id = ?`, userID).Scan(&enabled, &secret); err != nil {
+	if err := store.db.QueryRow(`SELECT totp_enabled, totp_secret FROM users WHERE id = ?`, userID).Scan(&enabled, &secret); err != nil {
 		t.Fatalf("load admin totp state: %v", err)
 	}
 	return intToBool(enabled), secret
@@ -139,7 +139,7 @@ func TestAPI_LoginRequiresMFAWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateAdminPassword failed: %v", err)
 	}
-	if _, err := s.auth.adminStore.db.Exec(`UPDATE admin_users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
+	if _, err := s.auth.adminStore.db.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
 		t.Fatalf("enable totp: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestAPI_MFAVerifyRateLimitsAfterTenInvalidCodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateAdminPassword failed: %v", err)
 	}
-	if _, err := s.auth.adminStore.db.Exec(`UPDATE admin_users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
+	if _, err := s.auth.adminStore.db.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
 		t.Fatalf("enable totp: %v", err)
 	}
 
@@ -232,7 +232,7 @@ func TestAPI_MFAVerifyRateLimitSurvivesChallengeRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateAdminPassword failed: %v", err)
 	}
-	if _, err := s.auth.adminStore.db.Exec(`UPDATE admin_users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
+	if _, err := s.auth.adminStore.db.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
 		t.Fatalf("enable totp: %v", err)
 	}
 
@@ -304,6 +304,26 @@ func TestAPI_AdminSecurityResponse(t *testing.T) {
 	if payload.Passkeys == nil {
 		t.Fatal("passkeys should be an empty array, not null")
 	}
+}
+
+func TestAdminSecurityUsernameChangeClosesCurrentUserSSE(t *testing.T) {
+	s, handler, cleanup := setupActivityAPIAuthTest(t)
+	defer cleanup()
+	_, adminToken := issueRoleToken(t, s, "admin")
+	_, cancelSSE, sseDone := startAuthenticatedSSE(t, handler, "/api/events", adminToken)
+	defer cancelSSE()
+
+	body := []byte(`{"current_password":"password123","new_username":"admin-renamed"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/security/username", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("User-Agent", "Go-http-client/1.1")
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("security username change status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	waitForSSEStop(t, sseDone, "security username change did not close the revoked session SSE")
 }
 
 func TestAPI_PasskeyBeginRejectsHTTPNonLocalhost(t *testing.T) {

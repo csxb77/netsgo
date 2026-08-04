@@ -13,6 +13,10 @@ import (
 type SSEEvent struct {
 	Type string // "ready" | "snapshot" | "stats_update" | "traffic_realtime" | "client_online" | "client_offline" | "tunnel_changed"
 	Data string // JSON string
+	// ScopeUserID is transport metadata only. An empty value is an
+	// administrator-global event and is never delivered to a user-scoped SSE
+	// subscription.
+	ScopeUserID string
 }
 
 // EventBus manages SSE subscriber registration and broadcasting.
@@ -92,6 +96,23 @@ func (eb *EventBus) PublishJSON(eventType string, data any) {
 	eb.Publish(SSEEvent{Type: eventType, Data: string(jsonBytes)})
 }
 
+// PublishScopedJSON sends an event only to SSE streams whose selected user
+// scope matches scopeUserID. Callers must use PublishJSON intentionally for
+// true administrator-global events; an empty scope is rejected here so an
+// ownership lookup failure cannot become a user-visible broadcast.
+func (eb *EventBus) PublishScopedJSON(eventType, scopeUserID string, data any) {
+	if scopeUserID == "" {
+		log.Printf("⚠️ Refusing to publish user-scoped SSE event without a scope: %s", eventType)
+		return
+	}
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("⚠️ Failed to marshal SSE event: %v", err)
+		return
+	}
+	eb.Publish(SSEEvent{Type: eventType, Data: string(jsonBytes), ScopeUserID: scopeUserID})
+}
+
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data any) error {
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
@@ -105,7 +126,49 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string
 	return nil
 }
 
-// handleSSE handles SSE connections — GET /api/events.
+type sseReadScope struct {
+	userID string
+	global bool
+}
+
+func sseReadScopeForRequest(r *http.Request) (sseReadScope, error) {
+	if resourceScope, ok := resourceScopeFromContext(r.Context()); ok {
+		return sseReadScope{userID: resourceScope.OwnerUserID}, nil
+	}
+	if principal := GetPrincipalFromContext(r.Context()); principal != nil {
+		if !principal.IsAdmin {
+			return sseReadScope{}, fmt.Errorf("user SSE request is missing a resource scope")
+		}
+		return sseReadScope{global: true}, nil
+	}
+	// Direct unit tests intentionally call the handler without route
+	// middleware. There is no browser-reachable unauthenticated route.
+	return sseReadScope{global: true}, nil
+}
+
+func (scope sseReadScope) allows(event SSEEvent) bool {
+	return scope.global || event.ScopeUserID == scope.userID
+}
+
+func (s *Server) activityCursorForSSEScope(scope sseReadScope) (int64, error) {
+	if s.activityStore == nil {
+		return 0, nil
+	}
+	if scope.global {
+		return s.activityStore.MaxID()
+	}
+	return s.activityStore.MaxIDForUser(scope.userID)
+}
+
+func (s *Server) snapshotForSSEScope(scope sseReadScope) consoleSnapshot {
+	if scope.global {
+		return s.collectSnapshot()
+	}
+	return s.collectSnapshotForUser(scope.userID)
+}
+
+// handleSSE handles a globally-admin-scoped or explicitly user-scoped SSE
+// connection. The selected scope is fixed for the life of the connection.
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -119,30 +182,32 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	scope, err := sseReadScopeForRequest(r)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "sse_scope_missing", "SSE resource scope is unavailable")
+		return
+	}
+	streamContext, releaseStream := s.registerSSEConnection(r)
+	defer releaseStream()
+	if err := streamContext.Err(); err != nil {
+		return
+	}
 
 	ch := s.events.Subscribe()
 	defer s.events.Unsubscribe(ch)
 
 	log.Printf("📡 SSE client connected: %s", r.RemoteAddr)
 
-	includeActivity := true
-	if info := GetSessionFromContext(r.Context()); info != nil {
-		includeActivity = info.Role == "admin"
-	}
-	activityCursor := int64(0)
-	if includeActivity && s.activityStore != nil {
-		var err error
-		activityCursor, err = s.activityStore.MaxID()
-		if err != nil {
-			log.Printf("⚠️ Failed to read activity cursor: %v", err)
-			return
-		}
+	activityCursor, err := s.activityCursorForSSEScope(scope)
+	if err != nil {
+		log.Printf("⚠️ Failed to read activity cursor: %v", err)
+		return
 	}
 	if err := writeSSEEvent(w, flusher, "ready", map[string]any{"activity_cursor": activityCursor}); err != nil {
 		log.Printf("⚠️ Failed to write initial SSE handshake: %v", err)
 		return
 	}
-	if err := writeSSEEvent(w, flusher, "snapshot", s.collectSnapshot()); err != nil {
+	if err := writeSSEEvent(w, flusher, "snapshot", s.snapshotForSSEScope(scope)); err != nil {
 		log.Printf("⚠️ Failed to write initial SSE snapshot: %v", err)
 		return
 	}
@@ -158,7 +223,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if event.Type == "activity_event" && !includeActivity {
+			if !scope.allows(event) {
 				continue
 			}
 			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, event.Data); err != nil {
@@ -167,7 +232,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-snapshotTicker.C:
-			if err := writeSSEEvent(w, flusher, "snapshot", s.collectSnapshot()); err != nil {
+			if err := writeSSEEvent(w, flusher, "snapshot", s.snapshotForSSEScope(scope)); err != nil {
 				log.Printf("⚠️ Failed to write SSE snapshot: %v", err)
 				return
 			}
@@ -177,7 +242,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-		case <-r.Context().Done():
+		case <-streamContext.Done():
 			log.Printf("📡 SSE client disconnected: %s", r.RemoteAddr)
 			return
 		}

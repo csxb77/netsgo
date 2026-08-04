@@ -157,13 +157,21 @@ func (s *Server) handleProbeReportMessage(client *ClientConn, msg protocol.Messa
 	log.Printf("📊 [%s] CPU: %.1f%% | Memory: %.1f%% | Disk: %.1f%%",
 		info.Hostname, stats.CPUUsage, stats.MemUsage, stats.DiskUsage)
 
-	s.events.PublishJSON("stats_update", map[string]any{
+	s.events.PublishScopedJSON("stats_update", client.OwnerUserID, map[string]any{
 		"client_id": client.ID,
 		"stats":     stats,
 	})
 }
 
 func (s *Server) handleProxyCreateMessage(client *ClientConn, msg protocol.Message) {
+	// Legacy Client-initiated creation is still a runtime write path. Recheck
+	// the resolved owner so a disable racing with an already-open control
+	// session cannot create a new tunnel before teardown wins.
+	if err := s.ensureClientOwnerOperational(client.OwnerUserID); err != nil {
+		log.Printf("⚠️ Rejecting legacy proxy creation for non-operational owner [%s]: %v", client.ID, err)
+		s.invalidateLogicalSessionIfCurrent(client.ID, client.generation, "owner_not_operational")
+		return
+	}
 	var req protocol.ProxyNewRequest
 	if err := msg.ParsePayload(&req); err != nil {
 		log.Printf("⚠️ Failed to parse proxy request [%s]: %v", client.ID, err)

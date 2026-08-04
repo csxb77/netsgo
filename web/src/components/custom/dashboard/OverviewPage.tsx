@@ -5,11 +5,11 @@ import { useTranslation } from 'react-i18next';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useClients } from '@/hooks/use-clients';
-import { ServerInfoCard } from './ServerInfoCard';
 import { DashboardClientTable } from './DashboardClientTable';
 import { DashboardTunnelTable } from './DashboardTunnelTable';
 import { NetworkTopology } from './NetworkTopology';
 import { buildDashboardTabMetrics, formatDashboardTabCount } from './dashboard-tab-metrics';
+import type { ResourceScope } from '@/lib/resource-scope';
 
 const stagger = {
   hidden: {},
@@ -21,7 +21,7 @@ const fadeUp = {
   show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' as const } },
 };
 
-type DashboardTab = 'topology' | 'clients' | 'tunnels';
+export type DashboardTab = 'topology' | 'clients' | 'tunnels';
 
 const TOPOLOGY_TAB_MIN_AVAILABLE_WIDTH = 820;
 
@@ -49,15 +49,24 @@ function TabCountBadge({ label }: { label: string | null }) {
   );
 }
 
-export function OverviewPage() {
+export function OverviewPage({
+  scope,
+  tab,
+  onTabChange,
+}: {
+  scope: ResourceScope;
+  tab?: DashboardTab;
+  onTabChange?: (tab: DashboardTab) => void;
+}) {
   const { t } = useTranslation();
-  const { data: clients } = useClients();
+  const { data: clients } = useClients(scope);
   const containerRef = useRef<HTMLDivElement>(null);
   const [showTopologyTab, setShowTopologyTab] = useState(canInitiallyShowTopologyTab);
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => (
     canInitiallyShowTopologyTab() ? 'topology' : 'clients'
   ));
-  const currentTab = showTopologyTab || activeTab !== 'topology' ? activeTab : 'clients';
+  const selectedTab = tab ?? activeTab;
+  const currentTab = showTopologyTab || selectedTab !== 'topology' ? selectedTab : 'clients';
   const shouldRenderDashboardTabs = clients === undefined || clients.length > 0;
 
   const tabMetrics = useMemo(() => buildDashboardTabMetrics(clients), [clients]);
@@ -89,7 +98,6 @@ export function OverviewPage() {
       initial="hidden"
       animate="show"
     >
-      <motion.div variants={fadeUp}><ServerInfoCard /></motion.div>
       <motion.div variants={fadeUp}>
         {shouldRenderDashboardTabs ? (
           <Tabs
@@ -97,6 +105,7 @@ export function OverviewPage() {
             onValueChange={(value) => {
               if (isDashboardTab(value)) {
                 setActiveTab(value);
+                onTabChange?.(value);
               }
             }}
             className="gap-4"
@@ -121,14 +130,14 @@ export function OverviewPage() {
             </TabsList>
             {showTopologyTab && (
               <TabsContent value="topology" forceMount className="data-[state=inactive]:hidden">
-                <NetworkTopology />
+                <NetworkTopology scope={scope} />
               </TabsContent>
             )}
-            <TabsContent value="clients"><DashboardClientTable /></TabsContent>
-            <TabsContent value="tunnels"><DashboardTunnelTable /></TabsContent>
+            <TabsContent value="clients"><DashboardClientTable scope={scope} /></TabsContent>
+            <TabsContent value="tunnels"><DashboardTunnelTable scope={scope} /></TabsContent>
           </Tabs>
         ) : (
-          <DashboardClientTable />
+          <DashboardClientTable scope={scope} />
         )}
       </motion.div>
     </motion.div>

@@ -9,6 +9,8 @@ import {
   normalizeActivityQuery,
   prependActivityToMatchingQueries,
 } from './use-activity';
+import { SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
+import { adminUserResourceScope } from '@/lib/resource-scope';
 
 function item(id: number, overrides: Partial<ActivityItem> = {}): ActivityItem {
   return {
@@ -36,8 +38,8 @@ describe('activity query hook helpers', () => {
   test('normalizes cache identity including scope ID and limit', () => {
     const normalized = normalizeActivityQuery({ scope: 'client', scopeId: 'c1', limit: 10, severities: ['error', 'info', 'error'] });
     expect(normalized.severities).toEqual(['error', 'info']);
-    expect(buildActivityQueryKey(normalized)).toEqual(['activity', 'client', 'c1', 10, ['error', 'info'], [], null, null]);
-    expect(buildActivityQueryKey({ scope: 'client', scopeId: 'c1', limit: 50 })).not.toEqual(buildActivityQueryKey(normalized));
+    expect(buildActivityQueryKey(SELF_RESOURCE_SCOPE, normalized)).toEqual(['users', 'self', 'activity', null, 'client', 'c1', 10, ['error', 'info'], [], null, null]);
+    expect(buildActivityQueryKey(SELF_RESOURCE_SCOPE, { scope: 'client', scopeId: 'c1', limit: 50 })).not.toEqual(buildActivityQueryKey(SELF_RESOURCE_SCOPE, normalized));
   });
 
   test('flattens and de-duplicates pages newest first', () => {
@@ -53,17 +55,33 @@ describe('activity query hook helpers', () => {
 
   test('prepends only to matching global and scoped caches', () => {
     const queryClient = new QueryClient();
-    const globalKey = buildActivityQueryKey({ scope: 'global' });
-    const clientKey = buildActivityQueryKey({ scope: 'client', scopeId: 'client-1' });
-    const otherKey = buildActivityQueryKey({ scope: 'client', scopeId: 'client-2' });
+    const globalKey = buildActivityQueryKey(SELF_RESOURCE_SCOPE, { scope: 'global' });
+    const clientKey = buildActivityQueryKey(SELF_RESOURCE_SCOPE, { scope: 'client', scopeId: 'client-1' });
+    const otherKey = buildActivityQueryKey(SELF_RESOURCE_SCOPE, { scope: 'client', scopeId: 'client-2' });
     queryClient.setQueryData(globalKey, data([item(1)]));
     queryClient.setQueryData(clientKey, data([item(1)]));
     queryClient.setQueryData(otherKey, data([]));
 
-    prependActivityToMatchingQueries(queryClient, item(2));
+    prependActivityToMatchingQueries(queryClient, SELF_RESOURCE_SCOPE, item(2));
     expect(flattenActivityPages(queryClient.getQueryData(globalKey)).map((entry) => entry.id)).toEqual([2, 1]);
     expect(flattenActivityPages(queryClient.getQueryData(clientKey)).map((entry) => entry.id)).toEqual([2, 1]);
     expect(flattenActivityPages(queryClient.getQueryData(otherKey))).toEqual([]);
+    queryClient.clear();
+  });
+
+  test('does not write an event into another user scope', () => {
+    const queryClient = new QueryClient();
+    const alice = adminUserResourceScope('alice');
+    const bob = adminUserResourceScope('bob');
+    const aliceKey = buildActivityQueryKey(alice, { scope: 'global' });
+    const bobKey = buildActivityQueryKey(bob, { scope: 'global' });
+    queryClient.setQueryData(aliceKey, data([item(1)]));
+    queryClient.setQueryData(bobKey, data([item(1)]));
+
+    prependActivityToMatchingQueries(queryClient, alice, item(2));
+
+    expect(flattenActivityPages(queryClient.getQueryData(aliceKey)).map((entry) => entry.id)).toEqual([2, 1]);
+    expect(flattenActivityPages(queryClient.getQueryData(bobKey)).map((entry) => entry.id)).toEqual([1]);
     queryClient.clear();
   });
 });

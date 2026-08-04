@@ -96,6 +96,17 @@ func (s *Server) handleDataWS(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// The data token proves possession of a pending logical session, not that
+	// its current owner is still permitted to operate. Check that policy at the
+	// last possible point before the handshake grants a yamux data plane.
+	if err := s.ensureClientOwnerOperational(client.OwnerUserID); err != nil {
+		log.Printf("❌ data channel: owner is not operational [%s]: %v", clientID, err)
+		_ = s.invalidateLogicalSessionIfCurrent(clientID, generation, "owner_not_operational")
+		if writeErr := s.writeDataHandshakeResult(conn, protocol.DataHandshakeAuthFail); writeErr != nil {
+			log.Printf("❌ data channel owner rejection response write failed: %v", writeErr)
+		}
+		return
+	}
 
 	if err := s.writeDataHandshakeResult(conn, protocol.DataHandshakeOK); err != nil {
 		log.Printf("❌ data channel: write handshake result failed [%s]: %v", clientID, err)
@@ -137,7 +148,7 @@ func (s *Server) handleDataWS(w http.ResponseWriter, r *http.Request) {
 	if promoted {
 		info := client.GetInfo()
 		log.Printf("🔗 data channel established: Client [%s] generation=%d", clientID, generation)
-		s.events.PublishJSON("client_online", map[string]any{
+		s.events.PublishScopedJSON("client_online", client.OwnerUserID, map[string]any{
 			"client_id": client.ID,
 			"info":      info,
 		})

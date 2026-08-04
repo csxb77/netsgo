@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -32,6 +33,7 @@ type TrafficDelta struct {
 	TunnelID        string
 	Revision        int64
 	ClientID        string
+	OwnerUserID     string
 	OwnerClientID   string
 	IngressClientID string
 	TargetClientID  string
@@ -46,8 +48,11 @@ type TrafficDelta struct {
 }
 
 type TrafficBucket struct {
-	TunnelID        string            `json:"tunnel_id,omitempty"`
-	ClientID        string            `json:"client_id"`
+	TunnelID string `json:"tunnel_id,omitempty"`
+	ClientID string `json:"client_id"`
+	// OwnerUserID is authorization metadata retained with the historical
+	// bucket. It is deliberately never serialized to browser clients.
+	OwnerUserID     string            `json:"-"`
 	OwnerClientID   string            `json:"owner_client_id,omitempty"`
 	IngressClientID string            `json:"ingress_client_id,omitempty"`
 	TargetClientID  string            `json:"target_client_id,omitempty"`
@@ -182,6 +187,7 @@ func (s *TrafficStore) ApplyDeltas(deltas []TrafficDelta) {
 		minuteBucket := TrafficBucket{
 			TunnelID:        delta.TunnelID,
 			ClientID:        delta.ClientID,
+			OwnerUserID:     delta.OwnerUserID,
 			OwnerClientID:   delta.OwnerClientID,
 			IngressClientID: delta.IngressClientID,
 			TargetClientID:  delta.TargetClientID,
@@ -214,6 +220,7 @@ func (s *TrafficStore) ApplyDeltas(deltas []TrafficDelta) {
 		secondBucket := TrafficBucket{
 			TunnelID:        delta.TunnelID,
 			ClientID:        delta.ClientID,
+			OwnerUserID:     delta.OwnerUserID,
 			OwnerClientID:   delta.OwnerClientID,
 			IngressClientID: delta.IngressClientID,
 			TargetClientID:  delta.TargetClientID,
@@ -267,7 +274,7 @@ func (s *TrafficStore) resetTunnelAfterMigrationLocked(tunnelID string, minimumR
 	if s.realtimeSecond != nil {
 		for clientID, seriesByClient := range s.realtimeSecond.byClient {
 			for key := range seriesByClient {
-				if key.TunnelID == tunnelID {
+				if key.Series.TunnelID == tunnelID {
 					delete(seriesByClient, key)
 				}
 			}
@@ -306,10 +313,29 @@ func (s *TrafficStore) Query(clientID, tunnelName string, from, to time.Time) (T
 func (s *TrafficStore) QueryWithResolution(clientID, tunnelName string, from, to time.Time, resolution TrafficResolution) (TrafficQueryResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.queryLocked(clientID, tunnelName, from, to, resolution)
+	return s.queryLocked("", clientID, tunnelName, from, to, resolution)
 }
 
-func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Time, resolution TrafficResolution) (TrafficQueryResult, error) {
+// QueryForUser returns only traffic whose persisted owner snapshot matches
+// ownerUserID. Callers serving a user-scoped API must use this rather than the
+// legacy unscoped query helpers above.
+func (s *TrafficStore) QueryForUser(ownerUserID, clientID, tunnelName string, from, to time.Time) (TrafficQueryResult, error) {
+	return s.QueryWithResolutionForUser(ownerUserID, clientID, tunnelName, from, to, autoTrafficResolution(from, to))
+}
+
+// QueryWithResolutionForUser is the owner-scoped counterpart of
+// QueryWithResolution. An empty owner is rejected so an omitted route scope
+// cannot accidentally become a global historical query.
+func (s *TrafficStore) QueryWithResolutionForUser(ownerUserID, clientID, tunnelName string, from, to time.Time, resolution TrafficResolution) (TrafficQueryResult, error) {
+	if ownerUserID == "" {
+		return TrafficQueryResult{}, errors.New("traffic owner user id is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queryLocked(ownerUserID, clientID, tunnelName, from, to, resolution)
+}
+
+func (s *TrafficStore) queryLocked(ownerUserID, clientID, tunnelName string, from, to time.Time, resolution TrafficResolution) (TrafficQueryResult, error) {
 	if s.pendingErr != nil {
 		return TrafficQueryResult{}, s.pendingErr
 	}
@@ -320,7 +346,13 @@ func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Ti
 		combined := make(map[string]TrafficBucket)
 		fromUnix := secondFloorUTC(from).Unix()
 		toUnix := secondFloorUTC(to).Unix()
-		for _, bucket := range s.realtimeSecond.Query(clientID, tunnelName, fromUnix, toUnix) {
+		var realtimeBuckets []TrafficBucket
+		if ownerUserID == "" {
+			realtimeBuckets = s.realtimeSecond.Query(clientID, tunnelName, fromUnix, toUnix)
+		} else {
+			realtimeBuckets = s.realtimeSecond.QueryForUser(ownerUserID, clientID, tunnelName, fromUnix, toUnix)
+		}
+		for _, bucket := range realtimeBuckets {
 			if err := addTrafficBucket(combined, bucket); err != nil {
 				return TrafficQueryResult{}, err
 			}
@@ -330,7 +362,7 @@ func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Ti
 		}
 	case TrafficResolutionMinute:
 		combined := make(map[string]TrafficBucket)
-		persisted, err := s.queryBucketsLocked(clientID, tunnelName, TrafficResolutionMinute, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix())
+		persisted, err := s.queryBucketsLocked(ownerUserID, clientID, tunnelName, TrafficResolutionMinute, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix())
 		if err != nil {
 			return TrafficQueryResult{}, err
 		}
@@ -340,7 +372,7 @@ func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Ti
 			}
 		}
 		for _, bucket := range s.pendingMinute {
-			if bucketMatchesRange(bucket, clientID, tunnelName, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix()) {
+			if bucketMatchesRangeForOwner(bucket, ownerUserID, clientID, tunnelName, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix()) {
 				if err := addTrafficBucket(combined, bucket); err != nil {
 					return TrafficQueryResult{}, err
 				}
@@ -352,7 +384,7 @@ func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Ti
 	case TrafficResolutionHour:
 		combined := make(map[string]TrafficBucket)
 		currentHourStart := hourFloorUTC(time.Now()).Unix()
-		persistedHours, err := s.queryBucketsLocked(clientID, tunnelName, TrafficResolutionHour, hourFloorUTC(from).Unix(), hourFloorUTC(to).Unix())
+		persistedHours, err := s.queryBucketsLocked(ownerUserID, clientID, tunnelName, TrafficResolutionHour, hourFloorUTC(from).Unix(), hourFloorUTC(to).Unix())
 		if err != nil {
 			return TrafficQueryResult{}, err
 		}
@@ -360,7 +392,7 @@ func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Ti
 			combined[trafficBucketKey(bucket)] = bucket
 		}
 
-		minuteBuckets, err := s.queryBucketsLocked(clientID, tunnelName, TrafficResolutionMinute, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix())
+		minuteBuckets, err := s.queryBucketsLocked(ownerUserID, clientID, tunnelName, TrafficResolutionMinute, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix())
 		if err != nil {
 			return TrafficQueryResult{}, err
 		}
@@ -371,7 +403,7 @@ func (s *TrafficStore) queryLocked(clientID, tunnelName string, from, to time.Ti
 		}
 
 		for _, bucket := range s.pendingMinute {
-			if bucketMatchesRange(bucket, clientID, tunnelName, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix()) {
+			if bucketMatchesRangeForOwner(bucket, ownerUserID, clientID, tunnelName, minuteFloorUTC(from).Unix(), minuteFloorUTC(to).Unix()) {
 				if err := foldMinuteBucketIntoHour(combined, bucket, currentHourStart, false); err != nil {
 					return TrafficQueryResult{}, err
 				}
@@ -477,12 +509,16 @@ func (s *TrafficStore) flushLocked() error {
 	return nil
 }
 
-func (s *TrafficStore) queryBucketsLocked(clientID, tunnelName string, resolution TrafficResolution, fromUnix, toUnix int64) ([]TrafficBucket, error) {
-	query := `SELECT b.tunnel_id, b.owner_client_id, b.ingress_client_id, b.target_client_id, b.topology, b.transport, b.client_id, b.tunnel_name, b.tunnel_type, b.resolution, b.bucket_start, b.ingress_bytes, b.egress_bytes, CASE WHEN t.id IS NULL THEN 1 ELSE 0 END
+func (s *TrafficStore) queryBucketsLocked(ownerUserID, clientID, tunnelName string, resolution TrafficResolution, fromUnix, toUnix int64) ([]TrafficBucket, error) {
+	query := `SELECT b.tunnel_id, COALESCE(b.owner_user_id, ''), b.owner_client_id, b.ingress_client_id, b.target_client_id, b.topology, b.transport, b.client_id, b.tunnel_name, b.tunnel_type, b.resolution, b.bucket_start, b.ingress_bytes, b.egress_bytes, CASE WHEN t.id IS NULL THEN 1 ELSE 0 END
 FROM traffic_buckets b
 LEFT JOIN tunnels t ON t.id = b.tunnel_id
 WHERE b.client_id = ? AND b.resolution = ? AND b.bucket_start >= ? AND b.bucket_start <= ?`
 	args := []any{clientID, string(resolution), fromUnix, toUnix}
+	if ownerUserID != "" {
+		query += ` AND b.owner_user_id = ?`
+		args = append(args, ownerUserID)
+	}
 	if tunnelName != "" {
 		query += ` AND (b.tunnel_name = ? OR b.tunnel_id = ?)`
 		args = append(args, tunnelName, tunnelName)
@@ -549,6 +585,7 @@ func scanTrafficBucketFields(row dbScanner, extra ...any) (TrafficBucket, error)
 	var ingressBytes, egressBytes int64
 	dest := []any{
 		&bucket.TunnelID,
+		&bucket.OwnerUserID,
 		&bucket.OwnerClientID,
 		&bucket.IngressClientID,
 		&bucket.TargetClientID,
@@ -580,7 +617,7 @@ func scanTrafficBucketFields(row dbScanner, extra ...any) (TrafficBucket, error)
 
 func (s *TrafficStore) rollupCompleteHoursLocked(now time.Time) error {
 	currentHourStart := hourFloorUTC(now).Unix()
-	rows, err := s.db.Query(`SELECT tunnel_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, (bucket_start / 3600) * 3600 AS hour_start, ingress_bytes, egress_bytes
+	rows, err := s.db.Query(`SELECT tunnel_id, COALESCE(owner_user_id, ''), owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, (bucket_start / 3600) * 3600 AS hour_start, ingress_bytes, egress_bytes
 FROM traffic_buckets
 WHERE resolution = ? AND bucket_start < ?
 ORDER BY client_id, tunnel_name, tunnel_type, hour_start`, string(TrafficResolutionMinute), currentHourStart)
@@ -592,7 +629,7 @@ ORDER BY client_id, tunnel_name, tunnel_type, hour_start`, string(TrafficResolut
 	for rows.Next() {
 		var bucket TrafficBucket
 		var ingressBytes, egressBytes int64
-		if err := rows.Scan(&bucket.TunnelID, &bucket.OwnerClientID, &bucket.IngressClientID, &bucket.TargetClientID, &bucket.Topology, &bucket.Transport, &bucket.ClientID, &bucket.TunnelName, &bucket.TunnelType, &bucket.BucketStart, &ingressBytes, &egressBytes); err != nil {
+		if err := rows.Scan(&bucket.TunnelID, &bucket.OwnerUserID, &bucket.OwnerClientID, &bucket.IngressClientID, &bucket.TargetClientID, &bucket.Topology, &bucket.Transport, &bucket.ClientID, &bucket.TunnelName, &bucket.TunnelType, &bucket.BucketStart, &ingressBytes, &egressBytes); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -660,6 +697,9 @@ func collectSortedBuckets(source map[string]TrafficBucket) []TrafficBucket {
 		buckets = append(buckets, bucket)
 	}
 	sort.Slice(buckets, func(i, j int) bool {
+		if buckets[i].OwnerUserID != buckets[j].OwnerUserID {
+			return buckets[i].OwnerUserID < buckets[j].OwnerUserID
+		}
 		if buckets[i].ClientID != buckets[j].ClientID {
 			return buckets[i].ClientID < buckets[j].ClientID
 		}
@@ -733,9 +773,10 @@ func upsertTrafficBucketAdd(tx *sql.Tx, bucket TrafficBucket) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO traffic_buckets (tunnel_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = tx.Exec(`INSERT INTO traffic_buckets (tunnel_id, owner_user_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		bucket.TunnelID,
+		nullableString(bucket.OwnerUserID),
 		bucket.OwnerClientID,
 		bucket.IngressClientID,
 		bucket.TargetClientID,
@@ -756,7 +797,7 @@ func findTrafficBucketTx(tx *sql.Tx, bucket TrafficBucket) (TrafficBucket, bool,
 	if err := hydrateTrafficBucketTx(tx, &bucket); err != nil {
 		return TrafficBucket{}, false, err
 	}
-	row := tx.QueryRow(`SELECT tunnel_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes
+	row := tx.QueryRow(`SELECT tunnel_id, COALESCE(owner_user_id, ''), owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes
 FROM traffic_buckets
 WHERE tunnel_id = ? AND transport = ? AND resolution = ? AND bucket_start = ?`,
 		bucket.TunnelID,
@@ -786,10 +827,11 @@ func upsertTrafficBucketReplace(tx *sql.Tx, bucket TrafficBucket) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO traffic_buckets (tunnel_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = tx.Exec(`INSERT INTO traffic_buckets (tunnel_id, owner_user_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(tunnel_id, transport, resolution, bucket_start)
 DO UPDATE SET
+	owner_user_id = COALESCE(excluded.owner_user_id, traffic_buckets.owner_user_id),
 	owner_client_id = excluded.owner_client_id,
 	ingress_client_id = excluded.ingress_client_id,
 	target_client_id = excluded.target_client_id,
@@ -800,6 +842,7 @@ DO UPDATE SET
 	ingress_bytes = excluded.ingress_bytes,
 	egress_bytes = excluded.egress_bytes`,
 		bucket.TunnelID,
+		nullableString(bucket.OwnerUserID),
 		bucket.OwnerClientID,
 		bucket.IngressClientID,
 		bucket.TargetClientID,
@@ -828,6 +871,7 @@ func addTrafficToExistingHourBucket(tx *sql.Tx, bucket TrafficBucket, currentHou
 	hourBucket := TrafficBucket{
 		TunnelID:        bucket.TunnelID,
 		ClientID:        bucket.ClientID,
+		OwnerUserID:     bucket.OwnerUserID,
 		OwnerClientID:   bucket.OwnerClientID,
 		IngressClientID: bucket.IngressClientID,
 		TargetClientID:  bucket.TargetClientID,
@@ -855,6 +899,7 @@ func foldMinuteBucketIntoHour(combined map[string]TrafficBucket, bucket TrafficB
 	hourBucket := TrafficBucket{
 		TunnelID:        bucket.TunnelID,
 		ClientID:        bucket.ClientID,
+		OwnerUserID:     bucket.OwnerUserID,
 		OwnerClientID:   bucket.OwnerClientID,
 		IngressClientID: bucket.IngressClientID,
 		TargetClientID:  bucket.TargetClientID,
@@ -887,6 +932,7 @@ func foldMinuteBucketIntoHour(combined map[string]TrafficBucket, bucket TrafficB
 func trafficBucketKey(bucket TrafficBucket) string {
 	seriesKey := trafficSeriesKeyFromBucket(bucket)
 	return strings.Join([]string{
+		bucket.OwnerUserID,
 		bucket.ClientID,
 		seriesKey.TunnelID,
 		seriesKey.TunnelName,
@@ -937,6 +983,13 @@ func bucketMatchesRange(bucket TrafficBucket, clientID, tunnelName string, fromU
 		return false
 	}
 	return bucket.BucketStart >= fromUnix && bucket.BucketStart <= toUnix
+}
+
+func bucketMatchesRangeForOwner(bucket TrafficBucket, ownerUserID, clientID, tunnelName string, fromUnix, toUnix int64) bool {
+	if ownerUserID != "" && bucket.OwnerUserID != ownerUserID {
+		return false
+	}
+	return bucketMatchesRange(bucket, clientID, tunnelName, fromUnix, toUnix)
 }
 
 func secondFloorUTC(t time.Time) time.Time {
@@ -1066,7 +1119,7 @@ func (s *TrafficStore) renamePersistedTrafficBucketsLocked(clientID, oldName, ne
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	rows, err := tx.Query(`SELECT tunnel_id, owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes
+	rows, err := tx.Query(`SELECT tunnel_id, COALESCE(owner_user_id, ''), owner_client_id, ingress_client_id, target_client_id, topology, transport, client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes
 FROM traffic_buckets
 WHERE client_id = ? AND tunnel_name = ?
 ORDER BY tunnel_type, resolution, bucket_start`, clientID, oldName)
@@ -1112,8 +1165,9 @@ func hydrateTrafficBucketTx(tx *sql.Tx, bucket *TrafficBucket) error {
 	}
 	if bucket.TunnelID == "" && bucket.ClientID != "" && bucket.TunnelName != "" {
 		var actualTransport string
-		err := tx.QueryRow(`SELECT id, owner_client_id, ingress_client_id, target_client_id, topology, actual_transport FROM tunnels WHERE client_id = ? AND name = ?`, bucket.ClientID, bucket.TunnelName).Scan(
+		err := tx.QueryRow(`SELECT id, COALESCE(owner_user_id, ''), owner_client_id, ingress_client_id, target_client_id, topology, actual_transport FROM tunnels WHERE client_id = ? AND name = ?`, bucket.ClientID, bucket.TunnelName).Scan(
 			&bucket.TunnelID,
+			&bucket.OwnerUserID,
 			&bucket.OwnerClientID,
 			&bucket.IngressClientID,
 			&bucket.TargetClientID,
@@ -1128,6 +1182,16 @@ func hydrateTrafficBucketTx(tx *sql.Tx, bucket *TrafficBucket) error {
 		}
 	}
 	applyTrafficBucketStorageDefaults(bucket)
+	if bucket.OwnerUserID == "" && bucket.OwnerClientID != "" {
+		var ownerUserID string
+		err := tx.QueryRow(`SELECT COALESCE(owner_user_id, '') FROM registered_clients WHERE id = ?`, bucket.OwnerClientID).Scan(&ownerUserID)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			bucket.OwnerUserID = ownerUserID
+		}
+	}
 	return nil
 }
 
