@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 
 import { shouldLogoutOnAPIError, tunnelApi } from './api';
 import { SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';

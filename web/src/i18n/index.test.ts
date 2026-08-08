@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 
 import { DEFAULT_LOCALE, LOCALE_STORAGE_KEY, resources, SUPPORTED_LOCALES } from '.';
 
