@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 
 import { describeFreshness, formatNetSpeed, formatRelativeTimestamp, formatTimestamp, bpsToMbpsInput, parseMbpsInputToBps } from './format';
 
