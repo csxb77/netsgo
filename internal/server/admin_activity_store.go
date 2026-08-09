@@ -487,6 +487,9 @@ func (s *AdminStore) SetAPIKeyActiveForUserWithActivity(ownerUserID, id string, 
 	var name string
 	var current int
 	if err := tx.QueryRow(`SELECT name, is_active FROM api_keys WHERE id = ? AND owner_user_id = ?`, id, ownerUserID).Scan(&name, &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrAPIKeyNotFound
+		}
 		return 0, err
 	}
 	if intToBool(current) == active {
@@ -555,6 +558,9 @@ func (s *AdminStore) DeleteAPIKeyForUserWithActivity(ownerUserID, id string, act
 	defer rollbackUnlessCommitted(tx, &committed)
 	var name string
 	if err := tx.QueryRow(`SELECT name FROM api_keys WHERE id = ? AND owner_user_id = ?`, id, ownerUserID).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrAPIKeyNotFound
+		}
 		return 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM api_keys WHERE id = ? AND owner_user_id = ?`, id, ownerUserID); err != nil {

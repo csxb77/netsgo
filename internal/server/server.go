@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"io/fs"
 	"net"
@@ -34,9 +35,12 @@ type Server struct {
 	serverDBCloseErr                    error
 	sseConnectionMu                     sync.Mutex
 	sseConnections                      *sseConnectionRegistry
-	clientTunnelMutationMu              sync.Mutex        // serializes registered-client deletion with tunnel target migration
-	userManagementMu                    sync.Mutex        // serializes user status/admin/delete transactions and last-admin checks
-	userLifecycleLocks                  sync.Map          // userID -> *sync.Mutex; serializes one user's runtime convergence
+	clientTunnelMutationMu              sync.Mutex // serializes registered-client deletion with tunnel target migration
+	userManagementMu                    sync.Mutex // serializes user status/admin/delete transactions and last-admin checks
+	userLifecycleLocks                  sync.Map   // userID -> *userLifecycleGate; entries live for the Server lifetime
+	userLifecycleHook                   func(stage, userID string)
+	userConvergenceHook                 func(context.Context, string) error
+	userConvergenceTimeout              time.Duration
 	serverConfigMutationMu              sync.Mutex        // serializes config persistence with port-policy enforcement
 	tunnelEventMu                       sync.Mutex        // preserves tunnel_changed ordering across state checks and publication
 	startTime                           time.Time         // server start time
@@ -85,6 +89,7 @@ type ClientConn struct {
 	// OwnerUserID is resolved exclusively by Server control-channel
 	// authentication. It is never accepted from a Client protocol message.
 	OwnerUserID    string
+	OwnerEpoch     uint64
 	InstallID      string
 	Info           protocol.ClientInfo
 	infoMu         sync.RWMutex
@@ -97,7 +102,8 @@ type ClientConn struct {
 	prevStatsAt    time.Time             // time of previous snapshot
 	statsMu        sync.RWMutex          // protects stats / prevStats
 	conn           *websocket.Conn
-	mu             sync.Mutex
+	mu             sync.Mutex     // protects the control connection pointer
+	writeMu        sync.Mutex     // serializes control-channel writers without blocking connection teardown
 	dataSession    *yamux.Session // data channel yamux session
 	dataMu         sync.RWMutex   // protects dataSession
 	dataToken      string

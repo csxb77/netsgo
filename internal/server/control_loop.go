@@ -69,15 +69,15 @@ func (s *Server) handleControlMessage(client *ClientConn, msg protocol.Message) 
 	case protocol.MsgTypeProxyClose:
 		s.handleProxyCloseMessage(client, msg)
 	case protocol.MsgTypeP2PSignal:
-		s.handleP2PSignalMessage(client, msg)
+		s.withClientRuntimePublication(client, func() { s.handleP2PSignalMessage(client, msg) })
 	case protocol.MsgTypeP2PSessionReady, protocol.MsgTypeP2PFailed, protocol.MsgTypeP2PClosed:
-		s.handleP2PStatusMessage(client, msg)
+		s.withClientRuntimePublication(client, func() { s.handleP2PStatusMessage(client, msg) })
 	case protocol.MsgTypeP2PStatsReport:
-		s.handleP2PStatsMessage(client, msg)
+		s.withClientFinalAccountingPublication(client, func() { s.handleP2PStatsMessage(client, msg) })
 	case protocol.MsgTypeP2PCreditDemand:
-		s.handleP2PCreditDemandMessage(client, msg)
+		s.withClientRuntimePublication(client, func() { s.handleP2PCreditDemandMessage(client, msg) })
 	case protocol.MsgTypeP2PCreditGrant:
-		s.handleP2PCreditGrantMessage(client, msg)
+		s.withClientRuntimePublication(client, func() { s.handleP2PCreditGrantMessage(client, msg) })
 	default:
 		log.Printf("⚠️ Unknown message type [%s]: %s", client.ID, msg.Type)
 	}
@@ -133,6 +133,19 @@ func (s *Server) handleProbeReportMessage(client *ClientConn, msg protocol.Messa
 		log.Printf("⚠️ Failed to parse probe report [%s]: %v", client.ID, err)
 		return
 	}
+	_, releaseOwnerGate, gateErr := s.acquireUserLifecycleRead(client.OwnerUserID, client.OwnerEpoch, true)
+	if gateErr != nil {
+		return
+	}
+	s.clientTunnelMutationMu.Lock()
+	current, currentOK := s.clients.Load(client.ID)
+	if !currentOK || current != client || !client.isLive() || !s.clientLifecycleCurrentLocked(client) {
+		s.clientTunnelMutationMu.Unlock()
+		releaseOwnerGate()
+		return
+	}
+	defer s.clientTunnelMutationMu.Unlock()
+	defer releaseOwnerGate()
 
 	now := time.Now()
 	stats.UpdatedAt = now
@@ -206,6 +219,19 @@ func (s *Server) handleProxyCreateMessage(client *ClientConn, msg protocol.Messa
 		}
 	}
 
+	_, releaseOwnerGate, gateErr := s.acquireUserLifecycleRead(client.OwnerUserID, client.OwnerEpoch, true)
+	if gateErr != nil {
+		log.Printf("⚠️ Rejecting legacy proxy publication for non-operational owner [%s]: %v", client.ID, gateErr)
+		s.invalidateLogicalSessionIfCurrent(client.ID, client.generation, "owner_not_operational")
+		return
+	}
+	s.clientTunnelMutationMu.Lock()
+	if current, ok := s.clients.Load(client.ID); !ok || current != client || !client.isLive() || !s.clientLifecycleCurrentLocked(client) {
+		s.clientTunnelMutationMu.Unlock()
+		releaseOwnerGate()
+		return
+	}
+
 	err := s.StartProxy(client, req)
 	var resp *protocol.Message
 	if err != nil {
@@ -226,6 +252,8 @@ func (s *Server) handleProxyCreateMessage(client *ClientConn, msg protocol.Messa
 			TransportPolicy: config.TransportPolicy, ActualTransport: config.ActualTransport,
 		})
 	}
+	s.clientTunnelMutationMu.Unlock()
+	releaseOwnerGate()
 
 	if err := client.writeJSON(resp); err != nil {
 		log.Printf("⚠️ Failed to send proxy response [%s]: %v", client.ID, err)
@@ -286,9 +314,33 @@ func (s *Server) handleTunnelRuntimeReportMessage(client *ClientConn, msg protoc
 		return
 	}
 
+	_, releaseOwnerGate, gateErr := s.acquireUserLifecycleRead(client.OwnerUserID, client.OwnerEpoch, true)
+	if gateErr != nil {
+		return
+	}
+	s.clientTunnelMutationMu.Lock()
+	currentClient, currentClientOK := s.clients.Load(client.ID)
+	currentStored, currentStoredOK, currentStoredErr := s.findStoredTunnelByID(report.TunnelID)
+	if !currentClientOK || currentClient != client || !client.isLive() || !s.clientLifecycleCurrentLocked(client) ||
+		currentStoredErr != nil || !currentStoredOK || currentStored.Revision != report.Revision ||
+		currentStored.OwnerUserID != client.OwnerUserID || !runtimeReportMatchesStoredTunnel(client.ID, currentStored, report) {
+		s.clientTunnelMutationMu.Unlock()
+		releaseOwnerGate()
+		return
+	}
+	stored = currentStored
+	reconcileTask, taskErr := s.newUnifiedTunnelReconcileTaskAtEpoch(stored, "runtime_report", client.OwnerEpoch)
+	if taskErr != nil {
+		s.clientTunnelMutationMu.Unlock()
+		releaseOwnerGate()
+		return
+	}
 	s.unifiedRuntime.recordReport(client.ID, report, time.Now())
 	s.emitTunnelChangedIfStored(stored.OwnerClientID, storedTunnelToProxyConfig(stored), "runtime_report")
-	s.scheduleUnifiedTunnelReconcile(stored, "runtime_report")
+	s.clientTunnelMutationMu.Unlock()
+	releaseOwnerGate()
+	s.runUserLifecycleHook("runtime_report_reconcile_captured", client.OwnerUserID)
+	s.scheduleCapturedUnifiedTunnelReconcile(stored, reconcileTask)
 	log.Printf("📩 Received tunnel runtime report [%s]: tunnel_id=%s role=%s revision=%d message=%q", client.ID, report.TunnelID, report.Role, report.Revision, report.Message)
 }
 

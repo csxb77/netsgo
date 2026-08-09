@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hashicorp/yamux"
 )
 
 type clientState string
@@ -109,18 +110,30 @@ func (s *Server) loadLiveClient(clientID string) (*ClientConn, bool) {
 }
 
 func (s *Server) promotePendingToLiveIfCurrent(client *ClientConn) bool {
+	releaseGate := func() {}
+	if client != nil && client.OwnerUserID != "" {
+		_, release, err := s.acquireUserLifecycleRead(client.OwnerUserID, client.OwnerEpoch, true)
+		if err != nil {
+			return false
+		}
+		releaseGate = release
+	}
+	defer releaseGate()
+
 	s.clientTunnelMutationMu.Lock()
-	defer s.clientTunnelMutationMu.Unlock()
 	client.lifecycleMu.Lock()
-	defer client.lifecycleMu.Unlock()
 
 	value, ok := s.clients.Load(client.ID)
 	if !ok || value != client {
+		client.lifecycleMu.Unlock()
+		s.clientTunnelMutationMu.Unlock()
 		return false
 	}
 	client.stateMu.Lock()
 	if client.state != clientStatePendingData {
 		client.stateMu.Unlock()
+		client.lifecycleMu.Unlock()
+		s.clientTunnelMutationMu.Unlock()
 		return false
 	}
 	if client.pendingTimer != nil {
@@ -129,10 +142,74 @@ func (s *Server) promotePendingToLiveIfCurrent(client *ClientConn) bool {
 	}
 	client.state = clientStateLive
 	client.stateMu.Unlock()
+	s.clientTunnelMutationMu.Unlock()
 
 	activityID := s.appendClientLifecycle(client, "online", clientDisconnectCause{ReasonCode: "normal_closure", Expected: true})
 	s.publishActivityID(activityID)
+	client.lifecycleMu.Unlock()
 	return true
+}
+
+// attachDataSessionIfCurrent performs the only publication of a data yamux
+// session. The user read gate is held only for this final mutation, never while
+// waiting for the WebSocket handshake acknowledgement.
+func (s *Server) attachDataSessionIfCurrent(client *ClientConn, session *yamux.Session) (oldSession *yamux.Session, promoted, attached bool) {
+	if client == nil || session == nil {
+		return nil, false, false
+	}
+	releaseGate := func() {}
+	if client.OwnerUserID != "" {
+		_, release, err := s.acquireUserLifecycleRead(client.OwnerUserID, client.OwnerEpoch, true)
+		if err != nil {
+			return nil, false, false
+		}
+		releaseGate = release
+	}
+	defer releaseGate()
+
+	s.clientTunnelMutationMu.Lock()
+	client.lifecycleMu.Lock()
+	value, ok := s.clients.Load(client.ID)
+	if !ok || value != client || client.generation == 0 || !s.clientLifecycleCurrentLocked(client) {
+		client.lifecycleMu.Unlock()
+		s.clientTunnelMutationMu.Unlock()
+		return nil, false, false
+	}
+
+	client.stateMu.Lock()
+	state := client.state
+	if state == clientStateClosing {
+		client.stateMu.Unlock()
+		client.lifecycleMu.Unlock()
+		s.clientTunnelMutationMu.Unlock()
+		return nil, false, false
+	}
+	if state == clientStatePendingData {
+		if client.pendingTimer != nil {
+			client.pendingTimer.Stop()
+			client.pendingTimer = nil
+		}
+		client.state = clientStateLive
+		promoted = true
+	}
+	client.stateMu.Unlock()
+
+	client.dataMu.Lock()
+	oldSession = client.dataSession
+	client.dataSession = session
+	client.dataMu.Unlock()
+	s.clientTunnelMutationMu.Unlock()
+
+	if promoted {
+		activityID := s.appendClientLifecycle(client, "online", clientDisconnectCause{ReasonCode: "normal_closure", Expected: true})
+		s.publishActivityID(activityID)
+		s.events.PublishScopedJSON("client_online", client.OwnerUserID, map[string]any{
+			"client_id": client.ID,
+			"info":      client.GetInfo(),
+		})
+	}
+	client.lifecycleMu.Unlock()
+	return oldSession, promoted, true
 }
 
 func (s *Server) invalidateLogicalSessionIfCurrent(clientID string, generation uint64, reason string) bool {

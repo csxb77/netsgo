@@ -19,15 +19,15 @@ type userActionCapabilities struct {
 }
 
 type userResponse struct {
-	ID          string                 `json:"id"`
-	Username    string                 `json:"username"`
-	IsAdmin     bool                   `json:"is_admin"`
-	Status      UserStatus             `json:"status"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	LastLogin   *time.Time             `json:"last_login,omitempty"`
-	Operational bool                   `json:"operational"`
-	Actions     userActionCapabilities `json:"actions,omitempty"`
+	ID          string                  `json:"id"`
+	Username    string                  `json:"username"`
+	IsAdmin     bool                    `json:"is_admin"`
+	Status      UserStatus              `json:"status"`
+	CreatedAt   time.Time               `json:"created_at"`
+	UpdatedAt   time.Time               `json:"updated_at"`
+	LastLogin   *time.Time              `json:"last_login,omitempty"`
+	Operational bool                    `json:"operational"`
+	Actions     *userActionCapabilities `json:"actions,omitempty"`
 }
 
 type userPageResponse struct {
@@ -67,6 +67,7 @@ func userActionCapabilitiesFor(principal *RequestPrincipal, user User, activeAdm
 }
 
 func userResponseFor(principal *RequestPrincipal, user User, activeAdminCount int) userResponse {
+	actions := userActionCapabilitiesFor(principal, user, activeAdminCount)
 	return userResponse{
 		ID:          user.ID,
 		Username:    user.Username,
@@ -76,7 +77,20 @@ func userResponseFor(principal *RequestPrincipal, user User, activeAdminCount in
 		UpdatedAt:   user.UpdatedAt,
 		LastLogin:   user.LastLogin,
 		Operational: isOperationalUser(user),
-		Actions:     userActionCapabilitiesFor(principal, user, activeAdminCount),
+		Actions:     &actions,
+	}
+}
+
+func userMutationResponse(user User) userResponse {
+	return userResponse{
+		ID:          user.ID,
+		Username:    user.Username,
+		IsAdmin:     user.IsAdmin,
+		Status:      user.Status,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		LastLogin:   user.LastLogin,
+		Operational: isOperationalUser(user),
 	}
 }
 
@@ -134,12 +148,16 @@ func (s *Server) handleAPIAdminUsers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		options, err := parseUserListOptions(r)
 		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, "invalid_user_list_query", err.Error())
+			writeAPIError(w, http.StatusBadRequest, "invalid_user_list_query", "invalid user list query")
 			return
 		}
 		page, err := s.auth.adminStore.ListUsers(options)
 		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, "invalid_user_cursor", "invalid user cursor")
+			if errors.Is(err, ErrInvalidUserCursor) {
+				writeAPIError(w, http.StatusBadRequest, "invalid_user_cursor", "invalid user cursor")
+				return
+			}
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 		principal := GetPrincipalFromContext(r.Context())
@@ -167,20 +185,20 @@ func (s *Server) handleAPIAdminUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		user, activityID, err := s.auth.adminStore.CreateUserWithActivity(request.Username, request.Password, s.activityActorForRequest(r))
 		if err != nil {
-			if errors.Is(err, ErrUserAlreadyExists) {
+			switch {
+			case errors.Is(err, ErrUserAlreadyExists):
 				writeAPIError(w, http.StatusConflict, "username_taken", "username is already in use")
-				return
+			case errors.Is(err, ErrInvalidUsername):
+				writeAPIError(w, http.StatusBadRequest, "invalid_username", "invalid username")
+			case errors.Is(err, ErrInvalidPassword):
+				writeAPIError(w, http.StatusBadRequest, "invalid_password", "invalid password")
+			default:
+				writeAPIError(w, http.StatusServiceUnavailable, "user_mutation_failed", "user mutation failed")
 			}
-			writeAPIError(w, http.StatusBadRequest, "invalid_user", err.Error())
 			return
 		}
 		s.publishActivityID(activityID)
-		activeAdmins, err := s.activeAdminCount()
-		if err != nil {
-			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
-			return
-		}
-		encodeJSON(w, http.StatusCreated, userResponseFor(GetPrincipalFromContext(r.Context()), user, activeAdmins))
+		encodeJSON(w, http.StatusCreated, userMutationResponse(user))
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
@@ -221,6 +239,27 @@ func (s *Server) handleAPIAdminUser(w http.ResponseWriter, r *http.Request) {
 	encodeJSON(w, http.StatusOK, userResponseFor(GetPrincipalFromContext(r.Context()), user, activeAdmins))
 }
 
+func (s *Server) handleAPIAdminUserDeletionImpact(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.RLock()
+	defer gate.mu.RUnlock()
+	impact, err := s.auth.adminStore.GetUserDeletionImpact(userID)
+	if errors.Is(err, ErrUserNotFound) {
+		writeAPIError(w, http.StatusNotFound, "user_not_found", "user not found")
+		return
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
+		return
+	}
+	encodeJSON(w, http.StatusOK, impact)
+}
+
 func (s *Server) handleAPIAdminUserUsername(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
@@ -233,7 +272,17 @@ func (s *Server) handleAPIAdminUserUsername(w http.ResponseWriter, r *http.Reque
 		writeJSONRequestDecodeError(w, err)
 		return
 	}
-	user, activityID, err := s.auth.adminStore.UpdateUserUsernameWithActivity(r.PathValue("user_id"), request.Username, s.activityActorForRequest(r))
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	s.userManagementMu.Lock()
+	user, activityID, err := s.auth.adminStore.UpdateUserUsernameWithActivity(userID, request.Username, s.activityActorForRequest(r))
+	s.userManagementMu.Unlock()
 	if errors.Is(err, ErrUserNotFound) {
 		writeAPIError(w, http.StatusNotFound, "user_not_found", "user not found")
 		return
@@ -242,14 +291,17 @@ func (s *Server) handleAPIAdminUserUsername(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusConflict, "username_taken", "username is already in use")
 		return
 	}
+	if errors.Is(err, ErrInvalidUsername) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_username", "invalid username")
+		return
+	}
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_user", err.Error())
+		writeAPIError(w, http.StatusServiceUnavailable, "user_mutation_failed", "user mutation failed")
 		return
 	}
 	s.cancelSSEForUser(user.ID, "user_username_changed")
 	s.publishActivityID(activityID)
-	activeAdmins, _ := s.activeAdminCount()
-	encodeJSON(w, http.StatusOK, userResponseFor(GetPrincipalFromContext(r.Context()), user, activeAdmins))
+	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
 
 func (s *Server) handleAPIAdminUserPassword(w http.ResponseWriter, r *http.Request) {
@@ -264,19 +316,32 @@ func (s *Server) handleAPIAdminUserPassword(w http.ResponseWriter, r *http.Reque
 		writeJSONRequestDecodeError(w, err)
 		return
 	}
-	user, activityID, err := s.auth.adminStore.ResetUserPasswordWithActivity(r.PathValue("user_id"), request.Password, s.activityActorForRequest(r))
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	s.userManagementMu.Lock()
+	user, activityID, err := s.auth.adminStore.ResetUserPasswordWithActivity(userID, request.Password, s.activityActorForRequest(r))
+	s.userManagementMu.Unlock()
 	if errors.Is(err, ErrUserNotFound) {
 		writeAPIError(w, http.StatusNotFound, "user_not_found", "user not found")
 		return
 	}
+	if errors.Is(err, ErrInvalidPassword) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_password", "invalid password")
+		return
+	}
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_password", err.Error())
+		writeAPIError(w, http.StatusServiceUnavailable, "user_mutation_failed", "user mutation failed")
 		return
 	}
 	s.cancelSSEForUser(user.ID, "user_password_reset")
 	s.publishActivityID(activityID)
-	activeAdmins, _ := s.activeAdminCount()
-	encodeJSON(w, http.StatusOK, userResponseFor(GetPrincipalFromContext(r.Context()), user, activeAdmins))
+	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
 
 func (s *Server) handleAPIAdminUserAdmin(w http.ResponseWriter, r *http.Request) {
@@ -288,15 +353,20 @@ func (s *Server) handleAPIAdminUserAdmin(w http.ResponseWriter, r *http.Request)
 		IsAdmin *bool `json:"is_admin"`
 	}
 	if err := decodeJSONRequestBody(r, &request); err != nil || request.IsAdmin == nil {
-		if err == nil {
-			err = errors.New("is_admin is required")
-		}
-		writeAPIError(w, http.StatusBadRequest, "invalid_user_admin_state", err.Error())
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_admin_state", "is_admin is required")
 		return
 	}
 	principal := GetPrincipalFromContext(r.Context())
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	s.userManagementMu.Lock()
-	user, changed, activityID, err := s.auth.adminStore.SetUserAdminWithActivity(principal.UserID, r.PathValue("user_id"), *request.IsAdmin, s.activityActorForRequest(r))
+	user, changed, activityID, err := s.auth.adminStore.SetUserAdminWithActivity(principal.UserID, userID, *request.IsAdmin, s.activityActorForRequest(r))
 	s.userManagementMu.Unlock()
 	if !writeUserLifecycleError(w, err) {
 		return
@@ -305,8 +375,7 @@ func (s *Server) handleAPIAdminUserAdmin(w http.ResponseWriter, r *http.Request)
 		s.cancelSSEForUser(user.ID, "user_admin_changed")
 		s.publishActivityID(activityID)
 	}
-	activeAdmins, _ := s.activeAdminCount()
-	encodeJSON(w, http.StatusOK, userResponseFor(principal, user, activeAdmins))
+	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
 
 func (s *Server) handleAPIAdminUserDisable(w http.ResponseWriter, r *http.Request) {
@@ -315,24 +384,33 @@ func (s *Server) handleAPIAdminUserDisable(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	principal := GetPrincipalFromContext(r.Context())
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	s.userManagementMu.Lock()
-	user, changed, activityID, err := s.auth.adminStore.SetUserStatusWithActivity(principal.UserID, r.PathValue("user_id"), UserStatusDisabled, s.activityActorForRequest(r))
+	user, changed, activityID, err := s.auth.adminStore.SetUserStatusWithActivity(principal.UserID, userID, UserStatusDisabled, s.activityActorForRequest(r))
 	s.userManagementMu.Unlock()
 	if !writeUserLifecycleError(w, err) {
 		return
 	}
-	s.cancelSSEForUser(user.ID, "user_disabled")
+	gate.epoch++
 	if changed {
 		s.publishActivityID(activityID)
 	}
-	// Status is committed before runtime convergence. New control/data channel
-	// handshakes fail closed on the status check, while existing sessions are
-	// actively torn down through the same lifecycle path as a disconnect.
-	if changed {
-		s.invalidateLogicalSessionsForUser(user.ID, "user_disabled")
+	ctx, cancel := s.newUserConvergenceContext()
+	err = s.convergeUserRuntime(ctx, user.ID)
+	cancel()
+	if err != nil {
+		s.recordUserConvergenceIncomplete(user, s.activityActorForRequest(r), err)
+		writeAPIError(w, http.StatusServiceUnavailable, "user_disable_incomplete", "user runtime convergence is incomplete")
+		return
 	}
-	activeAdmins, _ := s.activeAdminCount()
-	encodeJSON(w, http.StatusOK, userResponseFor(principal, user, activeAdmins))
+	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
 
 func (s *Server) handleAPIAdminUserEnable(w http.ResponseWriter, r *http.Request) {
@@ -341,17 +419,50 @@ func (s *Server) handleAPIAdminUserEnable(w http.ResponseWriter, r *http.Request
 		return
 	}
 	principal := GetPrincipalFromContext(r.Context())
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+
 	s.userManagementMu.Lock()
-	user, changed, activityID, err := s.auth.adminStore.SetUserStatusWithActivity(principal.UserID, r.PathValue("user_id"), UserStatusActive, s.activityActorForRequest(r))
+	user, err := s.auth.adminStore.GetUser(userID)
 	s.userManagementMu.Unlock()
 	if !writeUserLifecycleError(w, err) {
 		return
 	}
+	if user.Status == UserStatusActive {
+		encodeJSON(w, http.StatusOK, userMutationResponse(user))
+		return
+	}
+	if user.Status != UserStatusDisabled {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_status", "invalid user status")
+		return
+	}
+
+	ctx, cancel := s.newUserConvergenceContext()
+	err = s.convergeUserRuntime(ctx, user.ID)
+	cancel()
+	if err != nil {
+		s.recordUserConvergenceIncomplete(user, s.activityActorForRequest(r), err)
+		writeAPIError(w, http.StatusServiceUnavailable, "user_disable_incomplete", "user runtime convergence is incomplete")
+		return
+	}
+
+	s.userManagementMu.Lock()
+	user, changed, activityID, err := s.auth.adminStore.SetUserStatusWithActivity(principal.UserID, userID, UserStatusActive, s.activityActorForRequest(r))
+	s.userManagementMu.Unlock()
+	if !writeUserLifecycleError(w, err) {
+		return
+	}
+	gate.epoch++
 	if changed {
 		s.publishActivityID(activityID)
 	}
-	activeAdmins, _ := s.activeAdminCount()
-	encodeJSON(w, http.StatusOK, userResponseFor(principal, user, activeAdmins))
+	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
 
 func (s *Server) handleAPIAdminUserDelete(w http.ResponseWriter, r *http.Request) {
@@ -360,17 +471,49 @@ func (s *Server) handleAPIAdminUserDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	principal := GetPrincipalFromContext(r.Context())
-	// A user can only be deleted after disable.  No new runtime session can be
-	// admitted after that transition; converge any in-flight session before
-	// removing the persisted ownership roots.
-	s.invalidateLogicalSessionsForUser(r.PathValue("user_id"), "user_disabled")
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+
 	s.userManagementMu.Lock()
-	err := s.auth.adminStore.DeleteDisabledUser(principal.UserID, r.PathValue("user_id"))
+	user, err := s.auth.adminStore.GetUser(userID)
 	s.userManagementMu.Unlock()
 	if !writeUserLifecycleError(w, err) {
 		return
 	}
-	s.cancelSSEForUser(r.PathValue("user_id"), "user_deleted")
+	if principal.UserID == user.ID {
+		writeUserLifecycleError(w, ErrSelfUserLifecycleMutation)
+		return
+	}
+	if user.Status != UserStatusDisabled {
+		writeUserLifecycleError(w, ErrUserMustBeDisabled)
+		return
+	}
+
+	ctx, cancel := s.newUserConvergenceContext()
+	err = s.convergeUserRuntime(ctx, user.ID)
+	cancel()
+	if err != nil {
+		s.recordUserConvergenceIncomplete(user, s.activityActorForRequest(r), err)
+		writeAPIError(w, http.StatusServiceUnavailable, "user_disable_incomplete", "user runtime convergence is incomplete")
+		return
+	}
+
+	s.userManagementMu.Lock()
+	err = s.trafficStore.withUserDeletionBoundary(user.ID, func() error {
+		return s.auth.adminStore.DeleteDisabledUser(principal.UserID, user.ID)
+	})
+	s.userManagementMu.Unlock()
+	if !writeUserLifecycleError(w, err) {
+		return
+	}
+	gate.epoch++
+	s.cancelSSEForUser(user.ID, "user_deleted")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -379,15 +522,25 @@ func (s *Server) handleAPIAdminUserSessionsRevoke(w http.ResponseWriter, r *http
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	userID := strings.TrimSpace(r.PathValue("user_id"))
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_user_id", "user id is required")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	if _, ok := s.targetUserForRequest(w, r); !ok {
 		return
 	}
-	activityID, err := s.auth.adminStore.DeleteSessionsByUserIDWithActivity(r.PathValue("user_id"), s.activityActorForRequest(r))
+	s.userManagementMu.Lock()
+	activityID, err := s.auth.adminStore.DeleteSessionsByUserIDWithActivity(userID, s.activityActorForRequest(r))
+	s.userManagementMu.Unlock()
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "session_revoke_failed", "failed to revoke user sessions")
 		return
 	}
-	s.cancelSSEForUser(r.PathValue("user_id"), "user_sessions_revoked")
+	s.cancelSSEForUser(userID, "user_sessions_revoked")
 	s.publishActivityID(activityID)
 	encodeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
@@ -407,6 +560,8 @@ func writeUserLifecycleError(w http.ResponseWriter, err error) bool {
 		writeAPIError(w, http.StatusConflict, "last_operational_admin", "at least one active administrator must remain")
 	case errors.Is(err, ErrInvalidUserStatus):
 		writeAPIError(w, http.StatusBadRequest, "invalid_user_status", "invalid user status")
+	case errors.Is(err, ErrUserConvergenceIncomplete):
+		writeAPIError(w, http.StatusServiceUnavailable, "user_disable_incomplete", "user runtime convergence is incomplete")
 	default:
 		writeAPIError(w, http.StatusServiceUnavailable, "user_mutation_failed", "user mutation failed")
 	}

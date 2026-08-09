@@ -462,11 +462,22 @@ export interface ConsoleSummary {
 }
 
 export interface ConsoleSnapshot {
-  clients?: Client[];
-  summary?: ConsoleSummary;
-  server_status?: ServerStatus;
-  generated_at?: string;
-  fresh_until?: string;
+  clients: Client[];
+  summary: ConsoleSummary;
+  bootstrap: ResourceBootstrap;
+  generated_at: string;
+  fresh_until: string;
+}
+
+/**
+ * Non-sensitive server metadata returned inside a user-scoped console
+ * snapshot. Resource dialogs must use this view instead of the administrator
+ * system-status endpoint.
+ */
+export interface ResourceBootstrap {
+  version: string;
+  server_addr: string;
+  allowed_ports: PortRange[];
 }
 
 // --- API ---
@@ -565,6 +576,16 @@ export interface ManagedUser extends Principal {
   last_login?: string;
   operational: boolean;
   actions?: UserActionCapabilities;
+}
+
+export interface UserDeletionImpact {
+  user_id: string;
+  api_keys: number;
+  clients: number;
+  tunnels: number;
+  traffic_buckets: number;
+  activity_events: number;
+  generated_at: string;
 }
 
 export interface UserListResponse {

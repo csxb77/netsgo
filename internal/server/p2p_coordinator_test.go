@@ -153,8 +153,8 @@ func TestP2PCoordinatorRejectsStaleSignalSequenceAndGeneration(t *testing.T) {
 	}
 	signal := protocol.P2PSignal{SessionID: grant.sessionID, Sequence: 1, Kind: protocol.P2PSignalOffer, SDP: "v=0"}
 	peer, err := c.authorizeSignal("a", 10, signal)
-	if err != nil || peer != "b" {
-		t.Fatalf("valid signal rejected: peer=%s err=%v", peer, err)
+	if err != nil || peer.clientID != "b" {
+		t.Fatalf("valid signal rejected: peer=%+v err=%v", peer, err)
 	}
 	if _, err := c.authorizeSignal("a", 10, signal); err == nil {
 		t.Fatal("replayed signal accepted")
@@ -220,6 +220,55 @@ func TestP2PCoordinatorClientDisconnectClosesPairOnlyForCurrentGeneration(t *tes
 	}
 }
 
+func TestP2PCoordinatorPinsOutboundsToOwnerEpochAndParticipantGenerations(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	c := newP2PCoordinator(func() time.Time { return now })
+	grant, _, err := c.ensureGrant(p2pGrantSpec{
+		tunnelID: "t1", revision: 1,
+		ownerUserID: "owner-a", ownerEpoch: 7,
+		ingressClientID: "a", targetClientID: "b",
+		ingressGeneration: 10, targetGeneration: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPinned := func(outbound p2pOutbound) {
+		t.Helper()
+		wantGeneration := uint64(10)
+		if outbound.clientID == "b" {
+			wantGeneration = 20
+		}
+		if outbound.ownerUserID != "owner-a" || outbound.ownerEpoch != 7 || outbound.clientGeneration != wantGeneration {
+			t.Fatalf("outbound pin = client=%q generation=%d owner=%q epoch=%d", outbound.clientID, outbound.clientGeneration, outbound.ownerUserID, outbound.ownerEpoch)
+		}
+	}
+	prepare, err := c.prepareMessages(grant.sessionID)
+	if err != nil || len(prepare) != 2 {
+		t.Fatalf("prepare messages=%d err=%v", len(prepare), err)
+	}
+	for _, outbound := range prepare {
+		assertPinned(outbound)
+	}
+	peer, err := c.authorizeSignal("a", 10, protocol.P2PSignal{SessionID: grant.sessionID, Sequence: 1, Kind: protocol.P2PSignalOffer, SDP: "v=0"})
+	if err != nil || peer.clientID != "b" || peer.clientGeneration != 20 || peer.ownerUserID != "owner-a" || peer.ownerEpoch != 7 {
+		t.Fatalf("forward participant pin=%+v err=%v", peer, err)
+	}
+	renewed := c.renew(nil)
+	if len(renewed.Outbounds) != 4 {
+		t.Fatalf("renew outbounds=%d want=4", len(renewed.Outbounds))
+	}
+	for _, outbound := range renewed.Outbounds {
+		assertPinned(outbound)
+	}
+	closed := c.closeClients("owner-a", map[string]uint64{"a": 10, "b": 20}, "user_disabled")
+	if len(closed) != 1 || len(closed[0].Outbounds) != 2 {
+		t.Fatalf("close results=%+v", closed)
+	}
+	for _, outbound := range closed[0].Outbounds {
+		assertPinned(outbound)
+	}
+}
+
 func TestP2PCoordinatorStatsAreOwnerOnlyAndIdempotent(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	c := newP2PCoordinator(func() time.Time { return now })
@@ -256,8 +305,8 @@ func TestP2PCoordinatorAuthorizesCreditDirectionAndCumulativeBounds(t *testing.T
 		t.Fatal("owner was allowed to send ingress demand")
 	}
 	peer, err := c.authorizeCreditDemand("a", 10, demand)
-	if err != nil || peer != "b" {
-		t.Fatalf("valid demand peer=%s err=%v", peer, err)
+	if err != nil || peer.clientID != "b" {
+		t.Fatalf("valid demand peer=%+v err=%v", peer, err)
 	}
 	credit := protocol.P2PCreditGrant{SessionID: grant.sessionID, GrantID: grant.grantID, TunnelID: "t1", Revision: 1, Sequence: 1, GrantedBytes: 101}
 	if _, err := c.authorizeCreditGrant("b", 20, credit); err == nil {
@@ -265,8 +314,8 @@ func TestP2PCoordinatorAuthorizesCreditDirectionAndCumulativeBounds(t *testing.T
 	}
 	credit.GrantedBytes = 50
 	peer, err = c.authorizeCreditGrant("b", 20, credit)
-	if err != nil || peer != "a" {
-		t.Fatalf("valid grant peer=%s err=%v", peer, err)
+	if err != nil || peer.clientID != "a" {
+		t.Fatalf("valid grant peer=%+v err=%v", peer, err)
 	}
 }
 
@@ -381,5 +430,154 @@ func TestHandleP2PStatsAcceptsFinalReportFromClosingOwner(t *testing.T) {
 	s.p2p.mu.Unlock()
 	if cursor.sequence != report.Sequence || cursor.ingress != report.IngressBytes || cursor.egress != report.EgressBytes {
 		t.Fatalf("final stats cursor=%+v want sequence=%d ingress=%d egress=%d", cursor, report.Sequence, report.IngressBytes, report.EgressBytes)
+	}
+}
+
+type archivedP2PStatsControlFixture struct {
+	server      *Server
+	gate        *userLifecycleGate
+	oldClient   *ClientConn
+	replacement *ClientConn
+	grant       p2pGrant
+	report      protocol.P2PStatsReport
+	message     protocol.Message
+}
+
+func newArchivedP2PStatsControlFixture(t *testing.T) archivedP2PStatsControlFixture {
+	t.Helper()
+
+	s := newUnifiedE2ETestServer(t)
+	owner, err := s.auth.adminStore.CreateUser("p2p-final-accounting-owner", "Password123")
+	if err != nil {
+		t.Fatalf("create final-accounting owner: %v", err)
+	}
+	ingress, err := s.auth.adminStore.GetOrCreateClientForUser(owner.ID, "p2p-final-accounting-ingress", protocol.ClientInfo{Hostname: "p2p-final-accounting-ingress"}, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("register final-accounting ingress: %v", err)
+	}
+	target, err := s.auth.adminStore.GetOrCreateClientForUser(owner.ID, "p2p-final-accounting-target", protocol.ClientInfo{Hostname: "p2p-final-accounting-target"}, "127.0.0.2")
+	if err != nil {
+		t.Fatalf("register final-accounting target: %v", err)
+	}
+
+	stored := testStoredC2CTunnelForReconcile(
+		"p2p-final-accounting-tunnel",
+		"p2p-final-accounting",
+		protocol.ProxyDesiredStateRunning,
+		protocol.ProxyRuntimeStateExposed,
+		24441,
+	)
+	stored.ClientID = target.ID
+	stored.OwnerClientID = target.ID
+	stored.OwnerUserID = owner.ID
+	stored.Ingress.ClientID = ingress.ID
+	stored.Target.ClientID = target.ID
+	stored.TransportPolicy = protocol.TransportPolicyDirectPreferred
+	if _, err := s.store.AddTunnelForUser(owner.ID, stored, nil); err != nil {
+		t.Fatalf("add final-accounting tunnel: %v", err)
+	}
+
+	gate := s.lifecycleGate(owner.ID)
+	grant, _, err := s.p2p.ensureGrant(p2pGrantSpec{
+		tunnelID: stored.ID, revision: stored.Revision,
+		ownerUserID: owner.ID, ownerEpoch: gate.epoch,
+		ingressClientID: ingress.ID, targetClientID: target.ID,
+		ingressGeneration: 10, targetGeneration: 20,
+	})
+	if err != nil {
+		t.Fatalf("ensure final-accounting grant: %v", err)
+	}
+	s.p2p.closeSession(grant.sessionID, "data_session_closed")
+
+	oldClient := &ClientConn{
+		ID: target.ID, OwnerUserID: owner.ID, OwnerEpoch: gate.epoch,
+		generation: 20, state: clientStateClosing,
+	}
+	replacement := &ClientConn{
+		ID: target.ID, OwnerUserID: owner.ID, OwnerEpoch: gate.epoch,
+		generation: 21, state: clientStateLive,
+	}
+	report := protocol.P2PStatsReport{
+		SessionID: grant.sessionID, GrantID: grant.grantID,
+		TunnelID: stored.ID, Revision: stored.Revision,
+		Epoch: grant.sessionID + "." + grant.grantID, Sequence: 1,
+		IngressBytes: 24, EgressBytes: 24,
+	}
+	message, err := protocol.NewMessage(protocol.MsgTypeP2PStatsReport, report)
+	if err != nil {
+		t.Fatalf("build final-accounting report: %v", err)
+	}
+	return archivedP2PStatsControlFixture{
+		server: s, gate: gate, oldClient: oldClient, replacement: replacement,
+		grant: grant, report: report, message: *message,
+	}
+}
+
+func (f archivedP2PStatsControlFixture) cursor(t *testing.T) p2pStatsCursor {
+	t.Helper()
+	f.server.p2p.mu.Lock()
+	defer f.server.p2p.mu.Unlock()
+	closed, ok := f.server.p2p.closedStats[f.grant.grantID]
+	if !ok {
+		t.Fatalf("archived stats grant %q is missing", f.grant.grantID)
+	}
+	return closed.cursor
+}
+
+func (f archivedP2PStatsControlFixture) drainDirectTraffic() (uint64, uint64) {
+	var ingress, egress uint64
+	for _, delta := range f.server.trafficAccumulator.Drain() {
+		if delta.TunnelID == f.report.TunnelID && delta.Revision == f.report.Revision && delta.Transport == protocol.ActualTransportPeerDirect {
+			ingress += delta.IngressBytes
+			egress += delta.EgressBytes
+		}
+	}
+	return ingress, egress
+}
+
+func TestHandleControlP2PStatsAcceptsArchivedGenerationAcrossPublicationStates(t *testing.T) {
+	for _, publicationState := range []string{"closing_current", "removed", "replaced_generation"} {
+		t.Run(publicationState, func(t *testing.T) {
+			fixture := newArchivedP2PStatsControlFixture(t)
+			switch publicationState {
+			case "closing_current":
+				fixture.server.clients.Store(fixture.oldClient.ID, fixture.oldClient)
+			case "replaced_generation":
+				fixture.server.clients.Store(fixture.replacement.ID, fixture.replacement)
+			}
+
+			fixture.server.handleControlMessage(fixture.oldClient, fixture.message)
+			cursor := fixture.cursor(t)
+			if cursor.sequence != fixture.report.Sequence || cursor.ingress != fixture.report.IngressBytes || cursor.egress != fixture.report.EgressBytes {
+				t.Fatalf("archived stats cursor=%+v want sequence=%d ingress=%d egress=%d", cursor, fixture.report.Sequence, fixture.report.IngressBytes, fixture.report.EgressBytes)
+			}
+			if ingress, egress := fixture.drainDirectTraffic(); ingress != fixture.report.IngressBytes || egress != fixture.report.EgressBytes {
+				t.Fatalf("direct traffic after final report=(%d,%d) want=(%d,%d)", ingress, egress, fixture.report.IngressBytes, fixture.report.EgressBytes)
+			}
+
+			fixture.server.handleControlMessage(fixture.oldClient, fixture.message)
+			if replayCursor := fixture.cursor(t); replayCursor != cursor {
+				t.Fatalf("replayed final report changed cursor: before=%+v after=%+v", cursor, replayCursor)
+			}
+			if ingress, egress := fixture.drainDirectTraffic(); ingress != 0 || egress != 0 {
+				t.Fatalf("replayed final report duplicated traffic: got=(%d,%d)", ingress, egress)
+			}
+		})
+	}
+}
+
+func TestHandleControlP2PStatsRejectsArchivedOwnerEpoch(t *testing.T) {
+	fixture := newArchivedP2PStatsControlFixture(t)
+	fixture.server.clients.Store(fixture.oldClient.ID, fixture.oldClient)
+	fixture.gate.mu.Lock()
+	fixture.gate.epoch++
+	fixture.gate.mu.Unlock()
+
+	fixture.server.handleControlMessage(fixture.oldClient, fixture.message)
+	if cursor := fixture.cursor(t); cursor != (p2pStatsCursor{}) {
+		t.Fatalf("stale owner epoch consumed archived report: cursor=%+v", cursor)
+	}
+	if ingress, egress := fixture.drainDirectTraffic(); ingress != 0 || egress != 0 {
+		t.Fatalf("stale owner epoch recorded traffic: got=(%d,%d)", ingress, egress)
 	}
 }

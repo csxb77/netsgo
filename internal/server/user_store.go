@@ -21,6 +21,9 @@ var (
 	ErrUserNotFound         = errors.New("user not found")
 	ErrUserMustBeDisabled   = errors.New("user must be disabled before deletion")
 	ErrInvalidUserStatus    = errors.New("invalid user status")
+	ErrInvalidUserCursor    = errors.New("invalid user cursor")
+	ErrInvalidUsername      = errors.New("invalid username")
+	ErrInvalidPassword      = errors.New("invalid password")
 	ErrUserAlreadyExists    = errors.New("username is already in use")
 	ErrUserOwnerUnavailable = errors.New("legacy owner user is unavailable")
 )
@@ -39,6 +42,16 @@ type UserPage struct {
 	Items      []User `json:"items"`
 	NextCursor string `json:"next_cursor,omitempty"`
 	HasMore    bool   `json:"has_more"`
+}
+
+type UserDeletionImpact struct {
+	UserID         string    `json:"user_id"`
+	APIKeys        int64     `json:"api_keys"`
+	Clients        int64     `json:"clients"`
+	Tunnels        int64     `json:"tunnels"`
+	TrafficBuckets int64     `json:"traffic_buckets"`
+	ActivityEvents int64     `json:"activity_events"`
+	GeneratedAt    time.Time `json:"generated_at"`
 }
 
 type userListCursor struct {
@@ -70,17 +83,17 @@ func decodeUserListCursor(raw string) (userListCursor, error) {
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return userListCursor{}, fmt.Errorf("decode user cursor: %w", err)
+		return userListCursor{}, fmt.Errorf("%w: decode base64 payload: %v", ErrInvalidUserCursor, err)
 	}
 	var cursor userListCursor
 	if err := json.Unmarshal(payload, &cursor); err != nil {
-		return userListCursor{}, fmt.Errorf("decode user cursor: %w", err)
+		return userListCursor{}, fmt.Errorf("%w: decode JSON payload: %v", ErrInvalidUserCursor, err)
 	}
 	if cursor.ID == "" || cursor.CreatedAt == "" {
-		return userListCursor{}, fmt.Errorf("decode user cursor: missing sort position")
+		return userListCursor{}, fmt.Errorf("%w: missing sort position", ErrInvalidUserCursor)
 	}
 	if _, err := parseTime(cursor.CreatedAt); err != nil {
-		return userListCursor{}, fmt.Errorf("decode user cursor: invalid created_at: %w", err)
+		return userListCursor{}, fmt.Errorf("%w: invalid created_at: %v", ErrInvalidUserCursor, err)
 	}
 	return cursor, nil
 }
@@ -269,7 +282,7 @@ func (s *AdminStore) ListUsers(options UserListOptions) (UserPage, error) {
 func normalizeUsername(username string) (string, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
-		return "", fmt.Errorf("username is required")
+		return "", fmt.Errorf("%w: username is required", ErrInvalidUsername)
 	}
 	return username, nil
 }
@@ -298,7 +311,7 @@ func (s *AdminStore) createUser(username, password string, actor *ActivityActor)
 		return User{}, 0, err
 	}
 	if err := validatePassword(password); err != nil {
-		return User{}, 0, fmt.Errorf("password does not meet requirements: %w", err)
+		return User{}, 0, fmt.Errorf("%w: password does not meet requirements: %w", ErrInvalidPassword, err)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), s.bcryptCost)
 	if err != nil {
@@ -406,7 +419,7 @@ func (s *AdminStore) ResetUserPasswordWithActivity(userID, password string, acto
 
 func (s *AdminStore) resetUserPassword(userID, password string, actor *ActivityActor) (User, int64, error) {
 	if err := validatePassword(password); err != nil {
-		return User{}, 0, fmt.Errorf("password does not meet requirements: %w", err)
+		return User{}, 0, fmt.Errorf("%w: password does not meet requirements: %w", ErrInvalidPassword, err)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), s.bcryptCost)
 	if err != nil {
@@ -570,6 +583,14 @@ func (s *AdminStore) setUserStatus(actorUserID, userID string, status UserStatus
 		return User{}, false, 0, err
 	}
 	if before.Status == status {
+		// Repeat disable is the recovery path for an earlier incomplete
+		// convergence. Revoke any session row that appeared after the first
+		// attempt even though no second state-transition activity is emitted.
+		if status == UserStatusDisabled {
+			if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
+				return User{}, false, 0, fmt.Errorf("revoke sessions after repeated user disable: %w", err)
+			}
+		}
 		if err := commitTx(tx, &committed); err != nil {
 			return User{}, false, 0, err
 		}
@@ -637,6 +658,63 @@ func (s *AdminStore) DeleteSessionsByUserIDWithActivity(userID string, actor Act
 	return activityID, nil
 }
 
+const userActivityDeletionPredicate = `scope_user_id = ? OR subject_user_id = ?
+	OR (actor_type IN ('admin', 'user') AND actor_id = ?)
+	OR (actor_type = 'client' AND actor_id IN (SELECT id FROM registered_clients WHERE owner_user_id = ?))
+	OR id IN (SELECT event_id FROM activity_event_clients WHERE client_id IN (SELECT id FROM registered_clients WHERE owner_user_id = ?))
+	OR id IN (SELECT event_id FROM activity_event_tunnels WHERE tunnel_id IN (SELECT id FROM tunnels WHERE owner_user_id = ?))`
+
+func userActivityDeletionArgs(userID string) []any {
+	return []any{userID, userID, userID, userID, userID, userID}
+}
+
+// GetUserDeletionImpact returns a transactionally consistent preview of the
+// persisted rows that DeleteDisabledUser would remove for userID. Runtime
+// convergence remains outside this storage-only preview.
+func (s *AdminStore) GetUserDeletionImpact(userID string) (UserDeletionImpact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return UserDeletionImpact{}, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+
+	var exists int
+	if err := tx.QueryRow(`SELECT 1 FROM users WHERE id = ?`, userID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return UserDeletionImpact{}, ErrUserNotFound
+		}
+		return UserDeletionImpact{}, fmt.Errorf("load deletion-impact user: %w", err)
+	}
+
+	impact := UserDeletionImpact{UserID: userID}
+	counts := []struct {
+		name  string
+		query string
+		args  []any
+		dest  *int64
+	}{
+		{"api keys", `SELECT COUNT(*) FROM api_keys WHERE owner_user_id = ?`, []any{userID}, &impact.APIKeys},
+		{"clients", `SELECT COUNT(*) FROM registered_clients WHERE owner_user_id = ?`, []any{userID}, &impact.Clients},
+		{"tunnels", `SELECT COUNT(*) FROM tunnels WHERE owner_user_id = ?`, []any{userID}, &impact.Tunnels},
+		{"traffic buckets", `SELECT COUNT(*) FROM traffic_buckets WHERE owner_user_id = ?`, []any{userID}, &impact.TrafficBuckets},
+		{"activity events", `SELECT COUNT(*) FROM activity_events WHERE ` + userActivityDeletionPredicate, userActivityDeletionArgs(userID), &impact.ActivityEvents},
+	}
+	for _, count := range counts {
+		if err := tx.QueryRow(count.query, count.args...).Scan(count.dest); err != nil {
+			return UserDeletionImpact{}, fmt.Errorf("count user deletion-impact %s: %w", count.name, err)
+		}
+	}
+	impact.GeneratedAt = time.Now().UTC()
+	if err := commitTx(tx, &committed); err != nil {
+		return UserDeletionImpact{}, err
+	}
+	return impact, nil
+}
+
 // DeleteDisabledUser removes the target user's credentials, owned resources,
 // user-scoped history, and dangling creator references in one transaction.
 // Runtime convergence is intentionally the caller's responsibility and must
@@ -677,11 +755,7 @@ func (s *AdminStore) DeleteDisabledUser(actorUserID, userID string) error {
 
 	// Delete events before deleting their related resource roots.  The event
 	// relation tables cascade from activity_events.
-	if _, err := tx.Exec(`DELETE FROM activity_events
-		WHERE scope_user_id = ? OR subject_user_id = ? OR actor_id = ?
-			OR id IN (SELECT event_id FROM activity_event_clients WHERE client_id IN (SELECT id FROM registered_clients WHERE owner_user_id = ?))
-			OR id IN (SELECT event_id FROM activity_event_tunnels WHERE tunnel_id IN (SELECT id FROM tunnels WHERE owner_user_id = ?))`,
-		userID, userID, userID, userID, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM activity_events WHERE `+userActivityDeletionPredicate, userActivityDeletionArgs(userID)...); err != nil {
 		return fmt.Errorf("delete user activity events: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM traffic_buckets WHERE owner_user_id = ?`, userID); err != nil {
@@ -693,7 +767,11 @@ func (s *AdminStore) DeleteDisabledUser(actorUserID, userID string) error {
 	if _, err := tx.Exec(`DELETE FROM tunnels WHERE owner_user_id = ?`, userID); err != nil {
 		return fmt.Errorf("delete user tunnels: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM client_tokens WHERE client_id IN (SELECT id FROM registered_clients WHERE owner_user_id = ?)`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM client_tokens
+		WHERE client_id IN (SELECT id FROM registered_clients WHERE owner_user_id = ?)
+			OR (install_id <> '' AND install_id IN (
+				SELECT install_id FROM registered_clients WHERE owner_user_id = ? AND install_id <> ''
+			))`, userID, userID); err != nil {
 		return fmt.Errorf("delete user client tokens: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM registered_clients WHERE owner_user_id = ?`, userID); err != nil {

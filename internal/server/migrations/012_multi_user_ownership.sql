@@ -16,9 +16,24 @@ SELECT 'admin_sessions_source', COUNT(*) FROM admin_sessions;
 INSERT INTO multi_user_migration_validation (name, value)
 SELECT 'admin_totp_recovery_codes_source', COUNT(*) FROM admin_totp_recovery_codes;
 INSERT INTO multi_user_migration_validation (name, value)
+SELECT 'admin_totp_recovery_codes_orphaned', COUNT(*)
+FROM admin_totp_recovery_codes c
+LEFT JOIN admin_users u ON u.id = c.user_id
+WHERE u.id IS NULL;
+INSERT INTO multi_user_migration_validation (name, value)
 SELECT 'admin_passkeys_source', COUNT(*) FROM admin_passkeys;
 INSERT INTO multi_user_migration_validation (name, value)
+SELECT 'admin_passkeys_orphaned', COUNT(*)
+FROM admin_passkeys p
+LEFT JOIN admin_users u ON u.id = p.user_id
+WHERE u.id IS NULL;
+INSERT INTO multi_user_migration_validation (name, value)
 SELECT 'admin_auth_challenges_source', COUNT(*) FROM admin_auth_challenges;
+INSERT INTO multi_user_migration_validation (name, value)
+SELECT 'admin_auth_challenges_orphaned', COUNT(*)
+FROM admin_auth_challenges c
+LEFT JOIN admin_users u ON u.id = c.user_id
+WHERE u.id IS NULL;
 INSERT INTO multi_user_migration_validation (name, value)
 SELECT 'api_keys_source', COUNT(*) FROM api_keys;
 INSERT INTO multi_user_migration_validation (name, value)
@@ -325,6 +340,7 @@ SET subject_user_id = (
 	SELECT u.id FROM users u WHERE u.id = activity_events.actor_id
 )
 WHERE actor_id <> ''
+	AND actor_type IN ('admin', 'user')
 	AND EXISTS (SELECT 1 FROM users u WHERE u.id = activity_events.actor_id);
 
 UPDATE activity_events

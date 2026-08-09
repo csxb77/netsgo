@@ -506,6 +506,12 @@ func seedStoredTunnelWithoutResourceLock(t *testing.T, s *Server, clientID strin
 		Hostname:        clientID + ".local",
 		Binding:         TunnelBindingClientID,
 	}
+	mustPrepareTestTunnelOwnership(t, s.store, tunnel)
+	registered, ok := s.auth.adminStore.GetRegisteredClient(clientID)
+	if !ok || registered.OwnerUserID == "" {
+		t.Fatalf("load owner for test client %q", clientID)
+	}
+	tunnel.OwnerUserID = registered.OwnerUserID
 	if tunnel.ID == "" {
 		tunnel.ID = generateUUID()
 	}

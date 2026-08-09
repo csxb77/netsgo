@@ -27,7 +27,9 @@ type p2pCandidateRate struct {
 
 type p2pGrantSpec struct {
 	tunnelID, ingressClientID, targetClientID string
+	ownerUserID                               string
 	revision                                  int64
+	ownerEpoch                                uint64
 	ingressGeneration, targetGeneration       uint64
 	totalBPS                                  int64
 }
@@ -51,6 +53,8 @@ func (g p2pGrant) forClient(clientID string) protocol.P2PTunnelGrant {
 
 type p2pPairSession struct {
 	id                       string
+	ownerUserID              string
+	ownerEpoch               uint64
 	clientA, clientB         string
 	generationA, generationB uint64
 	leaseSequence            uint64
@@ -79,9 +83,19 @@ type p2pClosedStatsGrant struct {
 }
 
 type p2pOutbound struct {
-	clientID    string
-	messageType string
-	payload     any
+	clientID         string
+	clientGeneration uint64
+	ownerUserID      string
+	ownerEpoch       uint64
+	messageType      string
+	payload          any
+}
+
+type p2pParticipant struct {
+	clientID         string
+	clientGeneration uint64
+	ownerUserID      string
+	ownerEpoch       uint64
 }
 
 type p2pCoordinator struct {
@@ -106,6 +120,9 @@ func (c *p2pCoordinator) ensureGrant(spec p2pGrantSpec) (p2pGrant, p2pLifecycleR
 	if spec.ingressGeneration == 0 || spec.targetGeneration == 0 {
 		return p2pGrant{}, p2pLifecycleResult{}, fmt.Errorf("p2p client generations must be positive")
 	}
+	if (spec.ownerUserID == "") != (spec.ownerEpoch == 0) {
+		return p2pGrant{}, p2pLifecycleResult{}, fmt.Errorf("p2p owner identity and epoch must be provided together")
+	}
 	if spec.totalBPS < 0 {
 		return p2pGrant{}, p2pLifecycleResult{}, fmt.Errorf("p2p total_bps must be non-negative")
 	}
@@ -115,7 +132,7 @@ func (c *p2pCoordinator) ensureGrant(spec p2pGrantSpec) (p2pGrant, p2pLifecycleR
 	defer c.mu.Unlock()
 	session := c.byPair[key]
 	createdSession := false
-	if session != nil && (session.generationA != genA || session.generationB != genB) {
+	if session != nil && (session.generationA != genA || session.generationB != genB || session.ownerUserID != spec.ownerUserID || session.ownerEpoch != spec.ownerEpoch) {
 		c.deleteSessionLocked(session)
 		session = nil
 	}
@@ -125,7 +142,7 @@ func (c *p2pCoordinator) ensureGrant(spec p2pGrantSpec) (p2pGrant, p2pLifecycleR
 		if err != nil {
 			return p2pGrant{}, p2pLifecycleResult{}, err
 		}
-		session = &p2pPairSession{id: id, clientA: a, clientB: b, generationA: genA, generationB: genB, leaseSequence: 1, expiresAt: c.now().Add(p2pLeaseDuration), grants: make(map[string]p2pGrant), lastSignal: make(map[string]uint64), lastStatus: make(map[string]uint64), candidates: make(map[string]p2pCandidateRate), ready: make(map[string]bool), stats: make(map[string]p2pStatsCursor), creditDemand: make(map[string]p2pCreditCursor), creditGrant: make(map[string]p2pCreditCursor)}
+		session = &p2pPairSession{id: id, ownerUserID: spec.ownerUserID, ownerEpoch: spec.ownerEpoch, clientA: a, clientB: b, generationA: genA, generationB: genB, leaseSequence: 1, expiresAt: c.now().Add(p2pLeaseDuration), grants: make(map[string]p2pGrant), lastSignal: make(map[string]uint64), lastStatus: make(map[string]uint64), candidates: make(map[string]p2pCandidateRate), ready: make(map[string]bool), stats: make(map[string]p2pStatsCursor), creditDemand: make(map[string]p2pCreditCursor), creditGrant: make(map[string]p2pCreditCursor)}
 		c.byPair[key], c.byID[id] = session, session
 	}
 	if current, ok := session.grants[spec.tunnelID]; ok && current.revision == spec.revision {
@@ -152,15 +169,15 @@ func normalizeP2PPair(spec p2pGrantSpec) (string, string, uint64, uint64) {
 	return spec.targetClientID, spec.ingressClientID, spec.targetGeneration, spec.ingressGeneration
 }
 
-func (c *p2pCoordinator) authorizeSignal(clientID string, generation uint64, signal protocol.P2PSignal) (string, error) {
+func (c *p2pCoordinator) authorizeSignal(clientID string, generation uint64, signal protocol.P2PSignal) (p2pParticipant, error) {
 	if err := signal.Validate(); err != nil {
-		return "", err
+		return p2pParticipant{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.byID[signal.SessionID]
 	if s == nil || !s.expiresAt.After(c.now()) {
-		return "", fmt.Errorf("unknown or expired p2p session")
+		return p2pParticipant{}, fmt.Errorf("unknown or expired p2p session")
 	}
 	peer := ""
 	if clientID == s.clientA && generation == s.generationA {
@@ -168,13 +185,13 @@ func (c *p2pCoordinator) authorizeSignal(clientID string, generation uint64, sig
 	} else if clientID == s.clientB && generation == s.generationB {
 		peer = s.clientA
 	} else {
-		return "", fmt.Errorf("p2p signal sender does not match current session generation")
+		return p2pParticipant{}, fmt.Errorf("p2p signal sender does not match current session generation")
 	}
 	if signal.Sequence <= s.lastSignal[clientID] {
-		return "", fmt.Errorf("stale p2p signal sequence")
+		return p2pParticipant{}, fmt.Errorf("stale p2p signal sequence")
 	}
 	if (signal.Kind == protocol.P2PSignalOffer && clientID != s.clientA) || (signal.Kind == protocol.P2PSignalAnswer && clientID != s.clientB) {
-		return "", fmt.Errorf("p2p description sender role mismatch")
+		return p2pParticipant{}, fmt.Errorf("p2p description sender role mismatch")
 	}
 	if signal.Kind == protocol.P2PSignalCandidate {
 		now := c.now()
@@ -183,17 +200,17 @@ func (c *p2pCoordinator) authorizeSignal(clientID string, generation uint64, sig
 			rate.windowStart, rate.count = now, 0
 		}
 		if rate.total >= protocol.P2PMaxCandidates {
-			return "", fmt.Errorf("p2p candidate limit exceeded")
+			return p2pParticipant{}, fmt.Errorf("p2p candidate limit exceeded")
 		}
 		if rate.count >= p2pCandidatesPerWindow {
-			return "", fmt.Errorf("p2p candidate rate limit exceeded")
+			return p2pParticipant{}, fmt.Errorf("p2p candidate rate limit exceeded")
 		}
 		rate.count++
 		rate.total++
 		s.candidates[clientID] = rate
 	}
 	s.lastSignal[clientID] = signal.Sequence
-	return peer, nil
+	return s.participant(peer), nil
 }
 
 func (c *p2pCoordinator) prepareMessages(sessionID string) ([]p2pOutbound, error) {
@@ -216,9 +233,26 @@ func (c *p2pCoordinator) prepareMessagesLocked(s *p2pPairSession) []p2pOutbound 
 		return protocol.P2PSessionPrepare{SessionID: s.id, PeerClientID: peerID, Role: role, LocalGeneration: localGen, PeerGeneration: peerGen, LeaseSequence: s.leaseSequence, ExpiresAt: s.expiresAt, Grants: grants}
 	}
 	return []p2pOutbound{
-		{clientID: s.clientA, messageType: protocol.MsgTypeP2PSessionPrepare, payload: forClient(s.clientA, s.clientB, protocol.P2PRoleOfferer, s.generationA, s.generationB)},
-		{clientID: s.clientB, messageType: protocol.MsgTypeP2PSessionPrepare, payload: forClient(s.clientB, s.clientA, protocol.P2PRoleAnswerer, s.generationB, s.generationA)},
+		s.outbound(s.clientA, protocol.MsgTypeP2PSessionPrepare, forClient(s.clientA, s.clientB, protocol.P2PRoleOfferer, s.generationA, s.generationB)),
+		s.outbound(s.clientB, protocol.MsgTypeP2PSessionPrepare, forClient(s.clientB, s.clientA, protocol.P2PRoleAnswerer, s.generationB, s.generationA)),
 	}
+}
+
+func (s *p2pPairSession) outbound(clientID, messageType string, payload any) p2pOutbound {
+	participant := s.participant(clientID)
+	return p2pOutbound{
+		clientID: participant.clientID, clientGeneration: participant.clientGeneration,
+		ownerUserID: participant.ownerUserID, ownerEpoch: participant.ownerEpoch,
+		messageType: messageType, payload: payload,
+	}
+}
+
+func (s *p2pPairSession) participant(clientID string) p2pParticipant {
+	generation := s.generationA
+	if clientID == s.clientB {
+		generation = s.generationB
+	}
+	return p2pParticipant{clientID: clientID, clientGeneration: generation, ownerUserID: s.ownerUserID, ownerEpoch: s.ownerEpoch}
 }
 
 func (c *p2pCoordinator) renew(healthy func(string, uint64) bool) p2pRenewResult {
@@ -251,12 +285,12 @@ func (c *p2pCoordinator) renew(healthy func(string, uint64) bool) p2pRenewResult
 		s.leaseSequence++
 		s.expiresAt = now.Add(p2pLeaseDuration)
 		lease := protocol.P2PLease{SessionID: s.id, Sequence: s.leaseSequence, ExpiresAt: s.expiresAt}
-		result.Outbounds = append(result.Outbounds, p2pOutbound{clientID: s.clientA, messageType: protocol.MsgTypeP2PLease, payload: lease}, p2pOutbound{clientID: s.clientB, messageType: protocol.MsgTypeP2PLease, payload: lease})
+		result.Outbounds = append(result.Outbounds, s.outbound(s.clientA, protocol.MsgTypeP2PLease, lease), s.outbound(s.clientB, protocol.MsgTypeP2PLease, lease))
 		for tunnelID, grant := range s.grants {
 			grant.sequence++
 			grant.expiresAt = s.expiresAt
 			s.grants[tunnelID] = grant
-			result.Outbounds = append(result.Outbounds, p2pOutbound{clientID: s.clientA, messageType: protocol.MsgTypeP2PTunnelGrant, payload: grant.forClient(s.clientA)}, p2pOutbound{clientID: s.clientB, messageType: protocol.MsgTypeP2PTunnelGrant, payload: grant.forClient(s.clientB)})
+			result.Outbounds = append(result.Outbounds, s.outbound(s.clientA, protocol.MsgTypeP2PTunnelGrant, grant.forClient(s.clientA)), s.outbound(s.clientB, protocol.MsgTypeP2PTunnelGrant, grant.forClient(s.clientB)))
 		}
 	}
 	return result
@@ -282,6 +316,33 @@ func (c *p2pCoordinator) closeClient(clientID string, generation uint64, reason 
 			ReasonCode: normalizeP2PCloseReason(reason, protocol.P2PStateClosed), Sequence: sequence,
 			Transition: p2pClosedProjectionTransition(reason), ExpectedSessionID: s.id,
 			Outbounds: outbounds,
+		})
+		c.deleteSessionLocked(s)
+	}
+	return results
+}
+
+// closeClients closes each session containing an exact participant generation.
+// It is used while disabling an owner, where both participants are still
+// connected and should receive the best-effort close before transport teardown.
+func (c *p2pCoordinator) closeClients(ownerUserID string, participants map[string]uint64, reason string) []p2pLifecycleResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var results []p2pLifecycleResult
+	for _, s := range c.byID {
+		if ownerUserID == "" || s.ownerUserID != ownerUserID {
+			continue
+		}
+		generationA, matchedA := participants[s.clientA]
+		generationB, matchedB := participants[s.clientB]
+		if (!matchedA || generationA != s.generationA) && (!matchedB || generationB != s.generationB) {
+			continue
+		}
+		results = append(results, p2pLifecycleResult{
+			Session: snapshotP2PSession(s), ClosedEdge: true, StatusState: protocol.P2PStateClosed,
+			ReasonCode: normalizeP2PCloseReason(reason, protocol.P2PStateClosed), Sequence: s.leaseSequence + 1,
+			Transition: p2pClosedProjectionTransition(reason), ExpectedSessionID: s.id,
+			Outbounds: p2pClosedOutbounds(s, reason),
 		})
 		c.deleteSessionLocked(s)
 	}
@@ -392,46 +453,46 @@ func (c *p2pCoordinator) acceptClosedStatsLocked(clientID string, generation uin
 	return ingress, egress, nil
 }
 
-func (c *p2pCoordinator) authorizeCreditDemand(clientID string, generation uint64, demand protocol.P2PCreditDemand) (string, error) {
+func (c *p2pCoordinator) authorizeCreditDemand(clientID string, generation uint64, demand protocol.P2PCreditDemand) (p2pParticipant, error) {
 	if err := demand.Validate(); err != nil {
-		return "", err
+		return p2pParticipant{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s, grant, err := c.creditGrantLocked(demand.SessionID, demand.GrantID, demand.TunnelID, demand.Revision)
 	if err != nil {
-		return "", err
+		return p2pParticipant{}, err
 	}
 	if clientID != grant.ingressClientID || !c.matchesGenerationLocked(s, clientID, generation) {
-		return "", fmt.Errorf("p2p credit demand sender is not ingress")
+		return p2pParticipant{}, fmt.Errorf("p2p credit demand sender is not ingress")
 	}
 	cursor := s.creditDemand[grant.grantID]
 	if demand.Sequence <= cursor.sequence || demand.DesiredBytes < cursor.cumulative {
-		return "", fmt.Errorf("stale p2p credit demand")
+		return p2pParticipant{}, fmt.Errorf("stale p2p credit demand")
 	}
 	s.creditDemand[grant.grantID] = p2pCreditCursor{sequence: demand.Sequence, cumulative: demand.DesiredBytes}
-	return grant.targetClientID, nil
+	return s.participant(grant.targetClientID), nil
 }
 
-func (c *p2pCoordinator) authorizeCreditGrant(clientID string, generation uint64, credit protocol.P2PCreditGrant) (string, error) {
+func (c *p2pCoordinator) authorizeCreditGrant(clientID string, generation uint64, credit protocol.P2PCreditGrant) (p2pParticipant, error) {
 	if err := credit.Validate(); err != nil {
-		return "", err
+		return p2pParticipant{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s, grant, err := c.creditGrantLocked(credit.SessionID, credit.GrantID, credit.TunnelID, credit.Revision)
 	if err != nil {
-		return "", err
+		return p2pParticipant{}, err
 	}
 	if clientID != grant.targetClientID || !c.matchesGenerationLocked(s, clientID, generation) {
-		return "", fmt.Errorf("p2p credit grant sender is not owner")
+		return p2pParticipant{}, fmt.Errorf("p2p credit grant sender is not owner")
 	}
 	cursor := s.creditGrant[grant.grantID]
 	if credit.Sequence <= cursor.sequence || credit.GrantedBytes < cursor.cumulative || credit.GrantedBytes > s.creditDemand[grant.grantID].cumulative {
-		return "", fmt.Errorf("invalid or stale p2p credit grant")
+		return p2pParticipant{}, fmt.Errorf("invalid or stale p2p credit grant")
 	}
 	s.creditGrant[grant.grantID] = p2pCreditCursor{sequence: credit.Sequence, cumulative: credit.GrantedBytes}
-	return grant.ingressClientID, nil
+	return s.participant(grant.ingressClientID), nil
 }
 
 func (c *p2pCoordinator) creditGrantLocked(sessionID, grantID, tunnelID string, revision int64) (*p2pPairSession, p2pGrant, error) {
@@ -468,7 +529,7 @@ func (c *p2pCoordinator) revokeTunnel(tunnelID string, revision int64, reason st
 	delete(session.grants, tunnelID)
 	c.archiveGrantLocked(session, grant)
 	revoke := protocol.P2PTunnelRevoke{SessionID: session.id, GrantID: grant.grantID, TunnelID: grant.tunnelID, Revision: grant.revision, Reason: reason}
-	outbounds := []p2pOutbound{{clientID: session.clientA, messageType: protocol.MsgTypeP2PTunnelRevoke, payload: revoke}, {clientID: session.clientB, messageType: protocol.MsgTypeP2PTunnelRevoke, payload: revoke}}
+	outbounds := []p2pOutbound{session.outbound(session.clientA, protocol.MsgTypeP2PTunnelRevoke, revoke), session.outbound(session.clientB, protocol.MsgTypeP2PTunnelRevoke, revoke)}
 	closed := len(session.grants) == 0
 	sequence := session.leaseSequence + 1
 	if closed {

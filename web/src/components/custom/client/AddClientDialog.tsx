@@ -17,7 +17,7 @@ import {
   TabsTrigger,
 } from '@/components/ui/tabs';
 import { useCreateAPIKey } from '@/hooks/use-admin-keys';
-import { useServerStatus } from '@/hooks/use-server-status';
+import { useResourceBootstrap } from '@/hooks/use-server-status';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 
@@ -91,7 +91,7 @@ export function AddClientDialog({ scope, open, onOpenChange }: AddClientDialogPr
   const [statusLoadFailed, setStatusLoadFailed] = useState(false);
 
   const createKey = useCreateAPIKey(scope);
-  const { data: status, refetch: refetchStatus } = useServerStatus(scope, {
+  const { data: status, refetch: refetchStatus } = useResourceBootstrap(scope, {
     enabled: open,
     refetchOnMount: 'always',
     staleTime: 0,

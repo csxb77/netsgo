@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -709,12 +710,7 @@ func TestOlderStrictMigrationSetRejects012BeforeWritableOpen(t *testing.T) {
 
 func TestOpenServerDBAcceptsExisting009StrictMigrationLedger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server", "netsgo.db")
-	migrations, err := serverMigrations()
-	if err != nil {
-		t.Fatalf("serverMigrations() error = %v", err)
-	}
-	_, strict := partitionServerMigrations(migrations)
-	legacyDB, err := storage.Open(path, strict)
+	legacyDB, err := storage.Open(path, strictServerMigrationsBeforeMultiUser(t))
 	if err != nil {
 		t.Fatalf("open database through migration 009: %v", err)
 	}
@@ -799,6 +795,11 @@ func TestOpenServerDBMigratesLegacyAdministratorsAndResourceOwnership(t *testing
 		(3, 3, 'info', 'client', 'client_connected', 'server', NULL)`); err != nil {
 		t.Fatalf("seed activity events: %v", err)
 	}
+	if _, err := legacyDB.Exec(`INSERT INTO activity_events
+		(occurred_at_ns, recorded_at_ns, severity, category, action, source, actor_type, actor_id)
+		VALUES (4, 4, 'info', 'client', 'client_connected', 'server', 'client', 'admin-earliest')`); err != nil {
+		t.Fatalf("seed colliding client actor: %v", err)
+	}
 	if _, err := legacyDB.Exec(`INSERT INTO activity_event_clients (event_id, client_id, relation)
 		VALUES (3, 'client-1', 'subject')`); err != nil {
 		t.Fatalf("seed client activity relation: %v", err)
@@ -882,6 +883,13 @@ func TestOpenServerDBMigratesLegacyAdministratorsAndResourceOwnership(t *testing
 	if scopedUserID != "admin-earliest" {
 		t.Fatalf("client activity scope = %q, want admin-earliest", scopedUserID)
 	}
+	var collidingSubjectUserID sql.NullString
+	if err := db.QueryRow(`SELECT subject_user_id FROM activity_events WHERE id = 4`).Scan(&collidingSubjectUserID); err != nil {
+		t.Fatalf("load colliding client actor activity: %v", err)
+	}
+	if collidingSubjectUserID.Valid {
+		t.Fatalf("client actor ID collision must not become a user subject, got %q", collidingSubjectUserID.String)
+	}
 
 	assertNoSQLiteForeignKeyViolations(t, db)
 	if !slices.Contains(appliedMigrationNames(t, db, "schema_migrations"), "012_multi_user_ownership") {
@@ -925,14 +933,149 @@ func TestMultiUserMigrationValidationFailureRollsBackBeforeStrictLedgerRecord(t 
 	}
 }
 
+func TestMultiUserMigrationRejectsOrphanedAdminSecurityRowsWithoutDataLoss(t *testing.T) {
+	tests := []struct {
+		name    string
+		table   string
+		seedSQL string
+	}{
+		{
+			name:  "recovery code",
+			table: "admin_totp_recovery_codes",
+			seedSQL: `INSERT INTO admin_totp_recovery_codes (id, user_id, code_hash, created_at, used_at) VALUES
+				('valid-row', 'admin-valid', 'valid-recovery-hash', '2026-01-01T00:00:00Z', NULL),
+				('orphan-row', 'missing-user', 'orphan-recovery-hash', '2026-01-02T00:00:00Z', NULL)`,
+		},
+		{
+			name:  "passkey",
+			table: "admin_passkeys",
+			seedSQL: `INSERT INTO admin_passkeys
+				(id, user_id, name, credential_id, credential_json, rp_id, origin, created_at, last_used_at) VALUES
+				('valid-row', 'admin-valid', 'Valid key', 'valid-credential', '{}', 'example.test', 'https://example.test', '2026-01-01T00:00:00Z', NULL),
+				('orphan-row', 'missing-user', 'Orphan key', 'orphan-credential', '{}', 'example.test', 'https://example.test', '2026-01-02T00:00:00Z', NULL)`,
+		},
+		{
+			name:  "authentication challenge",
+			table: "admin_auth_challenges",
+			seedSQL: `INSERT INTO admin_auth_challenges
+				(id, user_id, kind, session_json, metadata_json, created_at, expires_at) VALUES
+				('valid-row', 'admin-valid', 'mfa_login', '{}', '{}', '2026-01-01T00:00:00Z', '2030-01-01T00:00:00Z'),
+				('orphan-row', 'missing-user', 'mfa_login', '{}', '{}', '2026-01-02T00:00:00Z', '2030-01-02T00:00:00Z')`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "server", "netsgo.db")
+			legacyDB := openServerDBThroughMigration011(t, path)
+			if _, err := legacyDB.Exec(`INSERT INTO server_config (id, initialized, jwt_secret, server_addr)
+				VALUES (1, 1, 'legacy-jwt-secret', 'https://example.test')`); err != nil {
+				t.Fatalf("seed initialized config: %v", err)
+			}
+			if _, err := legacyDB.Exec(`INSERT INTO admin_users
+				(id, username, password_hash, role, created_at, last_login, totp_enabled, totp_secret)
+				VALUES ('admin-valid', 'valid-admin', 'hash', 'admin', '2026-01-01T00:00:00Z', NULL, 0, '')`); err != nil {
+				t.Fatalf("seed valid administrator: %v", err)
+			}
+			if _, err := legacyDB.Exec(tt.seedSQL); err != nil {
+				t.Fatalf("seed %s rows: %v", tt.table, err)
+			}
+			if err := legacyDB.Close(); err != nil {
+				t.Fatalf("close legacy database: %v", err)
+			}
+
+			upgradedDB, err := openServerDB(path)
+			if upgradedDB != nil {
+				_ = upgradedDB.Close()
+				t.Fatal("openServerDB() returned a database despite orphaned authentication rows")
+			}
+			if err == nil {
+				t.Fatal("openServerDB() should reject orphaned authentication rows")
+			}
+			var orphanErr *multiUserMigrationOrphanRowsError
+			if !errors.As(err, &orphanErr) {
+				t.Fatalf("openServerDB() error = %v, want multiUserMigrationOrphanRowsError", err)
+			}
+			if orphanErr.Table != tt.table || orphanErr.OrphanCount != 1 {
+				t.Fatalf("orphan error = %+v, want table %q and count 1", orphanErr, tt.table)
+			}
+			for _, fragment := range []string{path, tt.table, "rolled back", "was not recorded", "back up the database", "restore missing users"} {
+				if !strings.Contains(err.Error(), fragment) {
+					t.Fatalf("openServerDB() error = %q, want fragment %q", err, fragment)
+				}
+			}
+
+			inspectDB, err := storage.OpenReadOnly(path)
+			if err != nil {
+				t.Fatalf("open rolled-back database read-only: %v", err)
+			}
+			for _, table := range []string{"admin_users", "admin_sessions", "admin_totp_recovery_codes", "admin_passkeys", "admin_auth_challenges"} {
+				if !sqliteTableExists(t, inspectDB, table) {
+					t.Fatalf("failed 012 should preserve source table %s", table)
+				}
+			}
+			for _, table := range []string{"users", "user_sessions"} {
+				if sqliteTableExists(t, inspectDB, table) {
+					t.Fatalf("failed 012 should roll back target table %s", table)
+				}
+			}
+			var preserved int
+			preservedQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s
+				WHERE (id = 'valid-row' AND user_id = 'admin-valid')
+					OR (id = 'orphan-row' AND user_id = 'missing-user')`, tt.table)
+			if err := inspectDB.QueryRow(preservedQuery).Scan(&preserved); err != nil {
+				t.Fatalf("count preserved %s rows: %v", tt.table, err)
+			}
+			if preserved != 2 {
+				t.Fatalf("preserved %s rows = %d, want 2", tt.table, preserved)
+			}
+			if slices.Contains(appliedMigrationNames(t, inspectDB, "schema_migrations"), "012_multi_user_ownership") {
+				t.Fatal("failed 012 must not be recorded in the strict migration ledger")
+			}
+			if err := inspectDB.Close(); err != nil {
+				t.Fatalf("close read-only inspection database: %v", err)
+			}
+
+			repairDB, err := storage.OpenConfigured(path)
+			if err != nil {
+				t.Fatalf("open database for simulated operator repair: %v", err)
+			}
+			repairQuery := fmt.Sprintf(`UPDATE %s SET user_id = 'admin-valid' WHERE id = 'orphan-row'`, tt.table)
+			if _, err := repairDB.Exec(repairQuery); err != nil {
+				_ = repairDB.Close()
+				t.Fatalf("repair orphaned %s row: %v", tt.table, err)
+			}
+			if err := repairDB.Close(); err != nil {
+				t.Fatalf("close repaired database: %v", err)
+			}
+
+			migratedDB, err := openServerDB(path)
+			if err != nil {
+				t.Fatalf("retry 012 after repairing %s: %v", tt.table, err)
+			}
+			defer func() { _ = migratedDB.Close() }()
+			var migrated int
+			migratedQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE user_id = 'admin-valid'`, tt.table)
+			if err := migratedDB.QueryRow(migratedQuery).Scan(&migrated); err != nil {
+				t.Fatalf("count migrated %s rows: %v", tt.table, err)
+			}
+			if migrated != 2 {
+				t.Fatalf("migrated %s rows = %d, want 2", tt.table, migrated)
+			}
+			if sqliteTableExists(t, migratedDB, "admin_users") || sqliteTableExists(t, migratedDB, "admin_sessions") {
+				t.Fatal("successful retry should remove legacy identity tables")
+			}
+			if !slices.Contains(appliedMigrationNames(t, migratedDB, "schema_migrations"), "012_multi_user_ownership") {
+				t.Fatal("successful retry should record 012 in the strict migration ledger")
+			}
+			assertNoSQLiteForeignKeyViolations(t, migratedDB)
+		})
+	}
+}
+
 func TestOpenServerDBDoesNotRenewExpiredTokensDuringClientAuthMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server", "netsgo.db")
-	migrations, err := serverMigrations()
-	if err != nil {
-		t.Fatalf("serverMigrations() error = %v", err)
-	}
-	_, strict := partitionServerMigrations(migrations)
-	legacyDB, err := storage.Open(path, strict)
+	legacyDB, err := storage.Open(path, strictServerMigrationsBeforeMultiUser(t))
 	if err != nil {
 		t.Fatalf("open legacy schema: %v", err)
 	}
@@ -984,8 +1127,21 @@ CREATE TABLE client_tokens (
 	last_ip TEXT NOT NULL DEFAULT '',
 	is_revoked INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE admin_sessions (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL,
+	username TEXT NOT NULL,
+	role TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	ip TEXT NOT NULL DEFAULT '',
+	user_agent TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE registered_clients (
-	id TEXT PRIMARY KEY
+	id TEXT PRIMARY KEY,
+	install_id TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	last_seen TEXT NOT NULL
 );
 CREATE TABLE tunnels (
 	client_id TEXT NOT NULL REFERENCES registered_clients(id) ON DELETE CASCADE,
@@ -1005,7 +1161,8 @@ CREATE TABLE tunnels (
 	PRIMARY KEY (client_id, name)
 );
 CREATE INDEX idx_tunnels_hostname ON tunnels(hostname);
-INSERT INTO registered_clients (id) VALUES ('client-existing');
+INSERT INTO registered_clients (id, install_id, created_at, last_seen)
+VALUES ('client-existing', 'install-existing', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 INSERT INTO tunnels (client_id, name, type, local_ip, local_port, remote_port, domain, ingress_bps, egress_bps, desired_state, runtime_state, error, hostname, binding)
 VALUES ('client-existing', 'existing', 'tcp', '127.0.0.1', 80, 18080, '', 100, 200, 'running', 'exposed', '', 'host-existing', 'client_id');
 `,
@@ -1046,8 +1203,8 @@ VALUES ('client-existing', 'existing', 'tcp', '127.0.0.1', 80, 18080, '', 100, 2
 		ClientID:        "client-without-registered-row",
 		Hostname:        "host-orphan",
 		Binding:         TunnelBindingClientID,
-	}); err != nil {
-		t.Fatalf("AddTunnel without registered client should succeed after FK rebuild: %v", err)
+	}); err == nil {
+		t.Fatal("application ownership validation should reject an unregistered tunnel client even after the legacy database FK is removed")
 	}
 }
 
@@ -1073,9 +1230,21 @@ CREATE TABLE client_tokens (
 	last_ip TEXT NOT NULL DEFAULT '',
 	is_revoked INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE admin_sessions (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL,
+	username TEXT NOT NULL,
+	role TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	ip TEXT NOT NULL DEFAULT '',
+	user_agent TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE registered_clients (
 	id TEXT PRIMARY KEY,
-	install_id TEXT NOT NULL DEFAULT ''
+	install_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	last_seen TEXT NOT NULL
 );
 CREATE TABLE tunnels (
 	id TEXT NOT NULL DEFAULT '',
@@ -1108,7 +1277,8 @@ CREATE TABLE traffic_buckets (
 	PRIMARY KEY (client_id, tunnel_name, tunnel_type, resolution, bucket_start)
 );
 CREATE INDEX idx_traffic_query ON traffic_buckets(client_id, tunnel_name, resolution, bucket_start);
-INSERT INTO registered_clients (id, install_id) VALUES ('client-existing', 'install-existing');
+INSERT INTO registered_clients (id, install_id, created_at, last_seen)
+VALUES ('client-existing', 'install-existing', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 INSERT INTO traffic_buckets (client_id, tunnel_name, tunnel_type, resolution, bucket_start, ingress_bytes, egress_bytes)
 VALUES ('client-existing', 'deleted-tunnel', 'tcp', 'minute', 1700000000, 123, 456);
 `,
@@ -1156,6 +1326,22 @@ func TestOpenServerDBDoesNotCreateJsonFiles(t *testing.T) {
 			t.Fatalf("%s should not be created by SQLite storage", name)
 		}
 	}
+}
+
+func strictServerMigrationsBeforeMultiUser(t *testing.T) []storage.Migration {
+	t.Helper()
+	migrations, err := serverMigrations()
+	if err != nil {
+		t.Fatalf("serverMigrations() error = %v", err)
+	}
+	_, strict := partitionServerMigrations(migrations)
+	legacyStrict := make([]storage.Migration, 0, len(strict))
+	for _, migration := range strict {
+		if migration.Name != "012_multi_user_ownership" {
+			legacyStrict = append(legacyStrict, migration)
+		}
+	}
+	return legacyStrict
 }
 
 func openServerDBThroughMigration011(t *testing.T, path string) *sql.DB {

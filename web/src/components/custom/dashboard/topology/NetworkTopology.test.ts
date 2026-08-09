@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { Client } from '@/types';
+import { SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
 
 import { TopologyHeaderActions } from './NetworkTopology';
 
@@ -33,6 +34,7 @@ function renderHeaderActions(activeClientId: string | null, clients: Client[] = 
       QueryClientProvider,
       { client },
       createElement(TopologyHeaderActions, {
+        scope: SELF_RESOURCE_SCOPE,
         activeClientId,
         clients,
         onAddClient: () => {},

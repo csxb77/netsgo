@@ -172,6 +172,7 @@ var activityCatalog = map[ActivityCategory]map[string]activityCatalogEntry{
 		"user_admin_revoked":                   {ActivitySeverityInfo, "activity.admin.user_admin_revoked"},
 		"user_disabled":                        {ActivitySeverityInfo, "activity.admin.user_disabled"},
 		"user_enabled":                         {ActivitySeverityInfo, "activity.admin.user_enabled"},
+		"user_convergence_incomplete":          {ActivitySeverityWarning, "activity.admin.user_convergence_incomplete"},
 		"user_sessions_revoked":                {ActivitySeverityInfo, "activity.admin.user_sessions_revoked"},
 		"api_key_created":                      {ActivitySeverityInfo, "activity.admin.api_key_created"},
 		"api_key_enabled":                      {ActivitySeverityInfo, "activity.admin.api_key_enabled"},

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import {
-  Ellipsis, KeyRound, ShieldCheck, ShieldOff, Trash2, UserPlus, UserRoundCheck, UserRoundPen, UserRoundX,
+  AlertTriangle, Ellipsis, KeyRound, Loader2, RefreshCcw, ShieldCheck, ShieldOff, Trash2, UserPlus, UserRoundCheck, UserRoundPen, UserRoundX,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -20,6 +20,7 @@ import {
   useDeleteManagedUser,
   useDisableManagedUser,
   useEnableManagedUser,
+  useManagedUserDeletionImpact,
   useRevokeManagedUserSessions,
   useSetManagedAdmin,
   useUpdateManagedPassword,
@@ -28,6 +29,11 @@ import {
 } from '@/hooks/use-users';
 import { useAuthStore } from '@/stores/auth-store';
 import type { ManagedUser } from '@/types';
+import {
+  canSubmitUserTextAction,
+  hasUserActionCapability,
+  userDeletionImpactTotal,
+} from './user-list-state';
 
 type UserAction =
   | { kind: 'create' }
@@ -50,10 +56,6 @@ const DEFAULT_FILTERS: Filters = { query: '', status: 'all', admin: 'all' };
 function formatTimestamp(value: string) {
   const time = Date.parse(value);
   return Number.isFinite(time) ? new Date(time).toLocaleString() : value;
-}
-
-function capabilityDisabled(value: boolean | undefined) {
-  return value === false;
 }
 
 function statusBadgeClass(status: string) {
@@ -392,7 +394,13 @@ export function UserListPage() {
             <Button type="button" variant="outline" onClick={clearAction} disabled={pending}>{t('common.cancel')}</Button>
             <Button
               type="button"
-              disabled={pending || !username.trim() || ((action?.kind === 'create' || action?.kind === 'password') && !password)}
+              disabled={pending || !canSubmitUserTextAction(
+                action?.kind === 'create' || action?.kind === 'rename' || action?.kind === 'password'
+                  ? action.kind
+                  : undefined,
+                username,
+                password,
+              )}
               onClick={submitTextAction}
             >
               {action?.kind === 'create' ? t('users.add') : t('common.save')}
@@ -402,7 +410,7 @@ export function UserListPage() {
       </Dialog>
 
       <ConfirmDialog
-        open={Boolean(action && !isTextDialog)}
+        open={Boolean(action && !isTextDialog && action.kind !== 'delete')}
         title={confirmTitle}
         description={confirmDescription}
         confirmLabel={action?.kind === 'delete' ? t('common.delete') : t('common.confirm')}
@@ -410,13 +418,22 @@ export function UserListPage() {
         onConfirm={confirmAction}
         onCancel={clearAction}
       />
+
+      <DeleteUserDialog
+        user={action?.kind === 'delete' ? action.user : null}
+        isDeleting={deleteUser.isPending}
+        onCancel={clearAction}
+        onConfirm={confirmAction}
+      />
     </div>
   );
 }
 
 function UserActionsMenu({ user, onAction }: { user: ManagedUser; onAction: (action: UserAction) => void }) {
   const { t } = useTranslation();
-  const actionDisabled = user.actions;
+  const can = (capability: keyof NonNullable<ManagedUser['actions']>) => (
+    hasUserActionCapability(user.actions, capability)
+  );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -426,26 +443,26 @@ function UserActionsMenu({ user, onAction }: { user: ManagedUser; onAction: (act
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-48">
         <DropdownMenuLabel>{user.username}</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => onAction({ kind: 'rename', user })} disabled={capabilityDisabled(actionDisabled?.can_update_username)}>
+        <DropdownMenuItem onSelect={() => onAction({ kind: 'rename', user })} disabled={!can('can_update_username')}>
           <UserRoundPen />{t('users.rename')}
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onAction({ kind: 'password', user })} disabled={capabilityDisabled(actionDisabled?.can_update_password)}>
+        <DropdownMenuItem onSelect={() => onAction({ kind: 'password', user })} disabled={!can('can_update_password')}>
           <KeyRound />{t('users.resetPassword')}
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onAction({ kind: 'revoke-sessions', user })} disabled={capabilityDisabled(actionDisabled?.can_revoke_sessions)}>
+        <DropdownMenuItem onSelect={() => onAction({ kind: 'revoke-sessions', user })} disabled={!can('can_revoke_sessions')}>
           <UserRoundX />{t('users.revokeSessions')}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => onAction({ kind: 'set-admin', user })} disabled={capabilityDisabled(actionDisabled?.can_change_admin)}>
+        <DropdownMenuItem onSelect={() => onAction({ kind: 'set-admin', user })} disabled={!can('can_change_admin')}>
           {user.is_admin ? <ShieldOff /> : <ShieldCheck />}
           {user.is_admin ? t('users.removeAdmin') : t('users.makeAdmin')}
         </DropdownMenuItem>
         {user.status === 'active' ? (
-          <DropdownMenuItem onSelect={() => onAction({ kind: 'disable', user })} disabled={capabilityDisabled(actionDisabled?.can_disable)}>
+          <DropdownMenuItem onSelect={() => onAction({ kind: 'disable', user })} disabled={!can('can_disable')}>
             <UserRoundX />{t('users.disable')}
           </DropdownMenuItem>
         ) : (
-          <DropdownMenuItem onSelect={() => onAction({ kind: 'enable', user })} disabled={capabilityDisabled(actionDisabled?.can_enable)}>
+          <DropdownMenuItem onSelect={() => onAction({ kind: 'enable', user })} disabled={!can('can_enable')}>
             <UserRoundCheck />{t('users.enable')}
           </DropdownMenuItem>
         )}
@@ -453,11 +470,117 @@ function UserActionsMenu({ user, onAction }: { user: ManagedUser; onAction: (act
         <DropdownMenuItem
           variant="destructive"
           onSelect={() => onAction({ kind: 'delete', user })}
-          disabled={user.status !== 'disabled' || capabilityDisabled(actionDisabled?.can_delete)}
+          disabled={user.status !== 'disabled' || !can('can_delete')}
         >
           <Trash2 />{t('users.delete')}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function DeleteUserDialog({
+  user,
+  isDeleting,
+  onCancel,
+  onConfirm,
+}: {
+  user: ManagedUser | null;
+  isDeleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useTranslation();
+  const impact = useManagedUserDeletionImpact(user?.id);
+  const canDelete = Boolean(
+    user
+    && user.status === 'disabled'
+    && hasUserActionCapability(user.actions, 'can_delete')
+    && impact.data
+    && !impact.isFetching
+    && !impact.isError
+    && !isDeleting,
+  );
+  const rows = impact.data ? [
+    [t('users.deletionImpactApiKeys'), impact.data.api_keys],
+    [t('users.deletionImpactClients'), impact.data.clients],
+    [t('users.deletionImpactTunnels'), impact.data.tunnels],
+    [t('users.deletionImpactTraffic'), impact.data.traffic_buckets],
+    [t('users.deletionImpactActivity'), impact.data.activity_events],
+  ] as const : [];
+
+  return (
+    <Dialog
+      open={user !== null}
+      onOpenChange={(open) => {
+        if (!open && !isDeleting) onCancel();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-destructive">
+            <AlertTriangle className="size-5" />
+            {t('users.delete')}
+          </DialogTitle>
+          <DialogDescription>
+            {t('users.deleteDescription', { username: user?.username ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3" aria-live="polite">
+          {impact.isPending || impact.isFetching ? (
+            <div className="flex min-h-28 items-center justify-center gap-2 rounded-lg border border-border/50 bg-muted/20 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {t('users.deletionImpactLoading')}
+            </div>
+          ) : impact.isError ? (
+            <div className="space-y-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+              <p className="text-sm font-medium text-destructive">{t('users.deletionImpactLoadFailed')}</p>
+              <p className="text-xs text-muted-foreground">
+                {impact.error instanceof Error ? impact.error.message : t('errors.generic')}
+              </p>
+              <Button type="button" variant="outline" size="sm" onClick={() => { void impact.refetch(); }}>
+                <RefreshCcw data-icon="inline-start" />
+                {t('common.retry')}
+              </Button>
+            </div>
+          ) : impact.data ? (
+            <div className="overflow-hidden rounded-lg border border-border/50">
+              <div className="flex items-center justify-between border-b border-border/50 bg-muted/30 px-3 py-2 text-sm font-medium">
+                <span>{t('users.deletionImpactTitle')}</span>
+                <span className="tabular-nums">
+                  {t('users.deletionImpactTotal', { count: userDeletionImpactTotal(impact.data) })}
+                </span>
+              </div>
+              <dl className="divide-y divide-border/40">
+                {rows.map(([label, count]) => (
+                  <div key={label} className="flex items-center justify-between px-3 py-2 text-sm">
+                    <dt className="text-muted-foreground">{label}</dt>
+                    <dd className="font-medium tabular-nums">{count}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="border-t border-border/50 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                {t('users.deletionImpactGeneratedAt', { time: formatTimestamp(impact.data.generated_at) })}
+              </p>
+            </div>
+          ) : null}
+
+          <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm font-medium text-destructive">
+            {t('users.deletionIrreversible')}
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel} disabled={isDeleting}>
+            {t('common.cancel')}
+          </Button>
+          <Button type="button" variant="destructive" onClick={onConfirm} disabled={!canDelete}>
+            {isDeleting ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Trash2 data-icon="inline-start" />}
+            {isDeleting ? t('users.deleting') : t('common.delete')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

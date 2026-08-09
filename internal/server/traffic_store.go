@@ -105,6 +105,7 @@ type TrafficStore struct {
 	pendingMinute           map[string]TrafficBucket
 	pendingErr              error
 	minimumRevisionByTunnel map[string]int64
+	deletedOwnerUserIDs     map[string]struct{}
 	accumulator             atomic.Pointer[trafficAccumulator]
 
 	failSaveErr   error
@@ -129,6 +130,7 @@ func newTrafficStoreWithDB(path string, db *sql.DB, closeDB bool) *TrafficStore 
 		realtimeSecond:          newRealtimeSecondIndex(),
 		pendingMinute:           make(map[string]TrafficBucket),
 		minimumRevisionByTunnel: make(map[string]int64),
+		deletedOwnerUserIDs:     make(map[string]struct{}),
 	}
 }
 
@@ -174,6 +176,9 @@ func (s *TrafficStore) ApplyDeltas(deltas []TrafficDelta) {
 
 	var newestSecond int64
 	for _, delta := range deltas {
+		if _, deleted := s.deletedOwnerUserIDs[delta.OwnerUserID]; deleted {
+			continue
+		}
 		if minimumRevision := s.minimumRevisionByTunnel[delta.TunnelID]; minimumRevision > 0 && delta.Revision < minimumRevision {
 			continue
 		}
@@ -244,6 +249,66 @@ func (s *TrafficStore) ApplyDeltas(deltas []TrafficDelta) {
 	}
 	if newestSecond != 0 {
 		s.pruneRealtimeLocked(time.Unix(newestSecond, 0).UTC())
+	}
+}
+
+// withUserDeletionBoundary serializes a hard-delete transaction with traffic
+// draining and flushing. Only a committed deletion installs the owner
+// tombstone and evicts queued/realtime observations; a failed transaction
+// leaves every queue intact for a later retry.
+func (s *TrafficStore) withUserDeletionBoundary(ownerUserID string, deleteUser func() error) error {
+	if deleteUser == nil {
+		return errors.New("user deletion callback is required")
+	}
+	if s == nil {
+		return deleteUser()
+	}
+	if ownerUserID == "" {
+		return errors.New("traffic owner user id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := deleteUser(); err != nil {
+		return err
+	}
+	s.evictDeletedOwnerLocked(ownerUserID)
+	return nil
+}
+
+// evictDeletedOwnerLocked records a permanent in-memory owner tombstone and
+// removes all observations that the committed user deletion made invalid.
+// The caller must hold s.mu across the corresponding SQLite transaction.
+func (s *TrafficStore) evictDeletedOwnerLocked(ownerUserID string) {
+	if s == nil || ownerUserID == "" {
+		return
+	}
+	if s.deletedOwnerUserIDs == nil {
+		s.deletedOwnerUserIDs = make(map[string]struct{})
+	}
+	s.deletedOwnerUserIDs[ownerUserID] = struct{}{}
+	if accumulator := s.accumulator.Load(); accumulator != nil {
+		accumulator.evictDeletedOwner(ownerUserID)
+	}
+	for key, bucket := range s.pendingMinute {
+		if bucket.OwnerUserID == ownerUserID {
+			delete(s.pendingMinute, key)
+		}
+	}
+	if s.realtimeSecond != nil {
+		for clientID, seriesByClient := range s.realtimeSecond.byClient {
+			for key := range seriesByClient {
+				if key.OwnerUserID == ownerUserID {
+					delete(seriesByClient, key)
+				}
+			}
+			if len(seriesByClient) == 0 {
+				delete(s.realtimeSecond.byClient, clientID)
+			}
+		}
+	}
+	if len(s.pendingMinute) == 0 {
+		s.pendingErr = nil
 	}
 }
 

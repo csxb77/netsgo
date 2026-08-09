@@ -15,6 +15,7 @@ type trafficAccumulator struct {
 	shards                  [trafficAccumulatorShardCount]trafficAccumulatorShard
 	minimumRevisionMu       sync.RWMutex
 	minimumRevisionByTunnel map[string]int64
+	deletedOwnerUserIDs     map[string]struct{}
 }
 
 type trafficAccumulatorShard struct {
@@ -35,7 +36,10 @@ type trafficAccumulatorKey struct {
 }
 
 func newTrafficAccumulator() *trafficAccumulator {
-	acc := &trafficAccumulator{minimumRevisionByTunnel: make(map[string]int64)}
+	acc := &trafficAccumulator{
+		minimumRevisionByTunnel: make(map[string]int64),
+		deletedOwnerUserIDs:     make(map[string]struct{}),
+	}
 	for i := range acc.shards {
 		acc.shards[i].pending = make(map[trafficAccumulatorKey]TrafficDelta)
 	}
@@ -62,6 +66,9 @@ func (a *trafficAccumulator) AddDelta(now time.Time, delta TrafficDelta) error {
 	}
 	a.minimumRevisionMu.RLock()
 	defer a.minimumRevisionMu.RUnlock()
+	if _, deleted := a.deletedOwnerUserIDs[delta.OwnerUserID]; deleted {
+		return nil
+	}
 	if delta.TunnelID != "" && delta.Revision < a.minimumRevisionByTunnel[delta.TunnelID] {
 		return nil
 	}
@@ -106,6 +113,34 @@ func (a *trafficAccumulator) AddDelta(now time.Time, delta TrafficDelta) error {
 
 	shard.pending[key] = delta
 	return nil
+}
+
+// evictDeletedOwner removes every queued observation for a hard-deleted user
+// and permanently rejects late observations carrying that immutable owner ID.
+// User IDs are never reused, so retaining this small tombstone prevents a
+// producer that drained before the deletion boundary from poisoning a later
+// traffic flush with a deleted owner foreign key.
+func (a *trafficAccumulator) evictDeletedOwner(ownerUserID string) {
+	if a == nil || ownerUserID == "" {
+		return
+	}
+
+	a.minimumRevisionMu.Lock()
+	defer a.minimumRevisionMu.Unlock()
+	if a.deletedOwnerUserIDs == nil {
+		a.deletedOwnerUserIDs = make(map[string]struct{})
+	}
+	a.deletedOwnerUserIDs[ownerUserID] = struct{}{}
+	for i := range a.shards {
+		shard := &a.shards[i]
+		shard.mu.Lock()
+		for key := range shard.pending {
+			if key.ownerUserID == ownerUserID {
+				delete(shard.pending, key)
+			}
+		}
+		shard.mu.Unlock()
+	}
 }
 
 func mergeTrafficDeltaMetadata(existing *TrafficDelta, delta TrafficDelta) {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -212,7 +213,7 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		keys, err := s.auth.adminStore.GetAPIKeysForUser(scope.OwnerUserID)
 		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "api_key_list_failed", "failed to list api keys")
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 		encodeJSON(w, http.StatusOK, sanitizeAPIKeys(keys))
@@ -226,6 +227,10 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := decodeJSONRequestBody(r, &req); err != nil {
 			writeJSONRequestDecodeError(w, err)
+			return
+		}
+		if _, err := normalizeKeyPermissions(req.Permissions); err != nil || req.MaxUses < 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid_api_key", "invalid API key settings")
 			return
 		}
 
@@ -246,17 +251,20 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, "api_key_generate_failed", "failed to generate api key")
 			return
 		}
+		releaseMutation, err := s.acquireResourceMutation(scope, true)
+		if err != nil {
+			writeResourceLifecycleError(w, err)
+			return
+		}
 		key, activityID, err := s.auth.adminStore.AddAPIKeyForUserWithActivity(scope.OwnerUserID, req.Name, rawKey, req.Permissions, expiresAt, req.MaxUses, s.activityActorForRequest(r))
 		if err != nil {
-			encodeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":   err.Error(),
-				"message": err.Error(),
-				"code":    "api_key_create_failed",
-			})
+			releaseMutation()
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 
 		s.publishActivityID(activityID)
+		releaseMutation()
 
 		slog.Info("Created new API Key", "name", req.Name, "module", "admin")
 
@@ -314,12 +322,23 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		releaseMutation, err := s.acquireResourceMutation(scope, active)
+		if err != nil {
+			writeResourceLifecycleError(w, err)
+			return
+		}
 		activityID, err := s.auth.adminStore.SetAPIKeyActiveForUserWithActivity(scope.OwnerUserID, keyID, active, s.activityActorForRequest(r))
 		if err != nil {
-			writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+			releaseMutation()
+			if errors.Is(err, ErrAPIKeyNotFound) {
+				writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+				return
+			}
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 		s.publishActivityID(activityID)
+		releaseMutation()
 
 		actionText := "disabled"
 		if active {
@@ -330,12 +349,23 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 		encodeJSON(w, http.StatusOK, map[string]any{"success": true})
 
 	case http.MethodDelete:
+		releaseMutation, err := s.acquireResourceMutation(scope, false)
+		if err != nil {
+			writeResourceLifecycleError(w, err)
+			return
+		}
 		activityID, err := s.auth.adminStore.DeleteAPIKeyForUserWithActivity(scope.OwnerUserID, keyID, s.activityActorForRequest(r))
 		if err != nil {
-			writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+			releaseMutation()
+			if errors.Is(err, ErrAPIKeyNotFound) {
+				writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+				return
+			}
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 		s.publishActivityID(activityID)
+		releaseMutation()
 
 		slog.Info("API Key deleted", "key_id", keyID, "module", "admin")
 		w.WriteHeader(http.StatusNoContent)

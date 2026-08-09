@@ -217,19 +217,22 @@ func TestHandleSSE_DisconnectCleanup(t *testing.T) {
 		t.Fatalf("expected ready activity cursor immediately after SSE connection, actual body: %q", body)
 	}
 
-	if !strings.Contains(body, "event: snapshot\n") ||
-		!strings.Contains(body, `"clients":`) ||
-		!strings.Contains(body, `"server_status":`) {
-		t.Fatalf("expected full snapshot immediately after SSE connection, actual body: %q", body)
+	if strings.Contains(body, "event: snapshot\n") {
+		t.Fatalf("administrator-global SSE must not generate snapshots, actual body: %q", body)
 	}
 
-	// 发送事件
-	s.events.PublishJSON("foo", "bar")
+	// Administrator-global streams carry Activity only; resource events are
+	// delivered by the selected user's scoped stream.
+	s.events.PublishJSON("client_online", "hidden")
+	s.events.PublishJSON("activity_event", "bar")
 	time.Sleep(50 * time.Millisecond)
 
 	body = w.BodyString()
-	if !strings.Contains(body, "event: foo\ndata: \"bar\"\n\n") {
-		t.Fatalf("expected to receive business event, actual body: %q", body)
+	if strings.Contains(body, "hidden") {
+		t.Fatalf("administrator-global SSE received a resource event: %q", body)
+	}
+	if !strings.Contains(body, "event: activity_event\ndata: \"bar\"\n\n") {
+		t.Fatalf("administrator-global SSE missed an activity event: %q", body)
 	}
 
 	// 模拟客户端断开连接 (Cancel context)
@@ -249,6 +252,64 @@ func TestHandleSSE_DisconnectCleanup(t *testing.T) {
 	s.events.mu.RUnlock()
 	if subCount != 0 {
 		t.Errorf("subscription should be cleaned up after client disconnect, remaining: %d", subCount)
+	}
+}
+
+func TestHandleSSE_UserScopeKeepsSnapshot(t *testing.T) {
+	s := New(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	req = req.WithContext(context.WithValue(req.Context(), resourceScopeContextKey{}, ResourceScope{OwnerUserID: "user-a"}))
+	w := newLockedRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.handleSSE(w, req)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(w.BodyString(), "event: snapshot\n") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	body := w.BodyString()
+	if !strings.Contains(body, "event: snapshot\n") || !strings.Contains(body, `"bootstrap":`) {
+		cancel()
+		t.Fatalf("user-scoped SSE should receive a scoped bootstrap snapshot, actual body: %q", body)
+	}
+	if strings.Contains(body, `"server_status":`) {
+		cancel()
+		t.Fatalf("user-scoped SSE must not expose server status, actual body: %q", body)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scoped SSE did not stop")
+	}
+}
+
+func TestHandleSSE_UserScopeRejectsCapturedStaleEpoch(t *testing.T) {
+	s := New(0)
+	gate := s.lifecycleGate("user-a")
+	gate.mu.Lock()
+	expectedEpoch := gate.epoch
+	gate.epoch++
+	gate.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	req = req.WithContext(context.WithValue(req.Context(), resourceScopeContextKey{}, ResourceScope{
+		OwnerUserID:   "user-a",
+		ExpectedEpoch: expectedEpoch,
+	}))
+	w := newLockedRecorder()
+	s.handleSSE(w, req)
+
+	if w.rec.Code != http.StatusConflict {
+		t.Fatalf("stale scoped SSE status = %d, want %d; body=%q", w.rec.Code, http.StatusConflict, w.BodyString())
+	}
+	if !strings.Contains(w.BodyString(), `"code":"user_lifecycle_changed"`) {
+		t.Fatalf("stale scoped SSE response = %q, want lifecycle error", w.BodyString())
 	}
 }
 

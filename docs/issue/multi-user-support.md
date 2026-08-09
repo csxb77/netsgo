@@ -143,6 +143,22 @@ CREATE INDEX idx_users_status_page
 - [FRAME] `storage.Migration` 增加可选的事务内校验 Hook，执行顺序固定为 `Up SQL -> ValidateTx -> 写 schema_migrations -> commit`；`012_multi_user_ownership` 在 `serverMigrations` 加载后绑定专用校验器，其他 migration 行为不变。
 - [FRAME] `012` 在删除源表前把源行数和复制后行数写入事务内临时校验表；专用校验器在同一 `sql.Tx` 中核对这些计数、`sqlite_schema` 中的 UNIQUE/索引、`PRAGMA foreign_key_list`、`PRAGMA foreign_key_check` 和旧表已不存在，清理临时表后才允许写 ledger。
 - [FRAME] 行数、唯一约束、索引、目标外键、全库外键或旧表删除检查任一不一致时，校验器返回错误并回滚整个严格 migration；不能把测试期的迁移后检查当成运行时原子校验的替代品。
+- [FRAME] `012` 对 `admin_totp_recovery_codes`、`admin_passkeys` 和 `admin_auth_challenges` 分别记录显式孤儿计数。任一表存在 `user_id` 无法匹配 `admin_users.id` 的行时，Server 必须拒绝启动，完整回滚 `012`，且不能写入 strict migration ledger；修复后重启会安全重试同一 migration。
+- [FRAME] 启动错误必须带数据库路径、具体表名、回滚/未记账状态和先备份再检查的操作指引。Server 不自动删除或重新归属孤儿凭据，因为仅凭缺失外键不能判断它是应删除的陈旧数据还是需要恢复的用户数据。运维人员应先复制数据库，再用下列只读查询确认范围；只有在确认数据来源后才做定向修复：
+
+```sql
+SELECT 'admin_totp_recovery_codes' AS table_name, c.user_id, COUNT(*) AS orphan_rows
+FROM admin_totp_recovery_codes c LEFT JOIN admin_users u ON u.id = c.user_id
+WHERE u.id IS NULL GROUP BY c.user_id
+UNION ALL
+SELECT 'admin_passkeys', p.user_id, COUNT(*)
+FROM admin_passkeys p LEFT JOIN admin_users u ON u.id = p.user_id
+WHERE u.id IS NULL GROUP BY p.user_id
+UNION ALL
+SELECT 'admin_auth_challenges', c.user_id, COUNT(*)
+FROM admin_auth_challenges c LEFT JOIN admin_users u ON u.id = c.user_id
+WHERE u.id IS NULL GROUP BY c.user_id;
+```
 
 ### 统一 Web Session
 
@@ -215,7 +231,7 @@ CREATE INDEX idx_activity_events_subject_user
 - [FRAME] `created_by_user_id` 只记录创建执行者；管理员代用户创建时，两者故意不同。删除该执行者但资源属于其他用户时必须把该字段清空，不能因此删除其他用户的资源。
 - [FRAME] `scope_user_id` 表示哪一个用户范围可读取该活动；`NULL` 只用于真正全局、管理员安全或无法可靠归属的事件。
 - [FRAME] `subject_user_id` 表示活动明确涉及的用户主体，只用于删除关联和审计完整性，不改变 `scope_user_id` 的可见性语义；已解析出用户的登录、安全和管理事件不得只把用户 ID 写进 `dedupe_key` 或 Payload。
-- [FRAME] `activity_events.actor_id` 当前不是外键；删除用户事务必须显式删除 `scope_user_id = target`、`subject_user_id = target`、用户 Actor ID 等于 target、Client Actor 属于 target，或关联 Client/Tunnel 属于 target 的全部事件，避免保留该用户跨范围代操作及旧版未正确补 Scope 的日志。
+- [FRAME] `activity_events.actor_id` 当前不是外键且不同 Actor 类型共享字符串命名空间；删除用户事务必须显式删除 `scope_user_id = target`、`subject_user_id = target`、`actor_type IN ('admin', 'user') AND actor_id = target`、`actor_type = 'client'` 且该 Client 属于 target，或关联 Client/Tunnel 属于 target 的全部事件。不能仅按裸 `actor_id` 删除，否则与用户 ID 字符串碰撞的无关 Client Actor 会被误删；`012` 的 Actor-to-Subject 回填遵循同一类型约束。
 - [FRAME] 管理员安全表都改为 `user_id -> users.id ON DELETE CASCADE`；不再留下无用户主体的 Passkey、Recovery Code 或 Challenge。
 
 ### 不重复持久化所有权的表
@@ -224,7 +240,7 @@ CREATE INDEX idx_activity_events_subject_user
 |---|---|
 | `client_stats` | [FRAME] 通过 `client_id -> registered_clients.owner_user_id` 推导。 |
 | `client_disk_partitions` | [FRAME] 通过 `client_id -> registered_clients.owner_user_id` 推导。 |
-| `client_tokens` | [FRAME] 通过 `client_id -> registered_clients.owner_user_id` 推导；`key_id` 只保留签发来源，不参与后续 Token 授权。 |
+| `client_tokens` | [FRAME] 正常记录通过 `client_id -> registered_clients.owner_user_id` 推导；用户删除同时按所属 Client 的 `client_id` 或非空 `install_id` 匹配 Token，以清理尚未写入稳定 Client ID 的历史/预注册记录，又避免空 install ID 扩大删除范围。`key_id` 只保留签发来源，不参与后续 Token 授权。 |
 | `api_key_permissions` | [FRAME] 通过 `api_key_id -> api_keys.owner_user_id` 推导。 |
 | `tunnel_resource_locks` | [FRAME] 通过 `tunnel_id -> tunnels.owner_user_id` 推导。 |
 | `activity_event_clients` | [FRAME] 继承所属 `activity_events.scope_user_id`。 |
@@ -394,8 +410,8 @@ RequireOperationalUser  用户行必须存在且 status = active
 4. 获取 clientTunnelMutationMu 冻结 Client/Tunnel 变更，再锁定全局用户管理操作并开启数据库事务
 5. 重新验证目标用户状态、当前操作者和正常管理员不变量，并快照目标 Client ID 与 Tunnel ID 集合
 6. 清空其他用户保留资源中 created_by_user_id=target 的执行者引用
-7. 删除 scope_user_id=target、subject_user_id=target、用户 Actor ID=target、目标 Client Actor，或关联到目标 Client/Tunnel 的全部活动事件及其关联行
-8. 删除目标用户的流量桶、隧道资源锁、隧道、Client Token、Client 状态、磁盘信息和 Client 注册
+7. 删除 scope_user_id=target、subject_user_id=target、类型为 admin/user 且 ID=target 的 Actor、类型为 client 且属于目标用户的 Actor，或关联到目标 Client/Tunnel 的全部活动事件及其关联行
+8. 删除目标用户的流量桶、隧道资源锁、隧道、按目标 Client ID 或非空 install ID 命中的 Client Token、Client 状态、磁盘信息和 Client 注册
 9. 删除目标用户的 API Key Permission、API Key、Web Session、TOTP、Recovery Code、Passkey 和 Challenge
 10. 删除 users 行并提交事务，依次释放全局用户管理锁和 clientTunnelMutationMu
 11. 失效管理员用户列表缓存，发布不持久化的列表刷新 SSE，再释放目标用户生命周期锁
@@ -521,6 +537,7 @@ GET /api/admin/users
 GET    /api/admin/users
 POST   /api/admin/users
 GET    /api/admin/users/{user_id}
+GET    /api/admin/users/{user_id}/deletion-impact
 PUT    /api/admin/users/{user_id}/username
 PUT    /api/admin/users/{user_id}/password
 PUT    /api/admin/users/{user_id}/admin        {"is_admin": true|false}
@@ -538,6 +555,7 @@ POST   /api/admin/users/{user_id}/sessions/revoke
 - [FRAME] enable 发现上一次禁用尚未完全收敛时执行同一清理；仍未收敛也返回 `503 user_disable_incomplete`，只有零残留后才提交 active。
 - [FRAME] delete 只接受 `status = disabled` 的用户；正常用户返回 `409 user_must_be_disabled`，目标不存在返回 `404`。
 - [FRAME] delete 没有 soft、restore、retain 或 transfer 参数，成功后返回 `204`。
+- [FRAME] `GET .../deletion-impact` 在同一只读事务快照中返回 `user_id`、`api_keys`、`clients`、`tunnels`、`traffic_buckets`、`activity_events` 和 RFC3339 `generated_at`；活动计数必须复用硬删除的同一 typed Actor/Scope/Subject/资源关联谓词，前端必须校验响应 `user_id` 与路径目标一致后才允许确认删除。
 
 ### 显式管理员资源范围
 
@@ -943,7 +961,7 @@ GET /api/admin/users/{user_id}/keys
 - [FRAME] 管理员代操作同时保留管理员 Actor 和目标用户 Scope。
 - [FRAME] 设为管理员、移除管理员、禁用、恢复、登录拒绝和运行态清理均有结构化活动记录。
 - [FRAME] 用户删除后，Scope、Subject、管理员/普通用户 Actor、所属 Client Actor 或 Client/Tunnel 关联指向该用户的活动事件及关联行全部不存在，也不保留 `user_deleted` 墓碑事件。
-- [FRAME] 用户删除后，活动表的 Actor、Subject、关联表、Payload 和 `dedupe_key` 都不包含目标用户 ID 或其所属 Client/Tunnel ID。
+- [FRAME] 用户删除后，活动表不保留目标用户的 admin/user typed Actor、Subject、Scope，也不保留其所属 Client typed Actor 或 Client/Tunnel 关联；不同 Actor 类型中偶然相同的裸 ID 字符串不视为同一身份，不能据此误删无关事件。被删除事件的 Payload 和 `dedupe_key` 随事件一并消失。
 - [FRAME] 活动 Payload 不包含密码、Key、Token、Session ID 或完整客户端地址敏感值。
 
 ### Web

@@ -37,6 +37,19 @@ export function useManagedUser(userId: string | undefined) {
   });
 }
 
+export function useManagedUserDeletionImpact(userId: string | undefined) {
+  return useQuery({
+    queryKey: ['admin-user', userId, 'deletion-impact'] as const,
+    enabled: Boolean(userId),
+    queryFn: () => {
+      if (!userId) throw new Error('user ID is required');
+      return usersApi.deletionImpact(userId);
+    },
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
+}
+
 function useUserMutation<TInput, TResult = ManagedUser>(
   mutationFn: (input: TInput) => Promise<TResult>,
   options: { removeTargetScope?: (input: TInput) => string | undefined } = {},

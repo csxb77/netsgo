@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 )
 
@@ -11,6 +12,10 @@ import (
 type ResourceScope struct {
 	OwnerUserID string
 	AdminTarget bool
+	// ExpectedEpoch is captured when routing admits the request. Mutations use
+	// it at their final commit boundary so a request authenticated before a
+	// disable/delete cannot publish after that lifecycle transition.
+	ExpectedEpoch uint64
 }
 
 type resourceScopeContextKey struct{}
@@ -27,7 +32,11 @@ func (s *Server) requireSelfResourceScope(next http.HandlerFunc) http.HandlerFun
 			writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
 			return
 		}
-		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, ResourceScope{OwnerUserID: principal.UserID})
+		scope, ok := s.captureResourceScope(w, principal.UserID, false, true)
+		if !ok {
+			return
+		}
+		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -38,7 +47,14 @@ func (s *Server) requireAdminUserResourceScope(next http.HandlerFunc) http.Handl
 		if !ok {
 			return
 		}
-		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, ResourceScope{OwnerUserID: user.ID, AdminTarget: true})
+		// Administrators may inspect and remove resources for a disabled user.
+		// Individual mutation handlers decide whether operational status is
+		// required, but every request still captures an epoch for serialization.
+		scope, ok := s.captureResourceScope(w, user.ID, true, false)
+		if !ok {
+			return
+		}
+		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -53,9 +69,73 @@ func (s *Server) requireAdminSelfResourceScope(next http.HandlerFunc) http.Handl
 			writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
 			return
 		}
-		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, ResourceScope{OwnerUserID: principal.UserID})
+		scope, ok := s.captureResourceScope(w, principal.UserID, false, true)
+		if !ok {
+			return
+		}
+		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *Server) captureResourceScope(w http.ResponseWriter, ownerUserID string, adminTarget, requireOperational bool) (ResourceScope, bool) {
+	epoch, release, err := s.acquireUserLifecycleRead(ownerUserID, 0, requireOperational)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return ResourceScope{}, false
+	}
+	release()
+	return ResourceScope{OwnerUserID: ownerUserID, AdminTarget: adminTarget, ExpectedEpoch: epoch}, true
+}
+
+func (s *Server) acquireResourceMutation(scope ResourceScope, requireOperational bool) (func(), error) {
+	_, release, err := s.acquireUserLifecycleRead(scope.OwnerUserID, scope.ExpectedEpoch, requireOperational)
+	if err != nil {
+		return func() {}, err
+	}
+	return release, nil
+}
+
+func (s *Server) acquireResourceTunnelMutation(scope ResourceScope, requireOperational bool) (func(), error) {
+	releaseGate, err := s.acquireResourceMutation(scope, requireOperational)
+	if err != nil {
+		return func() {}, err
+	}
+	s.clientTunnelMutationMu.Lock()
+	return func() {
+		s.clientTunnelMutationMu.Unlock()
+		releaseGate()
+	}, nil
+}
+
+func (s *Server) acquireOwnedTunnelMutation(ownerUserID string, expectedEpoch uint64, requireOperational bool) (func(), error) {
+	if ownerUserID == "" {
+		s.clientTunnelMutationMu.Lock()
+		return s.clientTunnelMutationMu.Unlock, nil
+	}
+	return s.acquireResourceTunnelMutation(ResourceScope{
+		OwnerUserID:   ownerUserID,
+		ExpectedEpoch: expectedEpoch,
+	}, requireOperational)
+}
+
+func writeResourceLifecycleError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrUserNotFound):
+		writeAPIError(w, http.StatusNotFound, "user_not_found", "user not found")
+	case errors.Is(err, ErrUserDisabled):
+		writeAPIError(w, http.StatusConflict, "user_disabled", "user is disabled")
+	case errors.Is(err, ErrUserLifecycleEpochChanged):
+		writeAPIError(w, http.StatusConflict, "user_lifecycle_changed", "user lifecycle changed while processing the request")
+	default:
+		writeAPIError(w, http.StatusServiceUnavailable, "user_mutation_failed", "user mutation failed")
+	}
+}
+
+func isResourceLifecycleError(err error) bool {
+	return errors.Is(err, ErrUserNotFound) ||
+		errors.Is(err, ErrUserDisabled) ||
+		errors.Is(err, ErrUserLifecycleEpochChanged)
 }
 
 func requireResourceScope(w http.ResponseWriter, r *http.Request) (ResourceScope, bool) {

@@ -9,7 +9,37 @@ import (
 
 const multiUserMigrationValidationTable = "multi_user_migration_validation"
 
+type multiUserMigrationOrphanRowsError struct {
+	Table       string
+	OrphanCount int64
+}
+
+func (e *multiUserMigrationOrphanRowsError) Error() string {
+	return fmt.Sprintf(
+		"multi-user migration cannot continue: %s contains %d row(s) whose user_id has no matching admin_users row",
+		e.Table,
+		e.OrphanCount,
+	)
+}
+
 func validateMultiUserOwnershipMigrationTx(tx *sql.Tx) error {
+	for _, check := range []struct {
+		table string
+		name  string
+	}{
+		{"admin_totp_recovery_codes", "admin_totp_recovery_codes_orphaned"},
+		{"admin_passkeys", "admin_passkeys_orphaned"},
+		{"admin_auth_challenges", "admin_auth_challenges_orphaned"},
+	} {
+		orphanCount, err := multiUserMigrationValidationCount(tx, check.name)
+		if err != nil {
+			return err
+		}
+		if orphanCount != 0 {
+			return &multiUserMigrationOrphanRowsError{Table: check.table, OrphanCount: orphanCount}
+		}
+	}
+
 	for _, pair := range []struct {
 		source string
 		target string

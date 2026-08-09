@@ -59,4 +59,21 @@ describe('ActivityItem', () => {
     expect(markup).toContain('令牌无效');
     await i18n.changeLanguage('en-US');
   });
+
+  test('renders the lifecycle convergence warning in both locales', async () => {
+    const warning = item({
+      category: 'admin',
+      action: 'user_convergence_incomplete',
+      payload: {
+        summary_key: 'activity.admin.user_convergence_incomplete',
+        summary_args: { resource_name: 'alice' },
+      },
+    });
+
+    await i18n.changeLanguage('en-US');
+    expect(render(warning)).toContain('Runtime cleanup for user alice did not fully converge');
+    await i18n.changeLanguage('zh-CN');
+    expect(render(warning)).toContain('用户 alice 的运行态清理未完全收敛');
+    await i18n.changeLanguage('en-US');
+  });
 });

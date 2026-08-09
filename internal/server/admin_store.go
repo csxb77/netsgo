@@ -1408,22 +1408,29 @@ func (s *AdminStore) GetRegisteredClientsForUser(ownerUserID string) ([]Register
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
 	clients := make([]RegisteredClient, 0)
 	for rows.Next() {
 		client, err := scanRegisteredClientBase(rows)
 		if err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		stats, err := loadClientStats(s.db, client.ID)
-		if err != nil {
-			return nil, err
-		}
-		client.Stats = cloneSystemStats(stats)
 		clients = append(clients, client)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	for i := range clients {
+		stats, err := loadClientStats(s.db, clients[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		clients[i].Stats = cloneSystemStats(stats)
 	}
 	return clients, nil
 }
@@ -2606,22 +2613,29 @@ func (s *AdminStore) GetAPIKeysForUser(ownerUserID string) ([]APIKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
 	keys := make([]APIKey, 0)
 	for rows.Next() {
 		key, err := scanAPIKeyBase(rows)
 		if err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		permissions, err := loadAPIKeyPermissions(s.db, key.ID)
-		if err != nil {
-			return nil, err
-		}
-		key.Permissions = permissions
 		keys = append(keys, key)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	for i := range keys {
+		permissions, err := loadAPIKeyPermissions(s.db, keys[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		keys[i].Permissions = permissions
 	}
 	return keys, nil
 }

@@ -94,8 +94,8 @@ func p2pClosedOutbounds(session *p2pPairSession, reason string) []p2pOutbound {
 		State: protocol.P2PStateClosed, Error: reason,
 	}
 	return []p2pOutbound{
-		{clientID: session.clientA, messageType: protocol.MsgTypeP2PClosed, payload: status},
-		{clientID: session.clientB, messageType: protocol.MsgTypeP2PClosed, payload: status},
+		session.outbound(session.clientA, protocol.MsgTypeP2PClosed, status),
+		session.outbound(session.clientB, protocol.MsgTypeP2PClosed, status),
 	}
 }
 

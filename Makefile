@@ -177,7 +177,7 @@ test:
 	go test ./...
 
 test-race:
-	go test -race ./...
+	go test -race ./... -timeout=20m
 
 test-tdd-red: test-tdd-red-client test-tdd-red-server
 

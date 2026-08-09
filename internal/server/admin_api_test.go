@@ -131,7 +131,7 @@ func seedStoredTunnel(t *testing.T, s *Server, clientID string, req protocol.Pro
 		t.Fatalf("unknown test status: %s", status)
 	}
 
-	err := s.store.AddTunnel(StoredTunnel{
+	mustAddStableTunnelForServer(t, s, StoredTunnel{
 		ProxyNewRequest: req,
 		DesiredState:    desiredState,
 		RuntimeState:    runtimeState,
@@ -139,9 +139,6 @@ func seedStoredTunnel(t *testing.T, s *Server, clientID string, req protocol.Pro
 		Hostname:        clientID + ".local",
 		Binding:         TunnelBindingClientID,
 	})
-	if err != nil {
-		t.Fatalf("failed to write test tunnel: %v", err)
-	}
 }
 
 func loginAdminTokenLocal(t *testing.T, handler http.Handler, username, password string) string {
@@ -357,9 +354,10 @@ func TestAPI_AdminKeys_CreateFailsWhenPersistFails(t *testing.T) {
 
 	s.handleAPIAdminKeys(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("API key persistence failure should return 400, got %d", w.Code)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("API key persistence failure should return 503, got %d", w.Code)
 	}
+	requireUserAPIErrorCode(t, w.Body.Bytes(), "temporary_storage_failure")
 }
 
 func TestAPI_AdminConfig_GetAndUpdate(t *testing.T) {

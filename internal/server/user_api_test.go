@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func requireUserAPIErrorCode(t *testing.T, responseBody []byte, want string) {
@@ -41,14 +42,8 @@ func TestAPIUserManagementContract(t *testing.T) {
 			t.Fatalf("user DTO must not expose %q", forbidden)
 		}
 	}
-	var actions map[string]json.RawMessage
-	if err := json.Unmarshal(createdPayload["actions"], &actions); err != nil {
-		t.Fatalf("decode user action capabilities: %v", err)
-	}
-	for _, key := range []string{"can_change_admin", "can_disable", "can_enable", "can_delete", "can_update_username", "can_update_password", "can_revoke_sessions"} {
-		if _, exists := actions[key]; !exists {
-			t.Fatalf("user action capabilities missing %q: %s", key, createdPayload["actions"])
-		}
+	if _, exists := createdPayload["actions"]; exists {
+		t.Fatalf("mutation response should omit optional action capabilities: %s", create.Body.String())
 	}
 
 	list := doMuxRequest(t, handler, http.MethodGet, "/api/admin/users?status=active&is_admin=false&limit=1", adminToken, nil)
@@ -61,6 +56,9 @@ func TestAPIUserManagementContract(t *testing.T) {
 	}
 	if len(listed.Items) != 1 || listed.Items[0].ID != created.ID || listed.Items[0].IsAdmin {
 		t.Fatalf("filtered user list = %+v, want only created ordinary user", listed)
+	}
+	if listed.Items[0].Actions == nil {
+		t.Fatal("authoritative list response should include action capabilities")
 	}
 
 	userToken := loginAdminTokenLocal(t, handler, "alice", "Alice1234")
@@ -196,6 +194,47 @@ func TestAPIUserDeleteRequiresDisabledStateAndRevokesSession(t *testing.T) {
 	missing := doMuxRequest(t, handler, http.MethodGet, "/api/admin/users/"+user.ID, adminToken, nil)
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("load deleted user status = %d, want %d: %s", missing.Code, http.StatusNotFound, missing.Body.String())
+	}
+	requireUserAPIErrorCode(t, missing.Body.Bytes(), "user_not_found")
+}
+
+func TestAPIUserDeletionImpactContract(t *testing.T) {
+	_, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+
+	create := doMuxRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, []byte(`{"username":"impact-user","password":"Password123"}`))
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create user status = %d, want %d: %s", create.Code, http.StatusCreated, create.Body.String())
+	}
+	var user userResponse
+	if err := json.Unmarshal(create.Body.Bytes(), &user); err != nil {
+		t.Fatalf("decode created user: %v", err)
+	}
+
+	response := doMuxRequest(t, handler, http.MethodGet, "/api/admin/users/"+user.ID+"/deletion-impact", adminToken, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("deletion impact status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var impact UserDeletionImpact
+	if err := json.Unmarshal(response.Body.Bytes(), &impact); err != nil {
+		t.Fatalf("decode deletion impact: %v", err)
+	}
+	if impact.UserID != user.ID {
+		t.Fatalf("deletion impact user_id = %q, want %q", impact.UserID, user.ID)
+	}
+	if impact.APIKeys != 0 || impact.Clients != 0 || impact.Tunnels != 0 || impact.TrafficBuckets != 0 {
+		t.Fatalf("unexpected fresh-user owned-resource impact: %+v", impact)
+	}
+	if impact.ActivityEvents == 0 {
+		t.Fatalf("deletion impact must include the user-created activity: %+v", impact)
+	}
+	if impact.GeneratedAt.IsZero() || time.Since(impact.GeneratedAt) > time.Minute {
+		t.Fatalf("deletion impact generated_at = %s, want a current timestamp", impact.GeneratedAt)
+	}
+
+	missing := doMuxRequest(t, handler, http.MethodGet, "/api/admin/users/missing-user/deletion-impact", adminToken, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing-user deletion impact status = %d, want %d: %s", missing.Code, http.StatusNotFound, missing.Body.String())
 	}
 	requireUserAPIErrorCode(t, missing.Body.Bytes(), "user_not_found")
 }

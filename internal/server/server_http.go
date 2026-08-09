@@ -84,6 +84,7 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/users", s.RequireAdmin(s.handleAPIAdminUsers))
 	mux.HandleFunc("POST /api/admin/users", s.RequireAdmin(s.handleAPIAdminUsers))
 	mux.HandleFunc("GET /api/admin/users/{user_id}", s.RequireAdmin(s.handleAPIAdminUser))
+	mux.HandleFunc("GET /api/admin/users/{user_id}/deletion-impact", s.RequireAdmin(s.handleAPIAdminUserDeletionImpact))
 	mux.HandleFunc("PUT /api/admin/users/{user_id}/username", s.RequireAdmin(s.handleAPIAdminUserUsername))
 	mux.HandleFunc("PUT /api/admin/users/{user_id}/password", s.RequireAdmin(s.handleAPIAdminUserPassword))
 	mux.HandleFunc("PUT /api/admin/users/{user_id}/admin", s.RequireAdmin(s.handleAPIAdminUserAdmin))

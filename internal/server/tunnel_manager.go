@@ -225,11 +225,15 @@ func (s *Server) notifyClientProxyClose(client *ClientConn, name, reason string)
 }
 
 func (s *Server) writeControlMessage(client *ClientConn, message *protocol.Message) error {
+	return s.writeControlMessageBefore(client, message, time.Time{})
+}
+
+func (s *Server) writeControlMessageBefore(client *ClientConn, message *protocol.Message, deadline time.Time) error {
 	if client.generation != 0 && !s.isCurrentLive(client.ID, client.generation) {
 		return fmt.Errorf("client %s is not in the live session", client.ID)
 	}
 
-	if err := client.writeJSON(message); err != nil {
+	if err := client.writeJSONBefore(message, deadline); err != nil {
 		return fmt.Errorf("failed to write control message: %w", err)
 	}
 	return nil

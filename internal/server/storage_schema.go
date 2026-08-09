@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -38,6 +39,15 @@ func openServerDB(path string) (*sql.DB, error) {
 	}
 	if err := storage.ApplyMigrationPlan(db, serverMigrationPlan(migrations)); err != nil {
 		_ = db.Close()
+		var orphanErr *multiUserMigrationOrphanRowsError
+		if errors.As(err, &orphanErr) {
+			return nil, fmt.Errorf(
+				"server database %q was not upgraded: %w; migration 012 was rolled back and was not recorded; back up the database, inspect user_id values in %s that are absent from admin_users, restore missing users or repair only rows whose correct disposition is confirmed, then restart NetsGo",
+				path,
+				err,
+				orphanErr.Table,
+			)
+		}
 		return nil, err
 	}
 	return db, nil

@@ -58,7 +58,10 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("❌ WebSocket upgrade failed: %v", err)
 		return
 	}
-	release := s.trackManagedConn(conn)
+	release, accepted := s.trackManagedConn(conn)
+	if !accepted {
+		return
+	}
 	defer release()
 	defer func() { _ = conn.Close() }()
 
@@ -149,15 +152,8 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 		return nil, fmt.Errorf("authentication failed: install_id cannot be empty")
 	}
 
-	// Do not hold the client/tunnel mutation lock while waiting for an
-	// untrusted peer to send its authentication message. The lock is only
-	// needed once authentication can mutate registered-client or session state.
-	s.clientTunnelMutationMu.Lock()
-	defer s.clientTunnelMutationMu.Unlock()
-
 	var newToken string
 	var clientID string
-	var ownerUserID string
 	var bandwidthSettings protocol.BandwidthSettings
 	var clientTokenID string
 
@@ -186,11 +182,55 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 		return nil, fmt.Errorf("authentication failed")
 	}
 
+	// Resolve the owner without touching token activity or consuming a key.
+	// The credential is validated again after entering that owner's gate.
+	var ownerUserID string
+	if authReq.Token != "" {
+		ownerUserID, err = s.auth.adminStore.ResolveClientTokenOwner(authReq.Token)
+		if err != nil {
+			if errors.Is(err, ErrUserOwnerUnavailable) {
+				return nil, s.rejectClientOwnerAuthentication(conn, r, err)
+			}
+			code, reason := clientTokenFailureReason(err)
+			s.recordAuthFailure(r, "client_auth_failed", reason)
+			_ = writeAuthResult(conn, protocol.AuthResponse{Success: false, Message: "authentication failed", Code: code, ClearToken: true})
+			return nil, fmt.Errorf("authentication failed")
+		}
+	} else {
+		ownerUserID, err = s.auth.adminStore.ResolveClientKeyOwner(authReq.Key)
+		if err != nil {
+			if errors.Is(err, ErrUserOwnerUnavailable) {
+				return nil, s.rejectClientOwnerAuthentication(conn, r, err)
+			}
+			code, reason := clientKeyFailureReason(err)
+			s.recordAuthFailure(r, "client_auth_failed", reason)
+			_ = writeAuthResult(conn, protocol.AuthResponse{Success: false, Message: "authentication failed", Code: code})
+			return nil, fmt.Errorf("authentication failed")
+		}
+	}
+
+	ownerEpoch, releaseOwnerGate, err := s.acquireUserLifecycleRead(ownerUserID, 0, true)
+	if err != nil {
+		return nil, s.rejectClientOwnerAuthentication(conn, r, err)
+	}
+	s.clientTunnelMutationMu.Lock()
+	mutationLocked := true
+	releaseMutation := func() {
+		if !mutationLocked {
+			return
+		}
+		mutationLocked = false
+		s.clientTunnelMutationMu.Unlock()
+		releaseOwnerGate()
+	}
+	defer releaseMutation()
+
 	if authReq.Token != "" {
 		clientToken, err := s.auth.adminStore.ValidateClientToken(authReq.Token, authReq.InstallID)
 		if err != nil {
 			code, reason := clientTokenFailureReason(err)
 			s.recordAuthFailure(r, "client_auth_failed", reason)
+			releaseMutation()
 			_ = writeAuthResult(conn, protocol.AuthResponse{
 				Success:    false,
 				Message:    "authentication failed",
@@ -203,11 +243,12 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 		clientID = clientToken.ClientID
 		clientTokenID = clientToken.ID
 		registered, ok := s.auth.adminStore.GetRegisteredClient(clientID)
-		if !ok || registered.OwnerUserID == "" {
+		if !ok || registered.OwnerUserID == "" || registered.OwnerUserID != ownerUserID {
+			releaseMutation()
 			return nil, s.rejectClientOwnerAuthentication(conn, r, fmt.Errorf("client owner could not be resolved"))
 		}
-		ownerUserID = registered.OwnerUserID
 		if err := s.ensureClientOwnerOperational(ownerUserID); err != nil {
+			releaseMutation()
 			return nil, s.rejectClientOwnerAuthentication(conn, r, err)
 		}
 		bandwidthSettings = registeredClientBandwidthSettings(registered)
@@ -215,6 +256,7 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 			currentClient := current.(*ClientConn)
 			if currentClient.getState() != clientStateClosing {
 				log.Printf("⚠️ Concurrent token connection rejected: client_id=%s, install_id=%s, remote=%s", clientID, authReq.InstallID, remoteAddr)
+				releaseMutation()
 				_ = writeAuthResult(conn, protocol.AuthResponse{
 					Success:   false,
 					Message:   "authentication failed",
@@ -232,6 +274,7 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 			if current, loaded := s.clients.Load(registered.ID); loaded {
 				currentClient := current.(*ClientConn)
 				if currentClient.getState() != clientStateClosing {
+					releaseMutation()
 					_ = writeAuthResult(conn, protocol.AuthResponse{
 						Success:   false,
 						Message:   "authentication failed",
@@ -253,6 +296,7 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 			}
 			s.recordAuthFailure(r, "client_auth_failed", reason)
 			log.Printf("❌ Failed to exchange client key for token [%s]: %v", remoteAddr, err)
+			releaseMutation()
 			_ = writeAuthResult(conn, protocol.AuthResponse{
 				Success:   false,
 				Message:   "authentication failed",
@@ -262,8 +306,12 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 			return nil, fmt.Errorf("authentication failed")
 		}
 		clientID = exchange.Client.ID
-		ownerUserID = exchange.Client.OwnerUserID
+		if exchange.Client.OwnerUserID != ownerUserID {
+			releaseMutation()
+			return nil, s.rejectClientOwnerAuthentication(conn, r, fmt.Errorf("client owner changed during authentication"))
+		}
 		if err := s.ensureClientOwnerOperational(ownerUserID); err != nil {
+			releaseMutation()
 			return nil, s.rejectClientOwnerAuthentication(conn, r, err)
 		}
 		bandwidthSettings = registeredClientBandwidthSettings(exchange.Client)
@@ -283,12 +331,14 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 	// publishing the logical session. This closes the normal disable race
 	// between token/key validation and the ClientConn becoming visible.
 	if err := s.ensureClientOwnerOperational(ownerUserID); err != nil {
+		releaseMutation()
 		return nil, s.rejectClientOwnerAuthentication(conn, r, err)
 	}
 
 	client := &ClientConn{
 		ID:             clientID,
 		OwnerUserID:    ownerUserID,
+		OwnerEpoch:     ownerEpoch,
 		InstallID:      authReq.InstallID,
 		Info:           authReq.Client,
 		RemoteAddr:     ip,
@@ -304,6 +354,8 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 		return nil, fmt.Errorf("invalid persisted bandwidth settings for client %s: %w", clientID, err)
 	}
 	s.clients.Store(clientID, client)
+	s.startPendingDataTimer(client)
+	releaseMutation()
 	if registrationActivityID > 0 {
 		s.publishActivityID(registrationActivityID)
 	}
@@ -318,12 +370,11 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 	}
 	if err := writeAuthResult(conn, authResp); err != nil {
 		if current, ok := s.clients.Load(clientID); ok && current == client {
-			_ = s.invalidateLogicalSessionIfCurrentLocked(clientID, client.generation, normalizeClientDisconnectCause("auth_response_failed"))
+			_ = s.invalidateLogicalSessionIfCurrent(clientID, client.generation, "auth_response_failed")
 		}
 		return nil, fmt.Errorf("failed to send authentication response: %w", err)
 	}
 
-	s.startPendingDataTimer(client)
 	return client, nil
 }
 

@@ -105,6 +105,7 @@ func newPendingTestClient(clientID, token, ownerUserID string) *ClientConn {
 	return &ClientConn{
 		ID:          clientID,
 		OwnerUserID: ownerUserID,
+		OwnerEpoch:  1,
 		proxies:     make(map[string]*ProxyTunnel),
 		dataToken:   token,
 		generation:  1,
@@ -634,12 +635,16 @@ func TestAcceptClientOpenedDataStreams_WaitsForDecodeFailureHandler(t *testing.T
 
 func TestAcceptClientOpenedDataStreams_WaitsForActiveHandler(t *testing.T) {
 	s := New(0)
-	stored := testClientRelayStoredTunnel(t)
+	s.store = newTestTunnelStore(t)
+	stored := mustAddStableTunnelForServer(t, s, testClientRelayStoredTunnel(t))
 	s.c2c.set(stored)
+	ownerEpoch := s.lifecycleGate(stored.OwnerUserID).epoch
 
 	targetClientSession, targetServerSession := newDataTestYamuxSessionPair(t)
 	targetClient := &ClientConn{
 		ID:          stored.Target.ClientID,
+		OwnerUserID: stored.OwnerUserID,
+		OwnerEpoch:  ownerEpoch,
 		proxies:     make(map[string]*ProxyTunnel),
 		generation:  1,
 		state:       clientStateLive,
@@ -649,11 +654,15 @@ func TestAcceptClientOpenedDataStreams_WaitsForActiveHandler(t *testing.T) {
 
 	ingressClientSession, ingressServerSession := newDataTestYamuxSessionPair(t)
 	ingressClient := &ClientConn{
-		ID:         stored.Ingress.ClientID,
-		proxies:    make(map[string]*ProxyTunnel),
-		generation: 1,
-		state:      clientStateLive,
+		ID:          stored.Ingress.ClientID,
+		OwnerUserID: stored.OwnerUserID,
+		OwnerEpoch:  ownerEpoch,
+		proxies:     make(map[string]*ProxyTunnel),
+		generation:  1,
+		state:       clientStateLive,
+		dataSession: ingressServerSession,
 	}
+	s.clients.Store(ingressClient.ID, ingressClient)
 
 	var streamWG sync.WaitGroup
 	streamWG.Add(1)

@@ -22,6 +22,7 @@ import type {
   TunnelUpdateRequest,
   ManagedUser,
   Principal,
+  UserDeletionImpact,
   UserListResponse,
 } from '@/types';
 
@@ -300,6 +301,41 @@ export interface UserListQuery {
   isAdmin?: boolean;
 }
 
+const userDeletionImpactCountFields = [
+  'api_keys',
+  'clients',
+  'tunnels',
+  'traffic_buckets',
+  'activity_events',
+] as const satisfies readonly (keyof UserDeletionImpact)[];
+const rfc3339TimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export function parseUserDeletionImpact(value: unknown, expectedUserId?: string): UserDeletionImpact {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(i18n.t('users.deletionImpactInvalid'));
+  }
+  const candidate = value as Record<string, unknown>;
+  const countsAreValid = userDeletionImpactCountFields.every((field) => (
+    typeof candidate[field] === 'number'
+    && Number.isSafeInteger(candidate[field])
+    && Number(candidate[field]) >= 0
+  ));
+  const userId = candidate.user_id;
+  const generatedAt = candidate.generated_at;
+  if (
+    !countsAreValid
+    || typeof userId !== 'string'
+    || userId.trim().length === 0
+    || (expectedUserId !== undefined && userId !== expectedUserId)
+    || typeof generatedAt !== 'string'
+    || !rfc3339TimestampPattern.test(generatedAt)
+    || !Number.isFinite(Date.parse(generatedAt))
+  ) {
+    throw new Error(i18n.t('users.deletionImpactInvalid'));
+  }
+  return candidate as unknown as UserDeletionImpact;
+}
+
 export const usersApi = {
   list(query: UserListQuery = {}) {
     const params = new URLSearchParams();
@@ -314,6 +350,11 @@ export const usersApi = {
 
   get(userId: string) {
     return api.get<ManagedUser>(`${adminUserBase(userId)}`);
+  },
+
+  async deletionImpact(userId: string) {
+    const response = await api.get<unknown>(`${adminUserBase(userId)}/deletion-impact`);
+    return parseUserDeletionImpact(response, userId);
   },
 
   create(body: { username: string; password: string }) {

@@ -14,12 +14,8 @@ func TestApplyP2PLifecycleProjectsCurrentTargetsAndSkipsStale(t *testing.T) {
 	second := testStoredServerExposeTCPTunnel("p2p-projection-second", "second", "client-1", 8082, 18082, time.Time{})
 	first.P2P = P2PState{State: protocol.P2PStateGathering, SessionID: "session-1"}
 	second.P2P = P2PState{State: protocol.P2PStateGathering, SessionID: "session-1"}
-	if err := store.AddTunnel(first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AddTunnel(second); err != nil {
-		t.Fatal(err)
-	}
+	mustAddStableTunnel(t, store, first)
+	mustAddStableTunnel(t, store, second)
 
 	result, err := store.ApplyP2PLifecycle([]p2pGrantSnapshot{
 		{TunnelID: first.ID, Revision: first.Revision},
@@ -44,12 +40,8 @@ func TestApplyP2PLifecycleBatchRollsBackOnSQLFailure(t *testing.T) {
 	second := testStoredServerExposeTCPTunnel("p2p-rollback-second", "second", "client-1", 8082, 18082, time.Time{})
 	first.P2P = P2PState{State: protocol.P2PStateGathering, SessionID: "session-1"}
 	second.P2P = P2PState{State: protocol.P2PStateGathering, SessionID: "session-1"}
-	if err := store.AddTunnel(first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AddTunnel(second); err != nil {
-		t.Fatal(err)
-	}
+	mustAddStableTunnel(t, store, first)
+	mustAddStableTunnel(t, store, second)
 	if _, err := store.db.Exec(`CREATE TRIGGER fail_second_p2p_projection BEFORE UPDATE OF p2p_state ON tunnels WHEN OLD.id = '` + second.ID + `' BEGIN SELECT RAISE(ABORT, 'injected p2p projection failure'); END`); err != nil {
 		t.Fatal(err)
 	}

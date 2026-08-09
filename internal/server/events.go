@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -147,7 +148,10 @@ func sseReadScopeForRequest(r *http.Request) (sseReadScope, error) {
 }
 
 func (scope sseReadScope) allows(event SSEEvent) bool {
-	return scope.global || event.ScopeUserID == scope.userID
+	if scope.global {
+		return event.Type == "activity_event"
+	}
+	return event.ScopeUserID == scope.userID
 }
 
 func (s *Server) activityCursorForSSEScope(scope sseReadScope) (int64, error) {
@@ -175,7 +179,11 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
-	release := s.beginLongLivedHandler()
+	release, accepted := s.beginLongLivedHandler()
+	if !accepted {
+		writeAPIError(w, http.StatusServiceUnavailable, "server_shutting_down", "server is shutting down")
+		return
+	}
 	defer release()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -187,7 +195,26 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "sse_scope_missing", "SSE resource scope is unavailable")
 		return
 	}
-	streamContext, releaseStream := s.registerSSEConnection(r)
+	var streamContext context.Context
+	var releaseStream func()
+	principal := GetPrincipalFromContext(r.Context())
+	if !scope.global {
+		resourceScope, scopeOK := resourceScopeFromContext(r.Context())
+		if !scopeOK || resourceScope.OwnerUserID != scope.userID {
+			writeAPIError(w, http.StatusInternalServerError, "sse_scope_missing", "SSE resource scope is unavailable")
+			return
+		}
+		requireOperational := principal != nil && principal.UserID == scope.userID
+		_, releaseGate, gateErr := s.acquireUserLifecycleRead(scope.userID, resourceScope.ExpectedEpoch, requireOperational)
+		if gateErr != nil {
+			writeResourceLifecycleError(w, gateErr)
+			return
+		}
+		streamContext, releaseStream = s.registerSSEConnection(r)
+		releaseGate()
+	} else {
+		streamContext, releaseStream = s.registerSSEConnection(r)
+	}
 	defer releaseStream()
 	if err := streamContext.Err(); err != nil {
 		return
@@ -207,15 +234,21 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		log.Printf("⚠️ Failed to write initial SSE handshake: %v", err)
 		return
 	}
-	if err := writeSSEEvent(w, flusher, "snapshot", s.snapshotForSSEScope(scope)); err != nil {
-		log.Printf("⚠️ Failed to write initial SSE snapshot: %v", err)
-		return
+	if !scope.global {
+		if err := writeSSEEvent(w, flusher, "snapshot", s.snapshotForSSEScope(scope)); err != nil {
+			log.Printf("⚠️ Failed to write initial SSE snapshot: %v", err)
+			return
+		}
 	}
 
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
-	snapshotTicker := time.NewTicker(10 * time.Second)
-	defer snapshotTicker.Stop()
+	var snapshotC <-chan time.Time
+	if !scope.global {
+		snapshotTicker := time.NewTicker(10 * time.Second)
+		defer snapshotTicker.Stop()
+		snapshotC = snapshotTicker.C
+	}
 
 	for {
 		select {
@@ -231,7 +264,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-		case <-snapshotTicker.C:
+		case <-snapshotC:
 			if err := writeSSEEvent(w, flusher, "snapshot", s.snapshotForSSEScope(scope)); err != nil {
 				log.Printf("⚠️ Failed to write SSE snapshot: %v", err)
 				return

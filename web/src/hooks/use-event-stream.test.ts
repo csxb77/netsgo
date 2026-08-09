@@ -1,16 +1,21 @@
 import { describe, expect, test } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
-import type { ActivityItem, Client, ProxyConfig } from '@/types';
+import type { ActivityItem, Client, ConsoleSummary, ProxyConfig, ResourceBootstrap } from '@/types';
 import { SELF_RESOURCE_SCOPE, scopedQueryKey } from '@/lib/resource-scope';
 import { buildActivityQueryKey } from './use-activity';
 
-import { applyEventForDiagnostics, createActivityRecoveryState, createEventStreamSnapshotState } from './use-event-stream';
+import {
+  applyEventForDiagnostics,
+  createActivityRecoveryState,
+  createEventStreamSnapshotState,
+  resolveEventStreamScope,
+} from './use-event-stream';
 
 const selfScope = SELF_RESOURCE_SCOPE;
 const clientsKey = scopedQueryKey(selfScope, 'clients');
 const consoleSummaryKey = scopedQueryKey(selfScope, 'console-summary');
-const serverStatusKey = scopedQueryKey(selfScope, 'server-status');
+const resourceBootstrapKey = scopedQueryKey(selfScope, 'resource-bootstrap');
 const clientTunnelKey = (clientId: string, role: string) => scopedQueryKey(selfScope, 'client-tunnels', clientId, role);
 const clientTrafficKey = (clientId: string, range: string, tunnel = '') => scopedQueryKey(selfScope, 'client-traffic', clientId, range, tunnel);
 
@@ -93,10 +98,36 @@ function tunnelChangedEvent(runtimeState: ProxyConfig['runtime_state'], action: 
   return tunnelChangedPayload('client-1', action, createTunnel(runtimeState));
 }
 
+function summary(activeTunnels = 0): ConsoleSummary {
+  return {
+    total_clients: 1,
+    online_clients: 1,
+    offline_clients: 0,
+    total_tunnels: activeTunnels,
+    active_tunnels: activeTunnels,
+    inactive_tunnels: 0,
+    pending_tunnels: 0,
+    offline_tunnels: 0,
+    stopped_tunnels: 0,
+    error_tunnels: 0,
+  };
+}
+
+function bootstrap(version = 'v0.1.0'): ResourceBootstrap {
+  return {
+    version,
+    server_addr: 'https://netsgo.example.com',
+    allowed_ports: [{ start: 10000, end: 20000 }],
+  };
+}
+
 function snapshotPayload(runtimeState: ProxyConfig['runtime_state'], generatedAt?: string) {
   return JSON.stringify({
     clients: [createClient(runtimeState)],
-    generated_at: generatedAt,
+    summary: summary(1),
+    bootstrap: bootstrap(),
+    generated_at: generatedAt ?? '2026-05-08T01:00:00Z',
+    fresh_until: '2026-05-08T01:00:15Z',
   });
 }
 
@@ -111,7 +142,14 @@ function clientsSnapshotResponse(
   clients: Client[],
   overrides: Record<string, unknown> = {},
 ) {
-  return new Response(JSON.stringify({ clients, ...overrides }), {
+  return new Response(JSON.stringify({
+    clients,
+    summary: summary(),
+    bootstrap: bootstrap(),
+    generated_at: '2026-05-08T01:00:00Z',
+    fresh_until: '2026-05-08T01:00:15Z',
+    ...overrides,
+  }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
@@ -138,6 +176,30 @@ function activity(id: number): ActivityItem {
     clients: [{ client_id: 'client-1', relation: 'subject' }], tunnels: [],
   };
 }
+
+describe('event stream scope selection', () => {
+  test('uses the administrator-global stream outside resource workspaces', () => {
+    expect(resolveEventStreamScope(null, true, '/dashboard/users')).toEqual({ kind: 'admin-global' });
+    expect(resolveEventStreamScope(null, true, '/dashboard/admin/security')).toEqual({ kind: 'admin-global' });
+  });
+
+  test('keeps target-user resource and filtered activity streams explicitly scoped', () => {
+    expect(resolveEventStreamScope(
+      { kind: 'admin-user', userId: 'user-a' },
+      true,
+      '/dashboard/users/user-a',
+    )).toEqual({ kind: 'admin-user', userId: 'user-a' });
+    expect(resolveEventStreamScope(null, true, '/dashboard/activity', 'user-b')).toEqual({
+      kind: 'admin-user',
+      userId: 'user-b',
+    });
+  });
+
+  test('does not connect a global stream before entering the authenticated dashboard', () => {
+    expect(resolveEventStreamScope(null, true, '/login')).toBeNull();
+    expect(resolveEventStreamScope(null, false, '/dashboard/users')).toBeNull();
+  });
+});
 
 describe('use-event-stream diagnostics', () => {
   test('keeps newer tunnel_changed state when an older console snapshot resolves later', async () => {
@@ -191,6 +253,7 @@ describe('use-event-stream diagnostics', () => {
         snapshotPayload('exposed', '2026-05-08T01:00:02Z'),
       );
       expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+      expect(queryClient.getQueryData(resourceBootstrapKey)).toEqual(bootstrap());
 
       applyEventForDiagnostics(
         queryClient,
@@ -204,6 +267,51 @@ describe('use-event-stream diagnostics', () => {
     } finally {
       queryClient.clear();
     }
+  });
+
+  test('rejects a scoped snapshot that omits the resource bootstrap contract', () => {
+    const queryClient = new QueryClient();
+    const snapshotState = createEventStreamSnapshotState();
+    queryClient.setQueryData<Client[]>(clientsKey, [createClient('exposed')]);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      snapshotState,
+      'snapshot',
+      JSON.stringify({
+        clients: [createClient('pending')],
+        summary: summary(1),
+        generated_at: '2026-05-08T01:00:01Z',
+        fresh_until: '2026-05-08T01:00:16Z',
+      }),
+    );
+
+    expect(queryClient.getQueryData<Client[]>(clientsKey)?.[0]?.proxies?.[0]?.runtime_state).toBe('exposed');
+    expect(queryClient.getQueryData(resourceBootstrapKey)).toBeUndefined();
+    queryClient.clear();
+  });
+
+  test('accepts an administrator-global handshake without requiring a snapshot', () => {
+    const queryClient = new QueryClient();
+    const snapshotState = createEventStreamSnapshotState();
+    const activityState = createActivityRecoveryState();
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      snapshotState,
+      'ready',
+      JSON.stringify({ activity_cursor: 12 }),
+      activityState,
+      { kind: 'admin-global' },
+    );
+
+    expect(activityState.lastScannedId).toBe(12);
+    expect(queryClient.getQueryData(clientsKey)).toBeUndefined();
+    expect(queryClient.getQueryData(resourceBootstrapKey)).toBeUndefined();
+    activityState.cancelled = true;
+    queryClient.clear();
   });
 
   test('moves a server-expose tunnel from the old owner to the new owner', async () => {
@@ -355,7 +463,7 @@ describe('use-event-stream diagnostics', () => {
     queryClient.setQueryData(clientTrafficKey(oldOwnerId, '60s'), { resolution: 'second', items: [] });
     queryClient.setQueryData(clientTrafficKey(newOwnerId, '60s', 'demo'), { resolution: 'second', items: [] });
     queryClient.setQueryData(consoleSummaryKey, { marker: 'stale-summary' });
-    queryClient.setQueryData(serverStatusKey, { marker: 'stale-status' });
+    queryClient.setQueryData(resourceBootstrapKey, bootstrap('stale-version'));
 
     const originalFetch = globalThis.fetch;
     const requests: Deferred<Response>[] = [];
@@ -397,9 +505,9 @@ describe('use-event-stream diagnostics', () => {
       expect(queryClient.getQueryState(clientTrafficKey(oldOwnerId, '60s'))?.isInvalidated).toBe(true);
       expect(queryClient.getQueryState(clientTrafficKey(newOwnerId, '60s', 'demo'))?.isInvalidated).toBe(true);
       expect(queryClient.getQueryData(consoleSummaryKey)).toEqual({ marker: 'stale-summary' });
-      expect(queryClient.getQueryData(serverStatusKey)).toEqual({ marker: 'stale-status' });
+      expect(queryClient.getQueryData(resourceBootstrapKey)).toEqual(bootstrap('stale-version'));
       expect(queryClient.getQueryState(consoleSummaryKey)?.isInvalidated).toBe(false);
-      expect(queryClient.getQueryState(serverStatusKey)?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(resourceBootstrapKey)?.isInvalidated).toBe(false);
 
       await waitForRequests(requests, 2);
       requests[0].resolve(clientsSnapshotResponse(finalClients));
@@ -432,8 +540,8 @@ describe('use-event-stream diagnostics', () => {
       createClientWithTunnels(oldOwnerId, [oldTunnel]),
       createClientWithTunnels(newOwnerId, []),
     ]);
-    queryClient.setQueryData(consoleSummaryKey, { marker: 'fresh-summary' });
-    queryClient.setQueryData(serverStatusKey, { marker: 'fresh-status' });
+    queryClient.setQueryData(consoleSummaryKey, summary(1));
+    queryClient.setQueryData(resourceBootstrapKey, bootstrap('v0.1.0'));
 
     const originalFetch = globalThis.fetch;
     const requests: Deferred<Response>[] = [];
@@ -462,22 +570,20 @@ describe('use-event-stream diagnostics', () => {
       );
 
       requests[1].resolve(clientsSnapshotResponse(finalClients, {
-        summary: { marker: 'fresh-summary' },
-        server_status: { marker: 'fresh-status' },
+        summary: summary(1),
+        bootstrap: bootstrap('v0.2.0'),
+        generated_at: '2026-05-08T01:00:02Z',
       }));
       await flushAsyncWork();
       requests[0].reject(new Error('stale migrated_out resync failed'));
       await flushAsyncWork();
 
       expect(queryClient.getQueryData<Client[]>(clientsKey)).toEqual(finalClients);
-      expect(queryClient.getQueryData(consoleSummaryKey)).toEqual({ marker: 'fresh-summary' });
-      expect(queryClient.getQueryData(serverStatusKey)).toEqual({
-        marker: 'fresh-status',
-        summary: { marker: 'fresh-summary' },
-      });
+      expect(queryClient.getQueryData(consoleSummaryKey)).toEqual(summary(1));
+      expect(queryClient.getQueryData(resourceBootstrapKey)).toEqual(bootstrap('v0.2.0'));
       expect(queryClient.getQueryState(clientsKey)?.isInvalidated).toBe(false);
       expect(queryClient.getQueryState(consoleSummaryKey)?.isInvalidated).toBe(false);
-      expect(queryClient.getQueryState(serverStatusKey)?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(resourceBootstrapKey)?.isInvalidated).toBe(false);
       expect(statuses).toEqual(['connected']);
     } finally {
       globalThis.fetch = originalFetch;

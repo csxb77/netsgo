@@ -31,6 +31,14 @@ func newTestTrafficStoreForServer(t *testing.T, s *Server) *TrafficStore {
 	return newTrafficStoreWithDB(s.auth.adminStore.path, s.auth.adminStore.db, false)
 }
 
+func newTestTrafficStoreForTunnelStore(t *testing.T, store *TunnelStore) *TrafficStore {
+	t.Helper()
+	if store == nil || store.db == nil {
+		t.Fatal("test tunnel store must be initialized")
+	}
+	return newTrafficStoreWithDB(store.path, store.db, false)
+}
+
 func mustRegisterTrafficAPIClient(t *testing.T, s *Server, installID string) RegisteredClient {
 	t.Helper()
 	if s == nil || s.auth == nil || s.auth.adminStore == nil {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"math/rand/v2"
 	"sort"
@@ -26,10 +27,20 @@ func (s *Server) ensureP2PForTunnel(stored StoredTunnel, ingress, target *Client
 	if stored.TransportPolicy == protocol.TransportPolicyServerRelayOnly || !clientSupportsP2P(ingress) || !clientSupportsP2P(target) {
 		return nil
 	}
+	if stored.OwnerUserID == "" || ingress.OwnerUserID != stored.OwnerUserID || target.OwnerUserID != stored.OwnerUserID ||
+		ingress.OwnerEpoch == 0 || target.OwnerEpoch != ingress.OwnerEpoch {
+		return ErrUserLifecycleEpochChanged
+	}
 	if !s.p2pRetryAllowed(ingress.ID, target.ID) {
 		return nil
 	}
-	grant, lifecycle, err := s.p2p.ensureGrant(p2pGrantSpec{tunnelID: stored.ID, revision: stored.Revision, ingressClientID: ingress.ID, targetClientID: target.ID, ingressGeneration: ingress.generation, targetGeneration: target.generation, totalBPS: stored.TotalBPS})
+	grant, lifecycle, err := s.p2p.ensureGrant(p2pGrantSpec{
+		tunnelID: stored.ID, revision: stored.Revision,
+		ownerUserID: stored.OwnerUserID, ownerEpoch: ingress.OwnerEpoch,
+		ingressClientID: ingress.ID, targetClientID: target.ID,
+		ingressGeneration: ingress.generation, targetGeneration: target.generation,
+		totalBPS: stored.TotalBPS,
+	})
 	if err != nil {
 		return err
 	}
@@ -40,29 +51,119 @@ func (s *Server) ensureP2PForTunnel(stored StoredTunnel, ingress, target *Client
 	if err != nil {
 		return err
 	}
-	lifecycle.Outbounds = messages
 	lifecycle.Transition = P2PProjectionTransition{Mode: P2PProjectionGathering, SessionID: grant.sessionID}
 	if s.p2p.sessionReady(grant.sessionID) {
 		lifecycle.Transition.Mode = P2PProjectionReady
 	}
+	lifecycle.Outbounds = messages
 	s.sendP2PLifecycleResult(lifecycle)
 	return nil
 }
 
 func (s *Server) sendP2POutbounds(messages []p2pOutbound) {
 	for _, outbound := range messages {
-		client, ok := s.loadLiveClient(outbound.clientID)
-		if !ok {
+		if err := s.sendP2POutbound(outbound); err != nil {
+			log.Printf("⚠️ send P2P control message failed [%s]: %v", outbound.clientID, err)
+		}
+	}
+}
+
+func (s *Server) scheduleP2POutbounds(messages ...p2pOutbound) {
+	if len(messages) == 0 {
+		return
+	}
+	if s.done != nil {
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+	}
+	outbounds := append([]p2pOutbound(nil), messages...)
+	go func() {
+		if s.done != nil {
+			select {
+			case <-s.done:
+				return
+			default:
+			}
+		}
+		s.sendP2POutbounds(outbounds)
+	}()
+}
+
+func (s *Server) sendP2POutbound(outbound p2pOutbound) error {
+	if outbound.clientID == "" || outbound.clientGeneration == 0 || outbound.ownerUserID == "" || outbound.ownerEpoch == 0 {
+		return ErrUserLifecycleEpochChanged
+	}
+	defer s.runUserLifecycleHook("p2p_outbound_after_send", outbound.ownerUserID)
+	client, ok := s.loadLiveClient(outbound.clientID)
+	if !ok || client.generation != outbound.clientGeneration || client.OwnerUserID != outbound.ownerUserID || client.OwnerEpoch != outbound.ownerEpoch {
+		return ErrUserLifecycleEpochChanged
+	}
+	msg, err := protocol.NewMessage(outbound.messageType, outbound.payload)
+	if err != nil {
+		return err
+	}
+	s.runUserLifecycleHook("p2p_outbound_before_gate", outbound.ownerUserID)
+	_, releaseOwnerGate, err := s.acquireUserLifecycleRead(outbound.ownerUserID, outbound.ownerEpoch, true)
+	if err != nil {
+		return err
+	}
+	defer releaseOwnerGate()
+	s.clientTunnelMutationMu.Lock()
+	defer s.clientTunnelMutationMu.Unlock()
+	current, ok := s.clients.Load(outbound.clientID)
+	if !ok || current != client || client.generation != outbound.clientGeneration ||
+		client.OwnerUserID != outbound.ownerUserID || client.OwnerEpoch != outbound.ownerEpoch ||
+		!client.isLive() || !s.clientLifecycleCurrentLocked(client) {
+		return ErrUserLifecycleEpochChanged
+	}
+	return s.writeControlMessageBefore(client, msg, time.Now().Add(lifecycleControlWriteTimeout))
+}
+
+// sendP2PConvergenceOutbounds runs with the owner's lifecycle write gate held.
+// It therefore must not reacquire the read gate. Only terminal messages are
+// permitted, and each write is pinned to the archived owner epoch and exact
+// participant generation with an explicit deadline.
+func (s *Server) sendP2PConvergenceOutbounds(ctx context.Context, ownerUserID string, messages []p2pOutbound) error {
+	for _, outbound := range messages {
+		if err := checkUserConvergenceContext(ctx); err != nil {
+			return err
+		}
+		if outbound.messageType != protocol.MsgTypeP2PTunnelRevoke && outbound.messageType != protocol.MsgTypeP2PClosed {
+			continue
+		}
+		if outbound.ownerUserID != ownerUserID || outbound.ownerEpoch == 0 || outbound.clientGeneration == 0 {
 			continue
 		}
 		msg, err := protocol.NewMessage(outbound.messageType, outbound.payload)
 		if err != nil {
 			continue
 		}
-		if err := s.writeControlMessage(client, msg); err != nil {
-			log.Printf("⚠️ send P2P control message failed [%s]: %v", outbound.clientID, err)
+		deadline := time.Now().Add(lifecycleControlWriteTimeout)
+		if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+			deadline = contextDeadline
+		}
+
+		s.clientTunnelMutationMu.Lock()
+		value, ok := s.clients.Load(outbound.clientID)
+		if !ok {
+			s.clientTunnelMutationMu.Unlock()
+			continue
+		}
+		client := value.(*ClientConn)
+		current := client.generation == outbound.clientGeneration && client.OwnerUserID == ownerUserID &&
+			client.OwnerEpoch == outbound.ownerEpoch && client.isLive()
+		if current {
+			err = s.writeControlMessageBefore(client, msg, deadline)
+		}
+		s.clientTunnelMutationMu.Unlock()
+		if current && err != nil {
+			log.Printf("⚠️ send P2P convergence message failed [%s]: %v", outbound.clientID, err)
 		}
 	}
+	return checkUserConvergenceContext(ctx)
 }
 func (s *Server) sendP2PLifecycleResults(results []p2pLifecycleResult) {
 	for _, result := range results {
@@ -71,7 +172,18 @@ func (s *Server) sendP2PLifecycleResults(results []p2pLifecycleResult) {
 }
 
 func (s *Server) sendP2PLifecycleResult(result p2pLifecycleResult) {
+	// P2P publication is commonly reached while the caller holds the owner's
+	// read gate and clientTunnelMutationMu. Sending inline would recursively
+	// acquire that read gate in sendP2POutbound; once disable is waiting for the
+	// write gate, Go's RWMutex blocks the recursive RLock and deadlocks the
+	// publisher. Project synchronously, but start epoch/generation-pinned writes
+	// only after the caller has a chance to release its publication locks.
+	outbounds := result.Outbounds
+	result.Outbounds = nil
 	s.applyP2PLifecycleResult(result)
+	if len(outbounds) > 0 {
+		s.scheduleP2POutbounds(outbounds...)
+	}
 }
 
 func (s *Server) p2pLeaseLoop() {
@@ -97,22 +209,15 @@ func (s *Server) handleP2PSignalMessage(client *ClientConn, msg protocol.Message
 	if err := msg.ParsePayload(&signal); err != nil {
 		return
 	}
-	peerID, err := s.p2p.authorizeSignal(client.ID, client.generation, signal)
+	peer, err := s.p2p.authorizeSignal(client.ID, client.generation, signal)
 	if err != nil {
 		log.Printf("⚠️ rejected P2P signal [%s]: %v", client.ID, err)
 		return
 	}
-	peer, ok := s.loadLiveClient(peerID)
-	if !ok {
+	if s.p2pSignalDropHook != nil && s.p2pSignalDropHook(client.ID, peer.clientID, signal) {
 		return
 	}
-	if s.p2pSignalDropHook != nil && s.p2pSignalDropHook(client.ID, peerID, signal) {
-		return
-	}
-	forward, err := protocol.NewMessage(protocol.MsgTypeP2PSignal, signal)
-	if err == nil {
-		_ = s.writeControlMessage(peer, forward)
-	}
+	_ = s.forwardP2PControl(peer, protocol.MsgTypeP2PSignal, signal)
 }
 
 func closeP2PAfterFailedStatus(result p2pLifecycleResult) p2pLifecycleResult {
@@ -170,7 +275,7 @@ func (s *Server) handleP2PStatusMessage(client *ClientConn, msg protocol.Message
 	} else if status.State == protocol.P2PStateFailed {
 		closed := closeP2PAfterFailedStatus(s.p2p.closeSession(status.SessionID, status.Error))
 		s.sendP2PLifecycleResult(closed)
-		s.scheduleP2PRetry(tunnelIDs)
+		s.scheduleP2PRetry(client.OwnerUserID, client.OwnerEpoch, lifecycle.Session)
 	}
 }
 
@@ -190,11 +295,15 @@ func (s *Server) resetP2PRetry(a, b string) {
 	delete(s.p2pRetries, p2pPairRetryKey(a, b))
 	s.p2pRetryMu.Unlock()
 }
-func (s *Server) scheduleP2PRetry(tunnelIDs []string) {
-	if len(tunnelIDs) == 0 {
+
+// scheduleP2PRetry is called while the reporting client's lifecycle read gate
+// is held. Build fixed tasks from that already-authorized epoch instead of
+// recursively acquiring RWMutex or resolving a fresh epoch when the timer fires.
+func (s *Server) scheduleP2PRetry(ownerUserID string, ownerEpoch uint64, session p2pSessionSnapshot) {
+	if len(session.Grants) == 0 {
 		return
 	}
-	stored, ok, _ := s.findStoredTunnelByID(tunnelIDs[0])
+	stored, ok, _ := s.findStoredTunnelByID(session.Grants[0].TunnelID)
 	if !ok {
 		return
 	}
@@ -212,19 +321,35 @@ func (s *Server) scheduleP2PRetry(tunnelIDs []string) {
 	state.next = time.Now().Add(delay)
 	s.p2pRetries[key] = state
 	s.p2pRetryMu.Unlock()
-	go func(ids []string, wait time.Duration) {
+	generations := map[string]uint64{
+		session.ClientA: session.GenerationA,
+		session.ClientB: session.GenerationB,
+	}
+	tasks := make([]unifiedTunnelReconcileTask, 0, len(session.Grants))
+	for _, grant := range session.Grants {
+		current, ok, err := s.findStoredTunnelByID(grant.TunnelID)
+		if err != nil || !ok || current.OwnerUserID != ownerUserID {
+			continue
+		}
+		task, err := s.newUnifiedTunnelReconcileTaskForGenerationsAtEpoch(current, "p2p_retry", ownerEpoch, generations)
+		if err != nil {
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+	go func(tasks []unifiedTunnelReconcileTask, wait time.Duration) {
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			for _, id := range ids {
-				if current, ok, _ := s.findStoredTunnelByID(id); ok {
-					s.scheduleUnifiedTunnelReconcile(current, "p2p_retry")
+			for _, task := range tasks {
+				if err := s.unifiedReconcileRegistry().runTask(task, s.executeUnifiedTunnelReconcileTask); err != nil {
+					log.Printf("⚠️ P2P retry reconcile failed [%s]: %v", task.TunnelID, err)
 				}
 			}
 		case <-s.done:
 		}
-	}(append([]string(nil), tunnelIDs...), delay)
+	}(tasks, delay)
 }
 
 func (s *Server) handleP2PStatsMessage(client *ClientConn, msg protocol.Message) {
@@ -264,11 +389,11 @@ func (s *Server) handleP2PCreditDemandMessage(client *ClientConn, msg protocol.M
 	if err := msg.ParsePayload(&demand); err != nil {
 		return
 	}
-	peerID, err := s.p2p.authorizeCreditDemand(client.ID, client.generation, demand)
+	peer, err := s.p2p.authorizeCreditDemand(client.ID, client.generation, demand)
 	if err != nil {
 		return
 	}
-	s.forwardP2PControl(peerID, protocol.MsgTypeP2PCreditDemand, demand)
+	_ = s.forwardP2PControl(peer, protocol.MsgTypeP2PCreditDemand, demand)
 }
 
 func (s *Server) handleP2PCreditGrantMessage(client *ClientConn, msg protocol.Message) {
@@ -279,20 +404,18 @@ func (s *Server) handleP2PCreditGrantMessage(client *ClientConn, msg protocol.Me
 	if err := msg.ParsePayload(&credit); err != nil {
 		return
 	}
-	peerID, err := s.p2p.authorizeCreditGrant(client.ID, client.generation, credit)
+	peer, err := s.p2p.authorizeCreditGrant(client.ID, client.generation, credit)
 	if err != nil {
 		return
 	}
-	s.forwardP2PControl(peerID, protocol.MsgTypeP2PCreditGrant, credit)
+	_ = s.forwardP2PControl(peer, protocol.MsgTypeP2PCreditGrant, credit)
 }
 
-func (s *Server) forwardP2PControl(peerID, messageType string, payload any) {
-	peer, ok := s.loadLiveClient(peerID)
-	if !ok {
-		return
-	}
-	forward, err := protocol.NewMessage(messageType, payload)
-	if err == nil {
-		_ = s.writeControlMessage(peer, forward)
-	}
+func (s *Server) forwardP2PControl(peer p2pParticipant, messageType string, payload any) error {
+	s.scheduleP2POutbounds(p2pOutbound{
+		clientID: peer.clientID, clientGeneration: peer.clientGeneration,
+		ownerUserID: peer.ownerUserID, ownerEpoch: peer.ownerEpoch,
+		messageType: messageType, payload: payload,
+	})
+	return nil
 }

@@ -70,12 +70,22 @@ type serverStatusView struct {
 	FreshUntil       time.Time                  `json:"fresh_until"`
 }
 
+// resourceBootstrapView is the small, non-sensitive subset of server
+// configuration required to create user-owned clients and tunnels. Detailed
+// host and process telemetry remains available only from the administrator
+// status endpoint.
+type resourceBootstrapView struct {
+	Version      string      `json:"version"`
+	ServerAddr   string      `json:"server_addr"`
+	AllowedPorts []PortRange `json:"allowed_ports"`
+}
+
 type consoleSnapshot struct {
-	Clients      []clientView       `json:"clients"`
-	Summary      consoleSummaryView `json:"summary"`
-	ServerStatus serverStatusView   `json:"server_status"`
-	GeneratedAt  time.Time          `json:"generated_at"`
-	FreshUntil   time.Time          `json:"fresh_until"`
+	Clients     []clientView          `json:"clients"`
+	Summary     consoleSummaryView    `json:"summary"`
+	Bootstrap   resourceBootstrapView `json:"bootstrap"`
+	GeneratedAt time.Time             `json:"generated_at"`
+	FreshUntil  time.Time             `json:"fresh_until"`
 }
 
 const (
@@ -114,13 +124,16 @@ func (s *Server) collectSnapshotForUser(ownerUserID string) consoleSnapshot {
 	now := time.Now()
 	data := s.collectConsoleDataForUser(ownerUserID)
 	status := s.getCachedServerStatus()
-	status.Summary = data.Summary
 	return consoleSnapshot{
-		Clients:      data.Clients,
-		Summary:      data.Summary,
-		ServerStatus: status,
-		GeneratedAt:  now,
-		FreshUntil:   now.Add(snapshotFreshnessWindow),
+		Clients: data.Clients,
+		Summary: data.Summary,
+		Bootstrap: resourceBootstrapView{
+			Version:      status.Version,
+			ServerAddr:   status.ServerAddr,
+			AllowedPorts: append([]PortRange(nil), status.AllowedPorts...),
+		},
+		GeneratedAt: now,
+		FreshUntil:  now.Add(snapshotFreshnessWindow),
 	}
 }
 

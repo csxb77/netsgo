@@ -36,7 +36,7 @@ import {
   getTunnelMutationFieldError,
 } from '@/lib/tunnel-model';
 import { parseMbpsInputToBps } from '@/lib/format';
-import { useServerStatus } from '@/hooks/use-server-status';
+import { useResourceBootstrap } from '@/hooks/use-server-status';
 import { getClientDisplayName } from '@/lib/client-utils';
 import { cn } from '@/lib/utils';
 import type { ResourceScope } from '@/lib/resource-scope';
@@ -411,7 +411,7 @@ function TunnelDialogForm({
     }
   };
 
-  const { data: status } = useServerStatus(props.scope, {
+  const { data: status, isError: isBootstrapError } = useResourceBootstrap(props.scope, {
     enabled: open,
     refetchOnMount: 'always',
     staleTime: 0,
@@ -423,6 +423,11 @@ function TunnelDialogForm({
     const parsedIngressBps = parseMbpsInputToBps(ingressBps);
     const parsedEgressBps = parseMbpsInputToBps(egressBps);
     const parsedTotalBps = parseMbpsInputToBps(totalBps);
+
+    if (!isClientToClient && !isHttp && (!status || isBootstrapError)) {
+      failField(localFieldError('remote_port', t('tunnels.bootstrapUnavailable')));
+      return;
+    }
 
     if (!name.trim()) {
       failField(localFieldError('name', t('tunnels.nameRequired')));
@@ -1303,6 +1308,12 @@ function TunnelDialogForm({
             {getTunnelMutationErrorMessage(mutation.error)}
           </div>
         )}
+        {!isClientToClient && !isHttp && isBootstrapError && (
+          <div className="flex items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <AlertTriangle className="size-4 shrink-0" />
+            {t('tunnels.bootstrapUnavailable')}
+          </div>
+        )}
         </div>
 
         <DialogFooter>
@@ -1315,7 +1326,7 @@ function TunnelDialogForm({
           </Button>
           <Button
             type="submit"
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || (!isClientToClient && !isHttp && (!status || isBootstrapError))}
           >
             {mutation.isPending
               ? (isEdit ? t('tunnels.updating') : t('tunnels.creating'))

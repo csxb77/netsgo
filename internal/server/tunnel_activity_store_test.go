@@ -71,6 +71,11 @@ func TestTunnelActivityMutationsRollbackWithEventFailure(t *testing.T) {
 		store := newTestTunnelStore(t)
 		before := testStoredServerExposeTCPTunnel("activity-migrate", "activity-migrate", "client-old", 8080, 18084, zeroTime())
 		mustAddStableTunnel(t, store, before)
+		var err error
+		before, err = store.GetTunnelByID(before.ID)
+		if err != nil {
+			t.Fatalf("reload owned tunnel: %v", err)
+		}
 		replacement := tunnelTargetMigrationReplacement(t, store, before, "client-new")
 		store.activityStore.failNextAppendsForTest(errors.New("injected activity failure"), 1)
 		if _, _, _, err := store.MigrateTunnelTargetByIDWithActivity(before.ID, before.Revision, replacement, actor); err == nil {

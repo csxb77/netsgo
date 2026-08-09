@@ -3,7 +3,6 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { QueryClient } from '@tanstack/react-query';
 import { useRouterState } from '@tanstack/react-router';
 import { activityApi, api, scopedConsoleSnapshotPath, scopedEventStreamPath, type ActivityReadScope } from '@/lib/api';
-import { EMPTY_CONSOLE_SUMMARY } from '@/lib/console-summary';
 import { useConnectionStore } from '@/stores/connection-store';
 import type { ConnectionStatus } from '@/stores/connection-store';
 import { useAuthStore } from '@/stores/auth-store';
@@ -12,6 +11,7 @@ import { useDashboardResourceScope } from '@/hooks/use-dashboard-scope';
 import { buildClientTrafficQueryKey } from '@/hooks/use-client-traffic';
 import { activityReadScopeKey, prependActivityToMatchingQueries } from '@/hooks/use-activity';
 import { resourceScopeKey, scopedQueryKey, SELF_RESOURCE_SCOPE, type ResourceScope } from '@/lib/resource-scope';
+import { isResourceBootstrap } from '@/lib/resource-bootstrap';
 import type {
   Client,
   ActivityItem,
@@ -22,7 +22,7 @@ import type {
   ConsoleSnapshot,
   ConsoleSummary,
   ProxyConfig,
-  ServerStatus,
+  ResourceBootstrap,
   StatsUpdateEvent,
   TunnelChangedEvent,
   TrafficRealtimeEvent,
@@ -78,19 +78,6 @@ const consoleSummaryFields = [
   'stopped_tunnels',
   'error_tunnels',
 ] as const satisfies readonly (keyof ConsoleSummary)[];
-const serverStatusStringFields = ['status', 'version', 'server_addr', 'os_arch', 'go_version', 'hostname', 'ip_address'] as const satisfies readonly (keyof ServerStatus)[];
-const serverStatusNumberFields = [
-  'client_count',
-  'listen_port',
-  'uptime',
-  'system_uptime',
-  'tunnel_active',
-  'tunnel_stopped',
-  'cpu_usage',
-  'cpu_cores',
-  'mem_used',
-] as const satisfies readonly (keyof ServerStatus)[];
-
 export function createEventStreamSnapshotState(): EventStreamSnapshotState {
   return { requestSeq: 0 };
 }
@@ -105,22 +92,6 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isConsoleSummary(value: unknown): value is ConsoleSummary {
   return isRecord(value) && consoleSummaryFields.every((field) => typeof value[field] === 'number');
-}
-
-function isServerStatus(value: unknown): value is ServerStatus {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (!serverStatusStringFields.every((field) => typeof value[field] === 'string')) {
-    return false;
-  }
-  if (!serverStatusNumberFields.every((field) => typeof value[field] === 'number')) {
-    return false;
-  }
-  if (!Array.isArray(value.allowed_ports)) {
-    return false;
-  }
-  return value.summary === undefined || isConsoleSummary(value.summary);
 }
 
 function isClient(value: unknown): value is Client {
@@ -139,11 +110,11 @@ function isClient(value: unknown): value is Client {
 function isConsoleSnapshot(value: unknown): value is ConsoleSnapshot {
   return (
     isRecord(value) &&
-    (value.clients === undefined || (Array.isArray(value.clients) && value.clients.every(isClient))) &&
-    (value.summary === undefined || isConsoleSummary(value.summary)) &&
-    (value.server_status === undefined || isServerStatus(value.server_status)) &&
-    (value.generated_at === undefined || typeof value.generated_at === 'string') &&
-    (value.fresh_until === undefined || typeof value.fresh_until === 'string')
+    Array.isArray(value.clients) && value.clients.every(isClient) &&
+    isConsoleSummary(value.summary) &&
+    isResourceBootstrap(value.bootstrap) &&
+    typeof value.generated_at === 'string' &&
+    typeof value.fresh_until === 'string'
   );
 }
 
@@ -262,10 +233,6 @@ function parseEventPayload<T>(data: string, guard: (value: unknown) => value is 
   }
 }
 
-function snapshotSummary(snapshot: ConsoleSnapshot): ConsoleSummary {
-  return snapshot.summary ?? snapshot.server_status?.summary ?? EMPTY_CONSOLE_SUMMARY;
-}
-
 function isEventStreamDebugEnabled() {
   try {
     return localStorage.getItem('netsgo:debug:event-stream') === '1';
@@ -320,17 +287,9 @@ function applyConsoleSnapshot(
     snapshotState.appliedGeneratedAt = generatedAt;
   }
 
-  const summary = snapshotSummary(snapshot);
-  if (Array.isArray(snapshot.clients)) {
-    queryClient.setQueryData<Client[]>(scopedQueryKey(scope, 'clients'), snapshot.clients);
-  }
-  queryClient.setQueryData<ConsoleSummary>(scopedQueryKey(scope, 'console-summary'), summary);
-  if (snapshot.server_status) {
-    queryClient.setQueryData<ServerStatus>(scopedQueryKey(scope, 'server-status'), {
-      ...snapshot.server_status,
-      summary,
-    });
-  }
+  queryClient.setQueryData<Client[]>(scopedQueryKey(scope, 'clients'), snapshot.clients);
+  queryClient.setQueryData<ConsoleSummary>(scopedQueryKey(scope, 'console-summary'), snapshot.summary);
+  queryClient.setQueryData<ResourceBootstrap>(scopedQueryKey(scope, 'resource-bootstrap'), snapshot.bootstrap);
   return true;
 }
 
@@ -343,7 +302,11 @@ async function resyncConsoleSnapshot(
   logEventStreamDiagnostic('snapshot_request_start', { eventType: 'snapshot_request', snapshotRequestId });
   let snapshot: ConsoleSnapshot;
   try {
-    snapshot = await api.get<ConsoleSnapshot>(scopedConsoleSnapshotPath(scope));
+    const response = await api.get<unknown>(scopedConsoleSnapshotPath(scope));
+    if (!isConsoleSnapshot(response)) {
+      throw new Error('invalid console snapshot response');
+    }
+    snapshot = response;
   } catch (error) {
     if (snapshotRequestId !== snapshotState.requestSeq) {
       logEventStreamDiagnostic('snapshot_request_stale', { eventType: 'snapshot_request', snapshotRequestId });
@@ -722,6 +685,21 @@ function parseSSE(buffer: string, onEvent: (eventType: string, data: string) => 
   return remaining;
 }
 
+export function resolveEventStreamScope(
+  resourceScope: ResourceScope | null,
+  isAdmin: boolean,
+  pathname: string,
+  selectedActivityUserId?: string,
+): ActivityReadScope | null {
+  if (!pathname.startsWith('/dashboard')) return null;
+  if (resourceScope) return resourceScope;
+  if (!isAdmin) return null;
+  if (pathname.startsWith('/dashboard/activity') && selectedActivityUserId) {
+    return { kind: 'admin-user', userId: selectedActivityUserId };
+  }
+  return { kind: 'admin-global' };
+}
+
 export function useEventStream() {
   const queryClient = useQueryClient();
   const setStatus = useConnectionStore((state) => state.setStatus);
@@ -738,17 +716,17 @@ export function useEventStream() {
   const resourceScopeKind = resourceScope?.kind;
   const resourceScopeUserId = resourceScope?.kind === 'admin-user' ? resourceScope.userId : undefined;
   const eventScope = useMemo<ActivityReadScope | null>(() => {
-    if (resourceScopeKind === 'self') return SELF_RESOURCE_SCOPE;
-    if (resourceScopeKind === 'admin-user' && resourceScopeUserId) {
-      return { kind: 'admin-user', userId: resourceScopeUserId };
-    }
-    if (principal?.is_admin && pathname.startsWith('/dashboard/activity')) {
-      if (selectedActivityUserId) {
-        return { kind: 'admin-user', userId: selectedActivityUserId };
-      }
-      return { kind: 'admin-global' };
-    }
-    return null;
+    const stableResourceScope = resourceScopeKind === 'self'
+      ? SELF_RESOURCE_SCOPE
+      : resourceScopeKind === 'admin-user' && resourceScopeUserId
+        ? { kind: 'admin-user' as const, userId: resourceScopeUserId }
+        : null;
+    return resolveEventStreamScope(
+      stableResourceScope,
+      principal?.is_admin === true,
+      pathname,
+      selectedActivityUserId,
+    );
   }, [pathname, principal?.is_admin, resourceScopeKind, resourceScopeUserId, selectedActivityUserId]);
   const shouldConnect = isAuthenticated && eventScope !== null;
 
