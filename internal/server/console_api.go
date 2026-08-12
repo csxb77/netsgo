@@ -130,7 +130,7 @@ func (s *Server) collectSnapshotForUser(ownerUserID string) consoleSnapshot {
 		Bootstrap: resourceBootstrapView{
 			Version:      status.Version,
 			ServerAddr:   status.ServerAddr,
-			AllowedPorts: append([]PortRange(nil), status.AllowedPorts...),
+			AllowedPorts: append([]PortRange{}, status.AllowedPorts...),
 		},
 		GeneratedAt: now,
 		FreshUntil:  now.Add(snapshotFreshnessWindow),

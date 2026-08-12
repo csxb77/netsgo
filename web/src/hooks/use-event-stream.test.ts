@@ -202,6 +202,45 @@ describe('event stream scope selection', () => {
 });
 
 describe('use-event-stream diagnostics', () => {
+  test('invalidates every administrator user-list page on a global list-change hint', () => {
+    const queryClient = new QueryClient();
+    const listKey = ['admin-users', 50, null, '', null, null] as const;
+    const detailKey = ['admin-user', 'user-a'] as const;
+    queryClient.setQueryData(listKey, { items: [] });
+    queryClient.setQueryData(detailKey, { id: 'user-a' });
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'user_list_changed',
+      JSON.stringify({ action: 'deleted', user_id: 'user-a' }),
+      undefined,
+      { kind: 'admin-global' },
+    );
+
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('ignores a global user-list hint on a user-scoped stream', () => {
+    const queryClient = new QueryClient();
+    const listKey = ['admin-users', 50, null, '', null, null] as const;
+    queryClient.setQueryData(listKey, { items: [] });
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'user_list_changed',
+      '{}',
+    );
+
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
   test('keeps newer tunnel_changed state when an older console snapshot resolves later', async () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData<Client[]>(clientsKey, [createClient('pending')]);

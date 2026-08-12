@@ -264,28 +264,23 @@ func (s *AdminStore) UpdateClientBandwidthSettingsWithActivity(clientID string, 
 func (s *AdminStore) CreateSessionWithActivity(userID, username, role, ip, ua string, actor ActivityActor) (*AdminSession, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
 	sessionID, err := generateUUIDE()
 	if err != nil {
 		return nil, 0, err
 	}
-	session := AdminSession{ID: sessionID, UserID: userID, Username: username, Role: role, CreatedAt: now, ExpiresAt: now.Add(sessionDefaultTTL), IP: ip, UserAgent: ua}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, 0, err
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
+	session, currentUser, err := createSessionForActiveUserTx(tx, sessionID, userID, ip, ua, time.Now().UTC())
+	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := tx.Exec(`INSERT INTO user_sessions (id, user_id, created_at, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?)`, session.ID, session.UserID, formatTime(session.CreatedAt), formatTime(session.ExpiresAt), session.IP, session.UserAgent); err != nil {
-		return nil, 0, err
-	}
-	nowText := formatTime(now)
-	if _, err := tx.Exec(`UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?`, nowText, nowText, userID); err != nil {
-		return nil, 0, err
-	}
+	actor.ID = currentUser.ID
+	actor.Name = currentUser.Username
+	actor.Type = currentUser.Role
 	if err := s.maybeFailSave(); err != nil {
 		return nil, 0, err
 	}
@@ -296,7 +291,7 @@ func (s *AdminStore) CreateSessionWithActivity(userID, username, role, ip, ua st
 	if err := commitTx(tx, &committed); err != nil {
 		return nil, 0, err
 	}
-	return &session, activityID, nil
+	return session, activityID, nil
 }
 
 func (s *AdminStore) DeleteSessionWithActivity(sessionID string, actor ActivityActor) (int64, error) {

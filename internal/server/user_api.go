@@ -36,6 +36,16 @@ type userPageResponse struct {
 	HasMore    bool           `json:"has_more"`
 }
 
+func (s *Server) publishUserListChanged(action, userID string) {
+	if s == nil || s.events == nil {
+		return
+	}
+	s.events.PublishJSON("user_list_changed", map[string]string{
+		"action":  action,
+		"user_id": userID,
+	})
+}
+
 func (s *Server) activeAdminCount() (int, error) {
 	if s == nil || s.auth == nil || s.auth.adminStore == nil {
 		return 0, ErrUserOwnerUnavailable
@@ -198,6 +208,7 @@ func (s *Server) handleAPIAdminUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.publishActivityID(activityID)
+		s.publishUserListChanged("created", user.ID)
 		encodeJSON(w, http.StatusCreated, userMutationResponse(user))
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
@@ -301,6 +312,7 @@ func (s *Server) handleAPIAdminUserUsername(w http.ResponseWriter, r *http.Reque
 	}
 	s.cancelSSEForUser(user.ID, "user_username_changed")
 	s.publishActivityID(activityID)
+	s.publishUserListChanged("username_changed", user.ID)
 	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
 
@@ -374,6 +386,7 @@ func (s *Server) handleAPIAdminUserAdmin(w http.ResponseWriter, r *http.Request)
 	if changed {
 		s.cancelSSEForUser(user.ID, "user_admin_changed")
 		s.publishActivityID(activityID)
+		s.publishUserListChanged("admin_changed", user.ID)
 	}
 	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
@@ -401,6 +414,7 @@ func (s *Server) handleAPIAdminUserDisable(w http.ResponseWriter, r *http.Reques
 	gate.epoch++
 	if changed {
 		s.publishActivityID(activityID)
+		s.publishUserListChanged("disabled", user.ID)
 	}
 	ctx, cancel := s.newUserConvergenceContext()
 	err = s.convergeUserRuntime(ctx, user.ID)
@@ -461,6 +475,7 @@ func (s *Server) handleAPIAdminUserEnable(w http.ResponseWriter, r *http.Request
 	gate.epoch++
 	if changed {
 		s.publishActivityID(activityID)
+		s.publishUserListChanged("enabled", user.ID)
 	}
 	encodeJSON(w, http.StatusOK, userMutationResponse(user))
 }
@@ -514,6 +529,7 @@ func (s *Server) handleAPIAdminUserDelete(w http.ResponseWriter, r *http.Request
 	}
 	gate.epoch++
 	s.cancelSSEForUser(user.ID, "user_deleted")
+	s.publishUserListChanged("deleted", user.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -12,7 +12,7 @@ import (
 
 // SSEEvent represents a single SSE event.
 type SSEEvent struct {
-	Type string // "ready" | "snapshot" | "stats_update" | "traffic_realtime" | "client_online" | "client_offline" | "tunnel_changed"
+	Type string // "ready" | "snapshot" | "stats_update" | "traffic_realtime" | "client_online" | "client_offline" | "tunnel_changed" | "activity_event" | "user_list_changed"
 	Data string // JSON string
 	// ScopeUserID is transport metadata only. An empty value is an
 	// administrator-global event and is never delivered to a user-scoped SSE
@@ -149,7 +149,7 @@ func sseReadScopeForRequest(r *http.Request) (sseReadScope, error) {
 
 func (scope sseReadScope) allows(event SSEEvent) bool {
 	if scope.global {
-		return event.Type == "activity_event"
+		return event.Type == "activity_event" || event.Type == "user_list_changed"
 	}
 	return event.ScopeUserID == scope.userID
 }

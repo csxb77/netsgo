@@ -910,6 +910,7 @@ export const enUS = {
     },
     security: {
       admin_login_failed: "Sign-in failed",
+      admin_login_disabled: "Sign-in was rejected because the user is disabled",
       admin_login_rate_limited: "Sign-in was rate limited",
       mfa_failed: "MFA verification failed",
       mfa_rate_limited: "MFA verification was rate limited",

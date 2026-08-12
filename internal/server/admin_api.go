@@ -93,6 +93,11 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		if s.auth.loginLimiter != nil {
 			s.auth.loginLimiter.RecordFailure(ip)
 		}
+		if errors.Is(err, ErrUserDisabled) {
+			s.recordAuthFailure(r, "admin_login_disabled", "user_disabled")
+			writeAPIError(w, http.StatusUnauthorized, "user_disabled", "user is disabled")
+			return
+		}
 		s.recordAuthFailure(r, "admin_login_failed", "bad_credentials")
 		writeAPIError(w, http.StatusUnauthorized, "username_or_password_incorrect", "username or password incorrect")
 		return

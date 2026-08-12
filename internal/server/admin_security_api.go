@@ -41,6 +41,10 @@ func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request,
 		actor = NewActivityActor(actorType, user.ID, user.Username, s.clientIP(r), string(raw))
 	}
 	session, activityID, err := s.auth.adminStore.CreateSessionWithActivity(user.ID, user.Username, user.Role, r.RemoteAddr, r.UserAgent(), actor)
+	if errors.Is(err, ErrUserDisabled) {
+		writeAPIError(w, http.StatusUnauthorized, "user_disabled", "user is disabled")
+		return
+	}
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "session_persist_failed", "failed to persist session")
 		return
@@ -54,6 +58,10 @@ func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request,
 		writeAPIError(w, http.StatusInternalServerError, "token_generate_failed", "failed to generate token")
 		return
 	}
+	user.Username = session.Username
+	user.Role = session.Role
+	user.IsAdmin = session.Role == "admin"
+	user.Status = UserStatusActive
 	s.setSessionCookie(w, r, token, int(sessionDefaultTTL.Seconds()))
 	encodeJSON(w, http.StatusOK, newAuthSuccessPayload(token, user))
 }
@@ -359,6 +367,7 @@ func (s *Server) handleAPIAdminSecurityUsername(w http.ResponseWriter, r *http.R
 	}
 	s.cancelSSEForUser(user.ID, "admin_username_changed")
 	s.publishActivityID(activityID)
+	s.publishUserListChanged("username_changed", user.ID)
 	s.clearSessionCookie(w, r)
 	encodeJSON(w, http.StatusOK, map[string]any{"success": true, "requires_relogin": true})
 }

@@ -512,6 +512,11 @@ export function applyEventForDiagnostics(
       applyActivityHint(queryClient, readScope, activityState, parsed);
       return;
     }
+    case 'user_list_changed': {
+      if (readScope.kind !== 'admin-global') return;
+      void queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      return;
+    }
     case 'snapshot': {
       if (!resourceScope) return;
       const parsed = parseEventPayload(data, isConsoleSnapshot);

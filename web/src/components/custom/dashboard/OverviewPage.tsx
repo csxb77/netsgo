@@ -5,6 +5,8 @@ import { useTranslation } from 'react-i18next';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useClients } from '@/hooks/use-clients';
+import { useAuthStore } from '@/stores/auth-store';
+import { ServerInfoCard } from './ServerInfoCard';
 import { DashboardClientTable } from './DashboardClientTable';
 import { DashboardTunnelTable } from './DashboardTunnelTable';
 import { NetworkTopology } from './NetworkTopology';
@@ -59,6 +61,7 @@ export function OverviewPage({
   onTabChange?: (tab: DashboardTab) => void;
 }) {
   const { t } = useTranslation();
+  const isAdmin = useAuthStore((state) => state.user?.is_admin === true);
   const { data: clients } = useClients(scope);
   const containerRef = useRef<HTMLDivElement>(null);
   const [showTopologyTab, setShowTopologyTab] = useState(canInitiallyShowTopologyTab);
@@ -98,6 +101,11 @@ export function OverviewPage({
       initial="hidden"
       animate="show"
     >
+      {isAdmin && scope.kind === 'self' ? (
+        <motion.div variants={fadeUp}>
+          <ServerInfoCard scope={scope} />
+        </motion.div>
+      ) : null}
       <motion.div variants={fadeUp}>
         {shouldRenderDashboardTabs ? (
           <Tabs

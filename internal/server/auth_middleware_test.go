@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -90,6 +91,29 @@ func TestAuthMiddleware_InvalidFormat(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("Invalid Authorization format should return 401, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_NilAuthReturnsStoreUnavailable(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w := httptest.NewRecorder()
+
+	handler := s.RequirePrincipal(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("nil auth status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	var response apiErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode nil-auth error: %v", err)
+	}
+	if response.Code != "admin_store_unavailable" {
+		t.Fatalf("nil auth error code = %q, want admin_store_unavailable", response.Code)
 	}
 }
 

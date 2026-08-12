@@ -846,6 +846,7 @@ export const zhCN = {
     },
     security: {
       admin_login_failed: "登录失败",
+      admin_login_disabled: "用户已禁用，登录被拒绝",
       admin_login_rate_limited: "登录被限流",
       mfa_failed: "MFA 验证失败",
       mfa_rate_limited: "MFA 验证被限流",

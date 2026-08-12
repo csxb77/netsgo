@@ -164,6 +164,64 @@ func TestAPI_LoginRequiresMFAWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestAPI_MFATokenInvalidAfterDisableAndEnable(t *testing.T) {
+	s, cleanup := setupTestServerWithDB(t, true)
+	defer cleanup()
+	admin, err := s.auth.adminStore.GetSingleAdminUser()
+	if err != nil {
+		t.Fatalf("load administrator: %v", err)
+	}
+	user, err := s.auth.adminStore.CreateUser("mfa-disable-user", "Password123")
+	if err != nil {
+		t.Fatalf("create MFA user: %v", err)
+	}
+	if _, changed, err := s.auth.adminStore.SetUserAdmin(admin.ID, user.ID, true); err != nil || !changed {
+		t.Fatalf("promote MFA user = (changed %v, err %v)", changed, err)
+	}
+	if _, err := s.auth.adminStore.db.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
+		t.Fatalf("enable user TOTP: %v", err)
+	}
+
+	loginBody := []byte(`{"username":"mfa-disable-user","password":"Password123"}`)
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBody))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	s.handleAPILogin(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("begin MFA login status = %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	var loginPayload struct {
+		MFAToken string `json:"mfa_token"`
+	}
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &loginPayload); err != nil || loginPayload.MFAToken == "" {
+		t.Fatalf("decode MFA token = (%q, %v)", loginPayload.MFAToken, err)
+	}
+	if _, changed, err := s.auth.adminStore.SetUserStatus(admin.ID, user.ID, UserStatusDisabled); err != nil || !changed {
+		t.Fatalf("disable MFA user = (changed %v, err %v)", changed, err)
+	}
+
+	verify := func(stage string) {
+		t.Helper()
+		body := []byte(`{"mfa_token":"` + loginPayload.MFAToken + `","code":"000000"}`)
+		request := httptest.NewRequest(http.MethodPost, "/api/auth/mfa/verify", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		s.handleAPIMFAVerify(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s old MFA token status = %d, want 401: %s", stage, response.Code, response.Body.String())
+		}
+		var apiErr apiErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &apiErr); err != nil || apiErr.Code != "invalid_mfa_token" {
+			t.Fatalf("%s old MFA token error = (%+v, %v)", stage, apiErr, err)
+		}
+	}
+	verify("disabled")
+	if _, changed, err := s.auth.adminStore.SetUserStatus(admin.ID, user.ID, UserStatusActive); err != nil || !changed {
+		t.Fatalf("enable MFA user = (changed %v, err %v)", changed, err)
+	}
+	verify("re-enabled")
+}
+
 func TestAPI_MFAVerifyRateLimitsAfterTenInvalidCodes(t *testing.T) {
 	s, cleanup := setupTestServerWithDB(t, true)
 	defer cleanup()

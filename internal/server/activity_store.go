@@ -191,6 +191,7 @@ var activityCatalog = map[ActivityCategory]map[string]activityCatalogEntry{
 	},
 	ActivityCategorySecurity: {
 		"admin_login_failed":           {ActivitySeverityWarning, "activity.security.admin_login_failed"},
+		"admin_login_disabled":         {ActivitySeverityWarning, "activity.security.admin_login_disabled"},
 		"admin_login_rate_limited":     {ActivitySeverityWarning, "activity.security.admin_login_rate_limited"},
 		"mfa_failed":                   {ActivitySeverityWarning, "activity.security.mfa_failed"},
 		"mfa_rate_limited":             {ActivitySeverityWarning, "activity.security.mfa_rate_limited"},
@@ -208,6 +209,7 @@ var activityReasonAllowlist = map[string]map[string]struct{}{
 	"fallback":                     makeStringSet("negotiation_failed", "lease_unhealthy", "lease_expired", "unknown"),
 	"session_closed":               makeStringSet("participant_offline", "lease_unhealthy", "lease_expired", "tunnel_stopped", "tunnel_deleted", "revision_replaced", "unknown"),
 	"admin_login_failed":           makeStringSet("bad_credentials"),
+	"admin_login_disabled":         makeStringSet("user_disabled"),
 	"admin_login_rate_limited":     makeStringSet("rate_limited"),
 	"mfa_failed":                   makeStringSet("invalid_token", "invalid_code", "challenge_consumed"),
 	"mfa_rate_limited":             makeStringSet("rate_limited"),

@@ -4,14 +4,15 @@ import { ClientSidebar } from '@/components/custom/client/ClientSidebar';
 import { TopBar } from '@/components/custom/layout/TopBar';
 import { ErrorFallback } from '@/components/custom/layout/ErrorFallback';
 import { useClients } from '@/hooks/use-clients';
-import { useDashboardResourceScope } from '@/hooks/use-dashboard-scope';
+import { useDashboardResourceScope, useDashboardSidebarScope } from '@/hooks/use-dashboard-scope';
 import { requireConsoleAuth } from '@/lib/auth';
 import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar';
 import { AddClientDialogProvider } from '@/components/custom/client/AddClientDialogProvider';
 
 function DashboardLayout() {
   const scope = useDashboardResourceScope();
-  const { data: clients, isLoading, isError, error, refetch } = useClients(scope);
+  const sidebarScope = useDashboardSidebarScope();
+  const { data: clients, isLoading, isError, error, refetch } = useClients(sidebarScope);
 
   if (isError) {
     return (
@@ -22,9 +23,9 @@ function DashboardLayout() {
   }
 
   return (
-    <AddClientDialogProvider scope={scope}>
+    <AddClientDialogProvider scope={sidebarScope}>
       <SidebarProvider className="flex-1 overflow-hidden !min-h-0 min-w-0 bg-transparent">
-        <ClientSidebar scope={scope} clients={clients ?? []} isLoading={isLoading} />
+        <ClientSidebar scope={sidebarScope} clients={clients ?? []} isLoading={isLoading} />
         <SidebarInset className="flex min-w-0 flex-col overflow-hidden bg-transparent">
           <TopBar scope={scope} />
           <div className="relative min-w-0 flex-1 overflow-y-auto overflow-x-hidden pb-safe-bottom">

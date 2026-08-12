@@ -221,10 +221,11 @@ func TestHandleSSE_DisconnectCleanup(t *testing.T) {
 		t.Fatalf("administrator-global SSE must not generate snapshots, actual body: %q", body)
 	}
 
-	// Administrator-global streams carry Activity only; resource events are
-	// delivered by the selected user's scoped stream.
+	// Administrator-global streams carry durable activity hints and ephemeral
+	// user-list refresh hints; resource events stay on the selected user's stream.
 	s.events.PublishJSON("client_online", "hidden")
 	s.events.PublishJSON("activity_event", "bar")
+	s.events.PublishJSON("user_list_changed", map[string]string{"action": "deleted", "user_id": "user-a"})
 	time.Sleep(50 * time.Millisecond)
 
 	body = w.BodyString()
@@ -233,6 +234,9 @@ func TestHandleSSE_DisconnectCleanup(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: activity_event\ndata: \"bar\"\n\n") {
 		t.Fatalf("administrator-global SSE missed an activity event: %q", body)
+	}
+	if !strings.Contains(body, "event: user_list_changed\n") || !strings.Contains(body, `"user_id":"user-a"`) {
+		t.Fatalf("administrator-global SSE missed a user-list refresh event: %q", body)
 	}
 
 	// 模拟客户端断开连接 (Cancel context)
@@ -252,6 +256,26 @@ func TestHandleSSE_DisconnectCleanup(t *testing.T) {
 	s.events.mu.RUnlock()
 	if subCount != 0 {
 		t.Errorf("subscription should be cleaned up after client disconnect, remaining: %d", subCount)
+	}
+}
+
+func TestSSEReadScopeKeepsUserListRefreshGlobal(t *testing.T) {
+	global := sseReadScope{global: true}
+	user := sseReadScope{userID: "user-a"}
+	listChanged := SSEEvent{Type: "user_list_changed"}
+	resourceEvent := SSEEvent{Type: "client_online", ScopeUserID: "user-a"}
+
+	if !global.allows(listChanged) {
+		t.Fatal("administrator-global scope must receive user-list refresh events")
+	}
+	if user.allows(listChanged) {
+		t.Fatal("user-scoped stream must not receive administrator-global user-list refresh events")
+	}
+	if global.allows(resourceEvent) {
+		t.Fatal("administrator-global scope must not receive user resource events")
+	}
+	if !user.allows(resourceEvent) {
+		t.Fatal("matching user scope must receive its resource events")
 	}
 }
 

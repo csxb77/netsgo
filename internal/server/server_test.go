@@ -449,8 +449,8 @@ func TestAPI_ConsoleSnapshot(t *testing.T) {
 	if _, ok := bootstrap["server_addr"].(string); !ok {
 		t.Fatalf("bootstrap.server_addr should return a string, got %T", bootstrap["server_addr"])
 	}
-	if _, exists := bootstrap["allowed_ports"]; !exists {
-		t.Fatal("bootstrap.allowed_ports should be present")
+	if ports, ok := bootstrap["allowed_ports"].([]any); !ok || ports == nil {
+		t.Fatalf("bootstrap.allowed_ports should return an array, got %T (%v)", bootstrap["allowed_ports"], bootstrap["allowed_ports"])
 	}
 
 	generatedAt, ok := result["generated_at"].(string)

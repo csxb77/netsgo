@@ -1615,38 +1615,18 @@ func (s *AdminStore) CreateSession(userID, username, role, ip, ua string) (*Admi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
 	sessionID, err := generateUUIDE()
 	if err != nil {
 		return nil, err
 	}
-	session := AdminSession{
-		ID:        sessionID,
-		UserID:    userID,
-		Username:  username,
-		Role:      role,
-		CreatedAt: now,
-		ExpiresAt: now.Add(sessionDefaultTTL),
-		IP:        ip,
-		UserAgent: ua,
-	}
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-
-	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO user_sessions (id, user_id, created_at, expires_at, ip, user_agent)
-		VALUES (?, ?, ?, ?, ?, ?)`, session.ID, session.UserID, formatTime(session.CreatedAt), formatTime(session.ExpiresAt), session.IP, session.UserAgent); err != nil {
-		return nil, err
-	}
-	nowText := formatTime(time.Now())
-	if _, err := tx.Exec(`UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?`, nowText, nowText, userID); err != nil {
+	session, _, err := createSessionForActiveUserTx(tx, sessionID, userID, ip, ua, time.Now().UTC())
+	if err != nil {
 		return nil, err
 	}
 	if err := s.maybeFailSave(); err != nil {
@@ -1655,7 +1635,46 @@ func (s *AdminStore) CreateSession(userID, username, role, ip, ua string) (*Admi
 	if err := commitTx(tx, &committed); err != nil {
 		return nil, err
 	}
-	return &session, nil
+	return session, nil
+}
+
+func createSessionForActiveUserTx(tx *sql.Tx, sessionID, userID, ip, ua string, now time.Time) (*AdminSession, User, error) {
+	user, err := getUserInTx(tx, userID)
+	if err != nil {
+		return nil, User{}, err
+	}
+	if user.Status != UserStatusActive {
+		return nil, User{}, ErrUserDisabled
+	}
+	role := "user"
+	if user.IsAdmin {
+		role = "admin"
+	}
+	session := &AdminSession{
+		ID:        sessionID,
+		UserID:    user.ID,
+		Username:  user.Username,
+		Role:      role,
+		CreatedAt: now,
+		ExpiresAt: now.Add(sessionDefaultTTL),
+		IP:        ip,
+		UserAgent: ua,
+	}
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
+		return nil, User{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO user_sessions (id, user_id, created_at, expires_at, ip, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?)`, session.ID, session.UserID, formatTime(session.CreatedAt), formatTime(session.ExpiresAt), session.IP, session.UserAgent); err != nil {
+		return nil, User{}, err
+	}
+	nowText := formatTime(now)
+	if _, err := tx.Exec(`UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?`, nowText, nowText, userID); err != nil {
+		return nil, User{}, err
+	}
+	user.Role = role
+	user.LastLogin = &now
+	user.UpdatedAt = now
+	return session, user, nil
 }
 
 // GetSession retrieves the specified session (returns nil if not found or expired).

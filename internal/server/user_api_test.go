@@ -18,6 +18,31 @@ func requireUserAPIErrorCode(t *testing.T, responseBody []byte, want string) {
 	}
 }
 
+func TestAPIUserDisabledLoginReturnsDedicatedError(t *testing.T) {
+	_, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+
+	create := doMuxRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, []byte(`{"username":"disabled-login-user","password":"Password123"}`))
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create disabled-login user status = %d, want %d: %s", create.Code, http.StatusCreated, create.Body.String())
+	}
+	var user userResponse
+	if err := json.Unmarshal(create.Body.Bytes(), &user); err != nil {
+		t.Fatalf("decode created disabled-login user: %v", err)
+	}
+
+	disable := doMuxRequest(t, handler, http.MethodPost, "/api/admin/users/"+user.ID+"/disable", adminToken, nil)
+	if disable.Code != http.StatusOK {
+		t.Fatalf("disable user status = %d, want %d: %s", disable.Code, http.StatusOK, disable.Body.String())
+	}
+
+	login := doMuxRequest(t, handler, http.MethodPost, "/api/auth/login", "", []byte(`{"username":"disabled-login-user","password":"Password123"}`))
+	if login.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled user login status = %d, want %d: %s", login.Code, http.StatusUnauthorized, login.Body.String())
+	}
+	requireUserAPIErrorCode(t, login.Body.Bytes(), "user_disabled")
+}
+
 func TestAPIUserManagementContract(t *testing.T) {
 	_, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
 	defer cleanup()
@@ -149,8 +174,8 @@ func TestAPIUserManagementContract(t *testing.T) {
 	requireUserAPIErrorCode(t, selfDelete.Body.Bytes(), "self_user_lifecycle_forbidden")
 }
 
-func TestAPIUserDeleteRequiresDisabledStateAndRevokesSession(t *testing.T) {
-	_, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
+func TestAPIUserDeleteRequiresDisabledStateRevokesSessionAndPublishesListRefresh(t *testing.T) {
+	s, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
 	defer cleanup()
 
 	create := doMuxRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, []byte(`{"username":"bob","password":"BobPassword123"}`))
@@ -187,9 +212,26 @@ func TestAPIUserDeleteRequiresDisabledStateAndRevokesSession(t *testing.T) {
 	}
 	requireUserAPIErrorCode(t, revoked.Body.Bytes(), "session_expired_or_revoked")
 
+	events := s.events.Subscribe()
+	defer s.events.Unsubscribe(events)
 	deleteUser := doMuxRequest(t, handler, http.MethodDelete, "/api/admin/users/"+user.ID, adminToken, nil)
 	if deleteUser.Code != http.StatusNoContent {
 		t.Fatalf("delete disabled user status = %d, want %d: %s", deleteUser.Code, http.StatusNoContent, deleteUser.Body.String())
+	}
+	select {
+	case event := <-events:
+		if event.Type != "user_list_changed" {
+			t.Fatalf("delete event type = %q, want user_list_changed", event.Type)
+		}
+		var payload map[string]string
+		if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
+			t.Fatalf("decode delete list-refresh event: %v", err)
+		}
+		if payload["action"] != "deleted" || payload["user_id"] != user.ID {
+			t.Fatalf("delete list-refresh payload = %#v, want deleted/%s", payload, user.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("delete did not publish a user-list refresh event")
 	}
 	missing := doMuxRequest(t, handler, http.MethodGet, "/api/admin/users/"+user.ID, adminToken, nil)
 	if missing.Code != http.StatusNotFound {

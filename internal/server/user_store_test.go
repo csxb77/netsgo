@@ -24,6 +24,72 @@ func TestDecodeUserListCursorReturnsTypedErrors(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRechecksActiveUserAndLatestIdentity(t *testing.T) {
+	store := newInitializedAdminStore(t)
+	admin, err := store.GetSingleAdminUser()
+	if err != nil {
+		t.Fatalf("load administrator: %v", err)
+	}
+	user, err := store.CreateUser("session-race-user", "Password123")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	challengeKinds := []string{
+		adminAuthChallengeKindMFA,
+		adminAuthChallengeKindPasskeyLogin,
+		adminAuthChallengeKindTOTPSetup,
+		adminAuthChallengeKindPasskeyRegister,
+	}
+	challengeIDs := make([]string, 0, len(challengeKinds))
+	for _, kind := range challengeKinds {
+		challenge, err := store.StoreAuthChallenge(user.ID, kind, "{}", nil, time.Minute)
+		if err != nil {
+			t.Fatalf("store %s challenge: %v", kind, err)
+		}
+		challengeIDs = append(challengeIDs, challenge.ID)
+	}
+	if _, changed, err := store.SetUserStatus(admin.ID, user.ID, UserStatusDisabled); err != nil || !changed {
+		t.Fatalf("disable user = (changed %v, err %v)", changed, err)
+	}
+	for index, challengeID := range challengeIDs {
+		if _, err := store.GetAuthChallenge(challengeID, challengeKinds[index]); err == nil {
+			t.Fatalf("%s challenge survived disable", challengeKinds[index])
+		}
+	}
+	if _, err := store.CreateSession(user.ID, "stale-name", "admin", "127.0.0.1", "test"); !errors.Is(err, ErrUserDisabled) {
+		t.Fatalf("session creation for disabled user error = %v, want ErrUserDisabled", err)
+	}
+
+	retryChallenge, err := store.StoreAuthChallenge(user.ID, adminAuthChallengeKindMFA, "{}", nil, time.Minute)
+	if err != nil {
+		t.Fatalf("store challenge before repeated disable: %v", err)
+	}
+	if _, changed, err := store.SetUserStatus(admin.ID, user.ID, UserStatusDisabled); err != nil || changed {
+		t.Fatalf("repeat disable = (changed %v, err %v), want false, nil", changed, err)
+	}
+	if _, err := store.GetAuthChallenge(retryChallenge.ID, adminAuthChallengeKindMFA); err == nil {
+		t.Fatal("repeated disable must clear authentication challenges")
+	}
+
+	if _, _, err := store.SetUserStatus(admin.ID, user.ID, UserStatusActive); err != nil {
+		t.Fatalf("enable user: %v", err)
+	}
+	if _, err := store.UpdateUserUsername(user.ID, "current-name"); err != nil {
+		t.Fatalf("rename user: %v", err)
+	}
+	if _, _, err := store.SetUserAdmin(admin.ID, user.ID, true); err != nil {
+		t.Fatalf("promote user: %v", err)
+	}
+	session, err := store.CreateSession(user.ID, "stale-name", "user", "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("create session after enable: %v", err)
+	}
+	if session.Username != "current-name" || session.Role != "admin" {
+		t.Fatalf("session identity = %q/%q, want current-name/admin", session.Username, session.Role)
+	}
+}
+
 func TestAdminStoreUserLifecycleContract(t *testing.T) {
 	store := newInitializedAdminStore(t)
 	admin, err := store.GetSingleAdminUser()
@@ -99,7 +165,11 @@ func TestAdminStoreUserLifecycleContract(t *testing.T) {
 	if _, err := store.ValidateUserPassword(user.Username, "Alice1234"); !errors.Is(err, ErrUserDisabled) {
 		t.Fatalf("disabled user password validation error = %v, want ErrUserDisabled", err)
 	}
-	_ = mustCreateSession(t, store, user.ID, user.Username, user.Role, "127.0.0.1", "late-user-agent")
+	now := time.Now().UTC()
+	if _, err := store.db.Exec(`INSERT INTO user_sessions (id, user_id, created_at, expires_at, ip, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?)`, generateUUID(), user.ID, formatTime(now), formatTime(now.Add(time.Hour)), "127.0.0.1", "late-user-agent"); err != nil {
+		t.Fatalf("seed late session for repeated-disable cleanup: %v", err)
+	}
 	if _, changed, err := store.SetUserStatus(admin.ID, user.ID, UserStatusDisabled); err != nil || changed {
 		t.Fatalf("idempotent disable = (_, %v, %v), want (_, false, nil)", changed, err)
 	}

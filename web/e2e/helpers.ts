@@ -72,11 +72,12 @@ async function expectDashboardShell(page: Page) {
   await expect(page.getByRole('tablist')).toBeVisible();
   await expect(page.getByRole('tab', { name: /Clients/i })).toBeVisible();
   await expect(page.getByRole('tab', { name: /Tunnels/i })).toBeVisible();
+  await expect(page.getByText('Runtime status', { exact: true })).toBeVisible();
 }
 
 export async function login(page: Page) {
   await gotoWhenReady(page, '/#/login');
-  await page.getByPlaceholder('Enter username').fill(e2eConfig.adminUser);
+  await page.getByPlaceholder('Enter user account').fill(e2eConfig.adminUser);
   await page.getByPlaceholder('Enter password').fill(e2eConfig.adminPass);
   await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await expectDashboardShell(page);
@@ -146,7 +147,15 @@ export async function waitForClientPair(page: Page): Promise<ClientPair> {
 }
 
 export async function openCreateTunnelDialog(page: Page, clientID: string) {
-  await page.goto(e2eURL(`/#/dashboard/clients/${clientID}`));
+  const principalResponse = await page.request.get(e2eURL('/api/auth/me'));
+  if (!principalResponse.ok()) {
+    throw new Error(`fetch current user failed: ${principalResponse.status()} ${await principalResponse.text()}`);
+  }
+  const principal = await principalResponse.json() as { id: string; is_admin: boolean };
+  const clientPath = principal.is_admin
+    ? `/#/dashboard/users/${encodeURIComponent(principal.id)}/clients/${encodeURIComponent(clientID)}`
+    : `/#/dashboard/clients/${encodeURIComponent(clientID)}`;
+  await page.goto(e2eURL(clientPath));
   await expect(page.getByText('Child tunnels')).toBeVisible();
   await page.getByRole('button', { name: 'Add tunnel' }).click();
   const dialog = page.getByRole('dialog', { name: 'Create proxy tunnel' });

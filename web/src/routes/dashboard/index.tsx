@@ -1,4 +1,4 @@
-import { createRoute, redirect } from '@tanstack/react-router';
+import { createRoute } from '@tanstack/react-router';
 import { dashboardRoute } from '@/routes/dashboard';
 import { OverviewPage } from '@/components/custom/dashboard/OverviewPage';
 import { requireConsoleAuth } from '@/lib/auth';
@@ -11,11 +11,6 @@ function DashboardIndexPage() {
 export const dashboardIndexRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/',
-  beforeLoad: async () => {
-    const { user } = await requireConsoleAuth();
-    if (user.is_admin) {
-      throw redirect({ to: '/dashboard/users' });
-    }
-  },
+  beforeLoad: requireConsoleAuth,
   component: DashboardIndexPage,
 });

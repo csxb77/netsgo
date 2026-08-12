@@ -587,8 +587,8 @@ func (s *AdminStore) setUserStatus(actorUserID, userID string, status UserStatus
 		// convergence. Revoke any session row that appeared after the first
 		// attempt even though no second state-transition activity is emitted.
 		if status == UserStatusDisabled {
-			if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
-				return User{}, false, 0, fmt.Errorf("revoke sessions after repeated user disable: %w", err)
+			if err := revokeUserLoginStateTx(tx, userID); err != nil {
+				return User{}, false, 0, err
 			}
 		}
 		if err := commitTx(tx, &committed); err != nil {
@@ -601,8 +601,8 @@ func (s *AdminStore) setUserStatus(actorUserID, userID string, status UserStatus
 		return User{}, false, 0, fmt.Errorf("update user status: %w", err)
 	}
 	if status == UserStatusDisabled {
-		if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
-			return User{}, false, 0, fmt.Errorf("revoke sessions after user disable: %w", err)
+		if err := revokeUserLoginStateTx(tx, userID); err != nil {
+			return User{}, false, 0, err
 		}
 	}
 	after.UpdatedAt = now
@@ -624,6 +624,16 @@ func (s *AdminStore) setUserStatus(actorUserID, userID string, status UserStatus
 		return User{}, false, 0, err
 	}
 	return after, true, activityID, nil
+}
+
+func revokeUserLoginStateTx(tx *sql.Tx, userID string) error {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("revoke sessions after user disable: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("clear authentication challenges after user disable: %w", err)
+	}
+	return nil
 }
 
 // DeleteSessionsByUserIDWithActivity revokes every web session for a target

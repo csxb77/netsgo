@@ -87,7 +87,7 @@ func (s *Server) RequirePrincipal(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// 🔑 核心：检查 adminStore 是否已初始化
-		if s.auth.adminStore == nil {
+		if s.auth == nil || s.auth.adminStore == nil {
 			writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
 			return
 		}
