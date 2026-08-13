@@ -464,6 +464,9 @@ func (s *ActivityStore) appendTx(tx *sql.Tx, spec ActivityEventSpec) (int64, err
 	if err := resolveActivityUserScopeTx(tx, &prepared); err != nil {
 		return 0, err
 	}
+	if err := resolveActivitySubjectSnapshotsTx(tx, &prepared); err != nil {
+		return 0, err
+	}
 
 	result, err := tx.Exec(`INSERT INTO activity_events (
 		occurred_at_ns, recorded_at_ns, severity, category, action, source,
@@ -668,6 +671,66 @@ func resolveActivityUserScopeTx(tx *sql.Tx, prepared *preparedActivitySpec) erro
 	if prepared.subjectUserID != "" {
 		if err := ensureActivityUserExistsTx(tx, prepared.subjectUserID, "subject"); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// resolveActivitySubjectSnapshotsTx fills missing human-readable subject
+// fields at append time. Activity events remain immutable snapshots: later
+// resource renames do not rewrite historical audit records.
+func resolveActivitySubjectSnapshotsTx(tx *sql.Tx, prepared *preparedActivitySpec) error {
+	if tx == nil || prepared == nil {
+		return errors.New("activity subject snapshot transaction and spec must not be nil")
+	}
+	for index := range prepared.clients {
+		subject := &prepared.clients[index]
+		if subject.DisplayName != "" && subject.Hostname != "" {
+			continue
+		}
+		var displayName, hostname string
+		err := tx.QueryRow(`SELECT display_name, hostname FROM registered_clients WHERE id = ?`, subject.ClientID).Scan(&displayName, &hostname)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("resolve activity client snapshot: %w", err)
+		}
+		var truncated bool
+		if subject.DisplayName == "" {
+			subject.DisplayName, truncated = truncateActivityString(displayName, activityNameMaxBytes)
+			subject.Truncated = subject.Truncated || truncated
+		}
+		if subject.Hostname == "" {
+			subject.Hostname, truncated = truncateActivityString(hostname, activityNameMaxBytes)
+			subject.Truncated = subject.Truncated || truncated
+		}
+	}
+	for index := range prepared.tunnels {
+		subject := &prepared.tunnels[index]
+		if subject.Name != "" && subject.Type != "" && subject.Topology != "" {
+			continue
+		}
+		var name, tunnelType, topology string
+		err := tx.QueryRow(`SELECT name, type, topology FROM tunnels WHERE id = ?`, subject.TunnelID).Scan(&name, &tunnelType, &topology)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("resolve activity tunnel snapshot: %w", err)
+		}
+		var truncated bool
+		if subject.Name == "" {
+			subject.Name, truncated = truncateActivityString(name, activityNameMaxBytes)
+			subject.Truncated = subject.Truncated || truncated
+		}
+		if subject.Type == "" {
+			subject.Type, truncated = truncateActivityString(tunnelType, activityNameMaxBytes)
+			subject.Truncated = subject.Truncated || truncated
+		}
+		if subject.Topology == "" {
+			subject.Topology, truncated = truncateActivityString(topology, activityNameMaxBytes)
+			subject.Truncated = subject.Truncated || truncated
 		}
 	}
 	return nil

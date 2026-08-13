@@ -109,4 +109,38 @@ func TestTunnelActivityNoopAndStaleRevisionDoNotAppend(t *testing.T) {
 	}
 }
 
+func TestTunnelMigrationActivityCapturesBothClientNames(t *testing.T) {
+	store := newTestTunnelStore(t)
+	actor := ActivityActor{Type: "admin", Name: "alice"}
+	before := testStoredServerExposeTCPTunnel("activity-readable-migrate", "remote-desktop", "client-old", 8080, 18086, zeroTime())
+	mustAddStableTunnel(t, store, before)
+	var err error
+	before, err = store.GetTunnelByID(before.ID)
+	if err != nil {
+		t.Fatalf("reload owned tunnel: %v", err)
+	}
+	replacement := tunnelTargetMigrationReplacement(t, store, before, "client-new")
+	if _, err := store.db.Exec(`UPDATE registered_clients SET display_name = ?, hostname = ? WHERE id = ?`, "Home Mac", "home-host", "client-old"); err != nil {
+		t.Fatalf("name old client: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE registered_clients SET display_name = ?, hostname = ? WHERE id = ?`, "Office Mac", "office-host", "client-new"); err != nil {
+		t.Fatalf("name new client: %v", err)
+	}
+	_, _, activityID, err := store.MigrateTunnelTargetByIDWithActivity(before.ID, before.Revision, replacement, actor)
+	if err != nil {
+		t.Fatalf("MigrateTunnelTargetByIDWithActivity() error = %v", err)
+	}
+	item, err := store.activityStore.GetByID(activityID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	namesByRelation := make(map[string]string, len(item.Clients))
+	for _, subject := range item.Clients {
+		namesByRelation[subject.Relation] = subject.DisplayName
+	}
+	if namesByRelation["target"] != "Office Mac" || namesByRelation["related"] != "Home Mac" {
+		t.Fatalf("migration client snapshots = %+v", item.Clients)
+	}
+}
+
 func zeroTime() (value time.Time) { return value }

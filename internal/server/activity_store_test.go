@@ -90,6 +90,38 @@ func TestActivityStoreAppendQueryAndCursor(t *testing.T) {
 	}
 }
 
+func TestActivityStoreCapturesReadableSubjectSnapshots(t *testing.T) {
+	store := newTestActivityStore(t)
+	now := formatTime(time.Now().UTC())
+	if _, err := store.db.Exec(`INSERT INTO registered_clients
+		(id, install_id, display_name, hostname, created_at, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?)`, "client-readable", "install-readable", "Office Mac", "office-host", now, now); err != nil {
+		t.Fatalf("insert registered client: %v", err)
+	}
+	spec := ActivityEventSpec{
+		Category: ActivityCategoryP2P,
+		Action:   "connected",
+		Source:   "test",
+		Actor:    systemActivityActor(),
+		Payload:  newActivityP2PPayload("connected", "", "session-readable", 1, ActivitySummaryArgs{}),
+		Clients:  []ActivityClientSubject{{ClientID: "client-readable", Relation: "peer"}},
+	}
+	id, err := store.Append(spec)
+	if err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE registered_clients SET display_name = ? WHERE id = ?`, "Renamed Later", "client-readable"); err != nil {
+		t.Fatalf("rename registered client: %v", err)
+	}
+	item, err := store.GetByID(id)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if len(item.Clients) != 1 || item.Clients[0].DisplayName != "Office Mac" || item.Clients[0].Hostname != "office-host" {
+		t.Fatalf("captured client snapshot = %+v", item.Clients)
+	}
+}
+
 func TestActivityStoreScopeFiltersDoNotDuplicateEvents(t *testing.T) {
 	store := newTestActivityStore(t)
 	spec := testActivitySpec("created", time.Now())

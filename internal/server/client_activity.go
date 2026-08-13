@@ -37,7 +37,21 @@ func normalizeClientDisconnectCause(reason string) clientDisconnectCause {
 func (s *Server) clientLifecycleSpec(client *ClientConn, action string, cause clientDisconnectCause) ActivityEventSpec {
 	info := client.GetInfo()
 	managed := !strings.HasPrefix(client.ID, "unmanaged-")
-	name := info.Hostname
+	displayName := ""
+	hostname := info.Hostname
+	if managed && s.serverDB != nil {
+		var persistedDisplayName, persistedHostname string
+		if err := s.serverDB.QueryRow(`SELECT display_name, hostname FROM registered_clients WHERE id = ?`, client.ID).Scan(&persistedDisplayName, &persistedHostname); err == nil {
+			displayName = persistedDisplayName
+			if strings.TrimSpace(persistedHostname) != "" {
+				hostname = persistedHostname
+			}
+		}
+	}
+	name := displayName
+	if strings.TrimSpace(name) == "" {
+		name = hostname
+	}
 	if name == "" {
 		name = client.ID
 	}
@@ -58,7 +72,7 @@ func (s *Server) clientLifecycleSpec(client *ClientConn, action string, cause cl
 		DedupeKey:     fmt.Sprintf("%s:%s:%d:%s", s.activityBootID, client.ID, client.generation, action),
 		Payload:       payload,
 		Clients: []ActivityClientSubject{{
-			ClientID: client.ID, Relation: "subject", Hostname: info.Hostname,
+			ClientID: client.ID, Relation: "subject", DisplayName: displayName, Hostname: hostname,
 		}},
 	}
 }

@@ -99,6 +99,12 @@ func tunnelTransitionActivitySpec(action string, before, after StoredTunnel, act
 
 func tunnelMigrationActivitySpec(before, after StoredTunnel, actor ActivityActor) ActivityEventSpec {
 	spec := tunnelActivitySpec("migrated", after, actor)
+	if before.Target.ClientID != "" && before.Target.ClientID != after.Target.ClientID {
+		spec.Clients = append(spec.Clients, ActivityClientSubject{
+			ClientID: before.Target.ClientID,
+			Relation: "related",
+		})
+	}
 	payload := newActivityTransitionPayload(ActivityCategoryTunnel, "migrated", ActivitySummaryArgs{
 		TunnelName: after.Name,
 		Before:     before.Target.ClientID,
