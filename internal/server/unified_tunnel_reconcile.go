@@ -191,18 +191,6 @@ func (s *Server) reconcileUnifiedTunnel(tunnelID, reason string) error {
 	return s.executeUnifiedTunnelReconcileTask(task)
 }
 
-func (s *Server) reconcileStoredUnifiedTunnel(stored StoredTunnel, reason string) error {
-	task, err := s.captureUnifiedTunnelReconcileTask(stored, reason)
-	if err != nil {
-		return err
-	}
-	return s.executeFixedUnifiedTunnelReconcileTask(task)
-}
-
-func (s *Server) reconcileStoredUnifiedTunnelAtEpoch(stored StoredTunnel, reason string, ownerEpoch uint64) error {
-	return s.reconcileStoredUnifiedTunnelForTask(stored, reason, ownerEpoch, nil)
-}
-
 func (s *Server) reconcileStoredUnifiedTunnelForTask(stored StoredTunnel, reason string, ownerEpoch uint64, task *unifiedTunnelReconcileTask) error {
 	_ = reason // reserved for runtime diagnostics and retry scheduling.
 	// Desired running state is not authorization. A disabled or unresolved
@@ -467,15 +455,6 @@ func (s *Server) isStoredTunnelOwnerOperational(stored StoredTunnel) (bool, erro
 
 func (s *Server) scheduleUnifiedTunnelReconcile(stored StoredTunnel, reason string) {
 	task, err := s.captureUnifiedTunnelReconcileTask(stored, reason)
-	if err != nil {
-		s.logUnifiedTunnelReconcileCaptureError(stored, reason, err)
-		return
-	}
-	s.scheduleCapturedUnifiedTunnelReconcile(stored, task)
-}
-
-func (s *Server) scheduleUnifiedTunnelReconcileAtEpoch(stored StoredTunnel, reason string, expectedOwnerEpoch uint64) {
-	task, err := s.captureUnifiedTunnelReconcileTaskAtEpoch(stored, reason, expectedOwnerEpoch)
 	if err != nil {
 		s.logUnifiedTunnelReconcileCaptureError(stored, reason, err)
 		return

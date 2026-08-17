@@ -20,10 +20,6 @@ type consoleData struct {
 	Summary consoleSummaryView
 }
 
-func (s *Server) collectConsoleData() consoleData {
-	return s.collectConsoleDataForUser("")
-}
-
 func (s *Server) collectConsoleDataForUser(ownerUserID string) consoleData {
 	clients := s.collectClientViewsForUser(ownerUserID)
 	return consoleData{

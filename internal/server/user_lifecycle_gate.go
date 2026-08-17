@@ -148,33 +148,10 @@ func (s *Server) withClientFinalAccountingPublication(client *ClientConn, publis
 	return true
 }
 
-func (s *Server) writeClientControlAtEpoch(client *ClientConn, expectedEpoch uint64, message *protocol.Message) error {
-	if client == nil || message == nil {
-		return errTunnelProvisionAckCancelled
-	}
-	releaseOwnerGate := func() {}
-	if client.OwnerUserID != "" {
-		_, release, err := s.acquireUserLifecycleRead(client.OwnerUserID, expectedEpoch, true)
-		if err != nil {
-			return err
-		}
-		releaseOwnerGate = release
-	}
-	defer releaseOwnerGate()
-
-	s.clientTunnelMutationMu.Lock()
-	defer s.clientTunnelMutationMu.Unlock()
-	current, ok := s.clients.Load(client.ID)
-	if !ok || current != client || !client.isLive() || !s.clientLifecycleCurrentLocked(client) {
-		return errTunnelProvisionAckCancelled
-	}
-	return s.writeControlMessageBefore(client, message, time.Now().Add(lifecycleControlWriteTimeout))
-}
-
 func (s *Server) newUserConvergenceContext() (context.Context, context.CancelFunc) {
-	timeout := s.userConvergenceTimeout
-	if timeout <= 0 {
-		timeout = defaultUserConvergenceTimeout
+	timeout := defaultUserConvergenceTimeout
+	if s != nil && s.userConvergenceTimeout > 0 {
+		timeout = s.userConvergenceTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	if s == nil || s.done == nil {

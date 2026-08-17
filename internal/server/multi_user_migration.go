@@ -7,8 +7,6 @@ import (
 	"strings"
 )
 
-const multiUserMigrationValidationTable = "multi_user_migration_validation"
-
 type multiUserMigrationOrphanRowsError struct {
 	Table       string
 	OrphanCount int64

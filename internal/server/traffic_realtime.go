@@ -114,51 +114,12 @@ func (s *Server) collectRealtimeTrafficEvents(now time.Time) map[string]realtime
 	return eventsByOwner
 }
 
-func (s *Server) buildRealtimeTrafficResult(clientID, tunnelName string, from, to time.Time, knownTunnels []trafficSeriesKey) (TrafficQueryResult, error) {
-	result, err := s.trafficStore.QueryWithResolution(clientID, tunnelName, from, to, TrafficResolutionSecond)
-	if err != nil {
-		return TrafficQueryResult{}, err
-	}
-	return fillRealtimeTrafficResult(result, knownTunnels, from, to)
-}
-
 func (s *Server) buildRealtimeTrafficResultForUser(ownerUserID, clientID, tunnelName string, from, to time.Time, knownTunnels []trafficSeriesKey) (TrafficQueryResult, error) {
 	result, err := s.trafficStore.QueryWithResolutionForUser(ownerUserID, clientID, tunnelName, from, to, TrafficResolutionSecond)
 	if err != nil {
 		return TrafficQueryResult{}, err
 	}
 	return fillRealtimeTrafficResult(result, knownTunnels, from, to)
-}
-
-func (s *Server) knownTrafficTunnels(clientID, tunnelName string) []trafficSeriesKey {
-	known := make(map[trafficSeriesKey]struct{})
-	add := func(key trafficSeriesKey) {
-		if key.TunnelName == "" || key.TunnelType == "" {
-			return
-		}
-		if tunnelName != "" && key.TunnelName != tunnelName && key.TunnelID != tunnelName {
-			return
-		}
-		known[key] = struct{}{}
-	}
-
-	if s.store != nil {
-		stored, err := s.store.GetTunnelsByClientID(clientID)
-		if err != nil {
-			log.Printf("⚠️ failed to load tunnels for realtime traffic client %s: %v", clientID, err)
-		} else {
-			for _, tunnel := range stored {
-				add(trafficSeriesKey{TunnelID: tunnel.ID, TunnelName: tunnel.Name, TunnelType: tunnel.Type})
-			}
-		}
-	}
-
-	keys := make([]trafficSeriesKey, 0, len(known))
-	for key := range known {
-		keys = append(keys, key)
-	}
-	sortTrafficSeriesKeys(keys)
-	return keys
 }
 
 func (s *Server) knownTrafficTunnelsForUser(ownerUserID, clientID, tunnelName string) []trafficSeriesKey {

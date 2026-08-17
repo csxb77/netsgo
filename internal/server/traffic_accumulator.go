@@ -283,10 +283,6 @@ func (s *Server) recordTunnelTrafficAt(now time.Time, clientID string, config pr
 	s.recordTrafficDeltaAt(now, delta)
 }
 
-func (s *Server) recordTrafficAt(now time.Time, clientID, tunnelName, tunnelType string, ingressBytes, egressBytes uint64) {
-	s.recordTrafficObservationAt(now, "", clientID, tunnelName, tunnelType, ingressBytes, egressBytes)
-}
-
 func (s *Server) recordTrafficObservationAt(now time.Time, tunnelID, clientID, tunnelName, tunnelType string, ingressBytes, egressBytes uint64) {
 	if s == nil || s.trafficStore == nil {
 		return

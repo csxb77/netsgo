@@ -1510,7 +1510,7 @@ func (h *systemHarness) requestTCPUploadAck(port int, payload []byte, timeout ti
 			seconds = 1
 		}
 		got, err := h.runComposeExec(h.composeEnv, "server", payload,
-			"socat", "-T"+strconv.Itoa(seconds), "-", "TCP:"+service+":"+strconv.Itoa(port))
+			"socat", "-T"+strconv.Itoa(seconds), "-,ignoreeof", "TCP:"+service+":"+strconv.Itoa(port))
 		if err != nil {
 			return nil, fmt.Errorf("upload large TCP payload through %s:%d: %w", service, port, err)
 		}

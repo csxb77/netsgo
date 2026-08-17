@@ -284,10 +284,6 @@ func (s *Server) transitionStoredTunnelRuntimeIfCurrent(stored StoredTunnel, exp
 	return s.transitionStoredTunnelRuntimeObserved(stored, expectedRuntimeState, runtimeState, message)
 }
 
-func (s *Server) waitForClientTunnelProvisionAck(client *ClientConn, req protocol.TunnelProvisionRequest) error {
-	return s.waitForClientTunnelProvisionAckForTask(client, req, nil)
-}
-
 func (s *Server) waitForClientTunnelProvisionAckForTask(client *ClientConn, req protocol.TunnelProvisionRequest, task *unifiedTunnelReconcileTask) error {
 	if req.TunnelID == "" {
 		return fmt.Errorf("tunnel provision request missing tunnel id")
@@ -385,19 +381,6 @@ func (s *Server) notifyClientTunnelUnprovision(client *ClientConn, tunnelID stri
 		return err
 	}
 	return s.writeControlMessage(client, msg)
-}
-
-func (s *Server) notifyClientTunnelUnprovisionAtEpoch(client *ClientConn, ownerEpoch uint64, tunnelID string, revision int64, role, reason string) error {
-	msg, err := protocol.NewMessage(protocol.MsgTypeTunnelUnprovision, protocol.TunnelUnprovisionRequest{
-		TunnelID: tunnelID,
-		Revision: revision,
-		Role:     role,
-		Reason:   reason,
-	})
-	if err != nil {
-		return err
-	}
-	return s.writeClientControlAtEpoch(client, ownerEpoch, msg)
 }
 
 func tunnelSpecProtocolForRole(stored StoredTunnel, runtimeState, role string) protocol.TunnelSpec {
@@ -503,7 +486,7 @@ func (s *Server) handleClientOpenedDataStreamInternal(openClient *ClientConn, so
 		}
 		targetClient = grant.targetClient
 	} else {
-		targetClient, ok = s.loadLiveClient(stored.Target.ClientID)
+		targetClient, _ = s.loadLiveClient(stored.Target.ClientID)
 	}
 	if targetClient == nil {
 		log.Printf("⚠️ client relay target offline: %s", stored.Target.ClientID)

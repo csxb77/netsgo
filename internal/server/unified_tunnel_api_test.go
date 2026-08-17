@@ -1793,8 +1793,19 @@ func TestAPI_UnifiedTunnelMigrateConcurrentSameRevisionReturnsOneSuccessAndRevis
 		rounds   = 8
 		requests = 12
 	)
+	usedPorts := make(map[int]struct{}, rounds)
+	reserveUniqueTCPPort := func() int {
+		for {
+			port := reserveTCPPort(t)
+			if _, exists := usedPorts[port]; exists {
+				continue
+			}
+			usedPorts[port] = struct{}{}
+			return port
+		}
+	}
 	for round := 0; round < rounds; round++ {
-		createResp := doMuxRequest(t, handler, http.MethodPost, "/api/tunnels", token, unifiedCreatePayload(fmt.Sprintf("migrate-concurrent-%d", round), currentTarget.ID, reserveTCPPort(t)))
+		createResp := doMuxRequest(t, handler, http.MethodPost, "/api/tunnels", token, unifiedCreatePayload(fmt.Sprintf("migrate-concurrent-%d", round), currentTarget.ID, reserveUniqueTCPPort()))
 		if createResp.Code != http.StatusCreated {
 			t.Fatalf("round %d POST /api/tunnels: want 201, got %d body=%s", round, createResp.Code, createResp.Body.String())
 		}

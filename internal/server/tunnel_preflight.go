@@ -96,10 +96,6 @@ func validateTunnelPreflightResponse(req protocol.TunnelPreflightRequest, resp p
 	return nil
 }
 
-func (s *Server) preflightClientIngress(req tunnelCreateRequestAPI, ingressConfig ingressEndpointConfigAPI, existingID string) error {
-	return s.preflightClientIngressForUser("", req, ingressConfig, existingID)
-}
-
 func (s *Server) preflightClientIngressForUser(ownerUserID string, req tunnelCreateRequestAPI, ingressConfig ingressEndpointConfigAPI, existingID string) error {
 	if req.Topology != tunnelTopologyClientToClient || req.Ingress.Location != tunnelEndpointLocationClient {
 		return nil

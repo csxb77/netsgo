@@ -562,10 +562,6 @@ func (s *Server) validateTunnelMigrateRequest(ownerUserID string, current tunnel
 	return nil
 }
 
-func (s *Server) migrateUnifiedStoredTunnel(current tunnelSpecAPI, req tunnelMigrateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
-	return s.migrateUnifiedStoredTunnelAtEpoch(current, 0, req, actor)
-}
-
 func (s *Server) migrateUnifiedStoredTunnelAtEpoch(current tunnelSpecAPI, expectedOwnerEpoch uint64, req tunnelMigrateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
 	if s.store == nil {
 		return StoredTunnel{}, 0, fmt.Errorf("tunnel store not initialized")
@@ -964,14 +960,6 @@ func validateEndpointConfigComplexity(raw json.RawMessage) error {
 	}
 }
 
-func (s *Server) createUnifiedStoredTunnel(req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
-	return s.createUnifiedStoredTunnelForUser("", req, actor)
-}
-
-func (s *Server) createUnifiedStoredTunnelForUser(ownerUserID string, req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
-	return s.createUnifiedStoredTunnelForUserAtEpoch(ownerUserID, 0, req, actor)
-}
-
 func (s *Server) createUnifiedStoredTunnelForUserAtEpoch(ownerUserID string, expectedOwnerEpoch uint64, req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
 	if err := prepareHTTPHostMutationRequest(&req, nil); err != nil {
 		return StoredTunnel{}, 0, err
@@ -1013,10 +1001,6 @@ func (s *Server) createUnifiedStoredTunnelForUserAtEpoch(ownerUserID string, exp
 	s.emitTunnelChangedIfStored(stored.OwnerClientID, storedTunnelToProxyConfig(stored), "created")
 	s.scheduleOwnedMutationReconcile(stored, reconcileTask, reconcileTaskOK, "created", expectedOwnerEpoch)
 	return stored, activityID, nil
-}
-
-func (s *Server) updateUnifiedStoredTunnel(current tunnelSpecAPI, expectedRevision int64, req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
-	return s.updateUnifiedStoredTunnelAtEpoch(current, expectedRevision, 0, req, actor)
 }
 
 func (s *Server) updateUnifiedStoredTunnelAtEpoch(current tunnelSpecAPI, expectedRevision int64, expectedOwnerEpoch uint64, req tunnelCreateRequestAPI, actor ActivityActor) (StoredTunnel, int64, error) {
@@ -1317,10 +1301,6 @@ func (s *Server) storedTunnelFromUnifiedRequestForUser(ownerUserID string, req t
 	return stored, nil
 }
 
-func (s *Server) validateDirectPolicyParticipants(stored StoredTunnel) error {
-	return s.validateDirectPolicyParticipantsForUser("", stored)
-}
-
 func (s *Server) validateDirectPolicyParticipantsForUser(ownerUserID string, stored StoredTunnel) error {
 	if stored.TransportPolicy == protocol.TransportPolicyServerRelayOnly {
 		return nil
@@ -1378,10 +1358,6 @@ func ingressResourceCandidateFromUnifiedRequest(req tunnelCreateRequestAPI, cfg 
 			Config:   normalizedIngressConfigRaw(req.Ingress.Type, cfg),
 		},
 	}
-}
-
-func (s *Server) validateUnifiedClientsAndCapabilities(req tunnelCreateRequestAPI) error {
-	return s.validateUnifiedClientsAndCapabilitiesForUser("", req)
 }
 
 func (s *Server) validateUnifiedClientsAndCapabilitiesForUser(ownerUserID string, req tunnelCreateRequestAPI) error {
