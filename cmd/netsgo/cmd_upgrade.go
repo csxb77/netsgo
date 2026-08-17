@@ -120,6 +120,11 @@ func runUpgradeCommand(force, yes bool, deps upgradeCommandDeps) error {
 	_, _ = fmt.Fprintln(deps.stdout, "替换完成。")
 	_, _ = fmt.Fprintf(deps.stdout, "已停止: %s\n", formatRestartUnits(result.Stopped))
 	_, _ = fmt.Fprintf(deps.stdout, "已启动: %s\n", formatRestartUnits(result.Started))
+	_, _ = fmt.Fprintf(deps.stdout, "旧版本备份: %s\n", result.BackupPath)
+	_, _ = fmt.Fprintln(deps.stdout, "手动回滚:")
+	_, _ = fmt.Fprintf(deps.stdout, "  sudo systemctl stop %s\n", strings.Join(result.Started, " "))
+	_, _ = fmt.Fprintf(deps.stdout, "  sudo install -m 0755 %s %s\n", result.BackupPath, svcmgr.BinaryPath)
+	_, _ = fmt.Fprintf(deps.stdout, "  sudo systemctl start %s\n", strings.Join(result.Started, " "))
 	return nil
 }
 

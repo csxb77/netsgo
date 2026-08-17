@@ -34,6 +34,7 @@ type Result struct {
 	NewVersion string
 	Stopped    []string
 	Started    []string
+	BackupPath string
 }
 
 func rollbackUpdateOrUpgrade(orch *Orchestrator, started, stopped []string, backupPath string, restoreBinary bool, envSnapshots []serviceEnvSnapshot) error {

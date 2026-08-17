@@ -65,6 +65,14 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 		return result, fmt.Errorf("backup: %w", err)
 	}
 	backupAvailable = true
+	result.BackupPath, err = persistUpgradeBackup(originalBinary, oldVersion)
+	if err != nil {
+		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, nil)
+		if rollbackErr != nil {
+			return result, errors.Join(fmt.Errorf("retain backup: %w", err), rollbackErr)
+		}
+		return result, fmt.Errorf("retain backup: %w", err)
+	}
 
 	envSnapshots, err = snapshotServiceEnvFiles(units)
 	if err != nil {
@@ -98,6 +106,10 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 			return result, errors.Join(err, rollbackErr)
 		}
 		return result, err
+	}
+	if err := verifyStartedServicesFunc(units); err != nil {
+		rollbackErr := rollbackUpdateOrUpgrade(orch, started, stopped, originalBinary, true, envSnapshots)
+		return result, startupHealthFailure(units, result.BackupPath, err, rollbackErr)
 	}
 	result.Started = started
 	return result, nil
