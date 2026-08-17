@@ -373,6 +373,8 @@ func TestRunUpgradeCommand_ForceYesSkipsUnknownInstalledVersionConfirmation(t *t
 	}
 	for _, want := range []string{
 		"旧版本备份: /var/lib/netsgo-upgrade/netsgo.pre-upgrade-v0.0.9",
+		"该备份仅包含二进制",
+		"手动恢复旧二进制:",
 		"sudo systemctl stop netsgo-server.service",
 		"sudo install -m 0755 /var/lib/netsgo-upgrade/netsgo.pre-upgrade-v0.0.9 /usr/local/bin/netsgo",
 		"sudo systemctl start netsgo-server.service",
