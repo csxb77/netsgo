@@ -186,6 +186,15 @@ func (s *Server) handleAPIPasskeyLoginBegin(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusNotFound, "passkey_not_registered", "no passkey is registered for this server address")
 		return
 	}
+	if s.auth.passkeyBeginLimiter != nil {
+		ip := s.clientIP(r)
+		if allowed, retryAfter := s.auth.passkeyBeginLimiter.Allow(ip); !allowed {
+			slog.Warn("Passkey login begin rate limited", "ip", ip, "module", "security")
+			w.Header().Set("Retry-After", retryAfterString(retryAfter))
+			writeAPIError(w, http.StatusTooManyRequests, "passkey_begin_rate_limited", "too many passkey login attempts, please try again later")
+			return
+		}
+	}
 	wa, err := newWebAuthn(ctx)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "passkey_unavailable", err.Error())
@@ -205,6 +214,11 @@ func (s *Server) handleAPIPasskeyLoginBegin(w http.ResponseWriter, r *http.Reque
 	// the shared challenge must not inherit any candidate user's lifecycle.
 	challenge, err := s.auth.adminStore.StoreAuthChallenge("", adminAuthChallengeKindPasskeyLogin, sessionJSON, ctx, webAuthnChallengeTTL(session))
 	if err != nil {
+		if errors.Is(err, errPasskeyLoginChallengeCapacity) {
+			w.Header().Set("Retry-After", retryAfterString(time.Minute))
+			writeAPIError(w, http.StatusTooManyRequests, "passkey_challenge_capacity_reached", "too many passkey login challenges, please try again later")
+			return
+		}
 		writeAPIError(w, http.StatusInternalServerError, "passkey_begin_failed", "failed to persist passkey challenge")
 		return
 	}

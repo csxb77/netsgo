@@ -124,12 +124,17 @@ func (s *Server) collectSnapshotForUser(ownerUserID string) consoleSnapshot {
 	now := time.Now()
 	data := s.collectConsoleDataForUser(ownerUserID)
 	status := s.getCachedServerStatus()
+	serverAddr := status.ServerAddr
+	if s.auth.adminStore != nil {
+		config := s.auth.adminStore.GetServerConfig()
+		serverAddr = resourceServerAddr(&config, serverAddr)
+	}
 	return consoleSnapshot{
 		Clients: data.Clients,
 		Summary: data.Summary,
 		Bootstrap: resourceBootstrapView{
 			Version:      status.Version,
-			ServerAddr:   status.ServerAddr,
+			ServerAddr:   serverAddr,
 			AllowedPorts: append([]PortRange{}, status.AllowedPorts...),
 		},
 		GeneratedAt: now,

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -419,6 +420,79 @@ func TestAPI_PasskeyBeginRequiresRegisteredCredential(t *testing.T) {
 	}
 	if payload.Code != "passkey_not_registered" {
 		t.Fatalf("expected passkey_not_registered, got %#v", payload)
+	}
+}
+
+func TestAPI_PasskeyBeginRateLimitsChallengeCreation(t *testing.T) {
+	t.Setenv("NETSGO_SERVER_ADDR", "http://localhost")
+	s, cleanup := setupTestServerWithDB(t, true)
+	defer cleanup()
+
+	admin, err := s.auth.adminStore.ValidateUserPassword("admin", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := webauthn.Credential{ID: []byte("rate-limit-credential")}
+	rawCredential, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.auth.adminStore.db.Exec(`INSERT INTO admin_passkeys
+		(id, user_id, name, credential_id, credential_json, rp_id, origin, created_at)
+		VALUES (?, ?, 'key', ?, ?, 'localhost', 'http://localhost', ?)`,
+		generateUUID(), admin.ID, credentialIDString(credential.ID), string(rawCredential), formatTime(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	s.auth.passkeyBeginLimiter = NewRateLimiter(RateLimiterConfig{
+		WindowSize:  time.Minute,
+		MaxRequests: 1,
+	})
+	defer s.auth.passkeyBeginLimiter.Stop()
+
+	begin := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/passkey/begin", nil)
+		req.Header.Set("Origin", "http://localhost")
+		w := httptest.NewRecorder()
+		s.handleAPIPasskeyLoginBegin(w, req)
+		return w
+	}
+	if first := begin(); first.Code != http.StatusOK {
+		t.Fatalf("first passkey begin status = %d body=%s", first.Code, first.Body.String())
+	}
+	second := begin()
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second passkey begin status = %d body=%s", second.Code, second.Body.String())
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Fatal("rate-limited passkey begin should include Retry-After")
+	}
+	var payload apiErrorResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "passkey_begin_rate_limited" {
+		t.Fatalf("rate-limited passkey begin code = %q", payload.Code)
+	}
+	if got := countAdminAuthChallenges(t, s.auth.adminStore); got != 1 {
+		t.Fatalf("rate-limited request created a challenge: count=%d", got)
+	}
+}
+
+func TestStoreAuthChallengeCapsAnonymousPasskeyLoginChallenges(t *testing.T) {
+	s, cleanup := setupTestServerWithDB(t, true)
+	defer cleanup()
+
+	for i := 0; i < adminPasskeyLoginChallengeMaxActive; i++ {
+		if _, err := s.auth.adminStore.StoreAuthChallenge("", adminAuthChallengeKindPasskeyLogin, "{}", nil, time.Minute); err != nil {
+			t.Fatalf("store anonymous passkey challenge %d: %v", i, err)
+		}
+	}
+	if _, err := s.auth.adminStore.StoreAuthChallenge("", adminAuthChallengeKindPasskeyLogin, "{}", nil, time.Minute); !errors.Is(err, errPasskeyLoginChallengeCapacity) {
+		t.Fatalf("challenge above capacity error = %v", err)
+	}
+	if got := countAdminAuthChallenges(t, s.auth.adminStore); got != adminPasskeyLoginChallengeMaxActive {
+		t.Fatalf("anonymous passkey challenge count = %d, want %d", got, adminPasskeyLoginChallengeMaxActive)
 	}
 }
 

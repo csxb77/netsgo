@@ -280,7 +280,8 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 		if s.auth.adminStore != nil {
 			// Best-effort response enrichment only: API key creation already
 			// succeeded, so config read failure should not roll it back.
-			serverAddr = s.auth.adminStore.GetServerConfig().ServerAddr
+			config := s.auth.adminStore.GetServerConfig()
+			serverAddr = resourceServerAddr(&config, config.ServerAddr)
 		}
 
 		// return the full response including the raw key (only visible at creation time!)

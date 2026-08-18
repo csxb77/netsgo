@@ -25,17 +25,20 @@ const (
 	adminAuthChallengeKindPasskeyRegister = "passkey_register"
 	adminAuthChallengeKindPasskeyLogin    = "passkey_login"
 	adminAuthChallengeDefaultTTL          = 5 * time.Minute
+	adminPasskeyLoginBeginRateLimit       = 10
+	adminPasskeyLoginChallengeMaxActive   = 256
 	adminRecoveryCodeCount                = 10
 	adminRecoveryCodeRandomBytes          = 10
 	adminRecoveryCodePrefix               = "ng"
 )
 
 var (
-	errMFARequired      = errors.New("mfa verification required")
-	errMFAInvalid       = errors.New("invalid mfa code")
-	errCurrentPassword  = errors.New("current password is incorrect")
-	errPasskeyNotFound  = errors.New("passkey not found")
-	errPasskeyRPInvalid = errors.New("passkey relying party is unavailable")
+	errMFARequired                   = errors.New("mfa verification required")
+	errMFAInvalid                    = errors.New("invalid mfa code")
+	errCurrentPassword               = errors.New("current password is incorrect")
+	errPasskeyNotFound               = errors.New("passkey not found")
+	errPasskeyRPInvalid              = errors.New("passkey relying party is unavailable")
+	errPasskeyLoginChallengeCapacity = errors.New("passkey login challenge capacity reached")
 )
 
 type adminSecurityCredentialVerification struct {
@@ -500,6 +503,14 @@ func (s *AdminStore) StoreAuthChallenge(userID, kind, sessionJSON string, metada
 	if userID != "" {
 		if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ? AND kind = ?`, userID, kind); err != nil {
 			return AdminAuthChallenge{}, err
+		}
+	} else if kind == adminAuthChallengeKindPasskeyLogin {
+		var active int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM admin_auth_challenges WHERE user_id IS NULL AND kind = ?`, kind).Scan(&active); err != nil {
+			return AdminAuthChallenge{}, err
+		}
+		if active >= adminPasskeyLoginChallengeMaxActive {
+			return AdminAuthChallenge{}, errPasskeyLoginChallengeCapacity
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO admin_auth_challenges (id, user_id, kind, session_json, metadata_json, created_at, expires_at)

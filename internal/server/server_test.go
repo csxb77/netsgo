@@ -423,6 +423,7 @@ func TestAPI_Status_ExtendedFields(t *testing.T) {
 }
 
 func TestAPI_ConsoleSnapshot(t *testing.T) {
+	t.Setenv("NETSGO_SERVER_ADDR", "https://Locked.EXAMPLE.com:443")
 	s, _, ts, cleanup := setupWSTest(t)
 	defer cleanup()
 
@@ -446,8 +447,8 @@ func TestAPI_ConsoleSnapshot(t *testing.T) {
 	if _, ok := bootstrap["version"].(string); !ok {
 		t.Fatalf("bootstrap.version should return a string, got %T", bootstrap["version"])
 	}
-	if _, ok := bootstrap["server_addr"].(string); !ok {
-		t.Fatalf("bootstrap.server_addr should return a string, got %T", bootstrap["server_addr"])
+	if bootstrap["server_addr"] != "https://locked.example.com" {
+		t.Fatalf("bootstrap.server_addr should use the effective env-locked address, got %v", bootstrap["server_addr"])
 	}
 	if ports, ok := bootstrap["allowed_ports"].([]any); !ok || ports == nil {
 		t.Fatalf("bootstrap.allowed_ports should return an array, got %T (%v)", bootstrap["allowed_ports"], bootstrap["allowed_ports"])

@@ -109,7 +109,7 @@ func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
 		return
 	}
-	releaseMutation, err := s.acquireResourceMutation(scope, true)
+	releaseMutation, err := s.acquireResourceTunnelMutation(scope, true)
 	if err != nil {
 		writeResourceLifecycleError(w, err)
 		return
