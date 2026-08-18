@@ -31,6 +31,10 @@ import type {
 type EventStreamQueryClient = QueryClient;
 type JsonObject = Record<string, unknown>;
 
+interface UserListChangedEvent {
+  user_id: string;
+}
+
 export interface EventStreamDiagnostics {
   eventType: string;
   action?: string;
@@ -88,6 +92,10 @@ function isRecord(value: unknown): value is JsonObject {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isUserListChangedEvent(value: unknown): value is UserListChangedEvent {
+  return isRecord(value) && isNonEmptyString(value.user_id);
 }
 
 function isConsoleSummary(value: unknown): value is ConsoleSummary {
@@ -515,6 +523,10 @@ export function applyEventForDiagnostics(
     case 'user_list_changed': {
       if (readScope.kind !== 'admin-global') return;
       void queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      const parsed = parseEventPayload(data, isUserListChangedEvent);
+      void queryClient.invalidateQueries({
+        queryKey: parsed ? ['admin-user', parsed.user_id] : ['admin-user'],
+      });
       return;
     }
     case 'snapshot': {
@@ -721,7 +733,12 @@ export function resolveEventStreamScopes(
   const secondary = primary && sidebarScope && !eventStreamScopesEqual(primary, sidebarScope)
     ? sidebarScope
     : null;
-  return { primary, secondary };
+  const global = isAdmin
+    && pathname.startsWith('/dashboard/users/')
+    && primary?.kind !== 'admin-global'
+    ? { kind: 'admin-global' as const }
+    : null;
+  return { primary, secondary, global };
 }
 
 const ignoreConnectionStatus: (status: ConnectionStatus) => void = () => undefined;
@@ -876,4 +893,5 @@ export function useEventStream() {
 
   useScopedEventStream(queryClient, eventScopes.primary, isAuthenticated, setStatus);
   useScopedEventStream(queryClient, eventScopes.secondary, isAuthenticated, ignoreConnectionStatus);
+  useScopedEventStream(queryClient, eventScopes.global, isAuthenticated, ignoreConnectionStatus);
 }

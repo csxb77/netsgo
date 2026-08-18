@@ -12,6 +12,10 @@ import (
 type ResourceScope struct {
 	OwnerUserID string
 	AdminTarget bool
+	// SessionID is set only for a principal operating on their own resources.
+	// The final mutation gate revalidates it while holding the same lifecycle
+	// lock used by every production session-revocation path.
+	SessionID string
 	// ExpectedEpoch is captured when routing admits the request. Mutations use
 	// it at their final commit boundary so a request authenticated before a
 	// disable/delete cannot publish after that lifecycle transition.
@@ -36,6 +40,7 @@ func (s *Server) requireSelfResourceScope(next http.HandlerFunc) http.HandlerFun
 		if !ok {
 			return
 		}
+		scope.SessionID = principal.SessionID
 		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -73,8 +78,29 @@ func (s *Server) requireAdminSelfResourceScope(next http.HandlerFunc) http.Handl
 		if !ok {
 			return
 		}
+		scope.SessionID = principal.SessionID
 		ctx := context.WithValue(r.Context(), resourceScopeContextKey{}, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// requireAdminSelfSessionMutation serializes security changes that revoke the
+// current administrator's sessions with final self-resource mutation gates.
+func (s *Server) requireAdminSelfSessionMutation(next http.HandlerFunc) http.HandlerFunc {
+	return s.RequireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		principal := GetPrincipalFromContext(r.Context())
+		if principal == nil {
+			writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
+			return
+		}
+		gate := s.lifecycleGate(principal.UserID)
+		if gate == nil {
+			writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
+			return
+		}
+		gate.mu.Lock()
+		defer gate.mu.Unlock()
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -92,6 +118,13 @@ func (s *Server) acquireResourceMutation(scope ResourceScope, requireOperational
 	_, release, err := s.acquireUserLifecycleRead(scope.OwnerUserID, scope.ExpectedEpoch, requireOperational)
 	if err != nil {
 		return func() {}, err
+	}
+	if scope.SessionID != "" {
+		session := s.auth.adminStore.GetSession(scope.SessionID)
+		if session == nil || session.UserID != scope.OwnerUserID {
+			release()
+			return func() {}, ErrResourceSessionRevoked
+		}
 	}
 	return release, nil
 }
@@ -121,6 +154,8 @@ func (s *Server) acquireOwnedTunnelMutation(ownerUserID string, expectedEpoch ui
 
 func writeResourceLifecycleError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, ErrResourceSessionRevoked):
+		writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
 	case errors.Is(err, ErrUserNotFound):
 		writeAPIError(w, http.StatusNotFound, "user_not_found", "user not found")
 	case errors.Is(err, ErrUserDisabled):
@@ -133,7 +168,8 @@ func writeResourceLifecycleError(w http.ResponseWriter, err error) {
 }
 
 func isResourceLifecycleError(err error) bool {
-	return errors.Is(err, ErrUserNotFound) ||
+	return errors.Is(err, ErrResourceSessionRevoked) ||
+		errors.Is(err, ErrUserNotFound) ||
 		errors.Is(err, ErrUserDisabled) ||
 		errors.Is(err, ErrUserLifecycleEpochChanged)
 }

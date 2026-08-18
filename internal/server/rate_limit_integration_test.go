@@ -204,6 +204,44 @@ func TestLogin_RateLimitResetOnSuccess(t *testing.T) {
 	}
 }
 
+func TestLogin_UserSuccessDoesNotResetAnotherIdentityFailures(t *testing.T) {
+	s, cleanup := setupRateLimitedServer(t, RateLimiterConfig{
+		WindowSize:    time.Minute,
+		MaxRequests:   100,
+		MaxFailures:   3,
+		LockoutPeriod: time.Hour,
+	}, RateLimiterConfig{})
+	defer cleanup()
+	if _, err := s.auth.adminStore.CreateUser("member", "Password123"); err != nil {
+		t.Fatal(err)
+	}
+
+	login := func(username, password string) *httptest.ResponseRecorder {
+		body := []byte(`{"username":"` + username + `","password":"` + password + `"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "10.0.0.4:12345"
+		w := httptest.NewRecorder()
+		s.handleAPILogin(w, req)
+		return w
+	}
+
+	for i := 0; i < 2; i++ {
+		if resp := login("admin", "wrong"); resp.Code != http.StatusUnauthorized {
+			t.Fatalf("administrator failure %d status = %d", i+1, resp.Code)
+		}
+	}
+	if resp := login("member", "Password123"); resp.Code != http.StatusOK {
+		t.Fatalf("ordinary user login status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := login("admin", "wrong"); resp.Code != http.StatusUnauthorized {
+		t.Fatalf("third administrator failure status = %d", resp.Code)
+	}
+	if resp := login("admin", "password123"); resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("administrator lockout was reset by another identity: status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 // ============================================================
 // Client authentication rate limiting integration tests
 // ============================================================

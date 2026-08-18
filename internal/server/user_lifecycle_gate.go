@@ -17,6 +17,7 @@ const defaultUserConvergenceTimeout = 10 * time.Second
 var (
 	ErrUserLifecycleEpochChanged = errors.New("user lifecycle epoch changed")
 	ErrUserConvergenceIncomplete = errors.New("user runtime convergence incomplete")
+	ErrResourceSessionRevoked    = errors.New("resource session expired or revoked")
 )
 
 // userLifecycleGate is retained for the lifetime of a Server. Keeping the

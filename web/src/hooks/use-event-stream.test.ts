@@ -210,6 +210,7 @@ describe('event stream scope selection', () => {
     )).toEqual({
       primary: { kind: 'admin-global' },
       secondary: SELF_RESOURCE_SCOPE,
+      global: null,
     });
   });
 
@@ -223,10 +224,11 @@ describe('event stream scope selection', () => {
     )).toEqual({
       primary: { kind: 'admin-user', userId: 'user-b' },
       secondary: SELF_RESOURCE_SCOPE,
+      global: null,
     });
   });
 
-  test('does not duplicate a stream when page and sidebar scopes match', () => {
+  test('adds the global list stream without duplicating the matching target-user stream', () => {
     const targetScope = { kind: 'admin-user' as const, userId: 'user-a' };
     expect(resolveEventStreamScopes(
       targetScope,
@@ -236,6 +238,7 @@ describe('event stream scope selection', () => {
     )).toEqual({
       primary: targetScope,
       secondary: null,
+      global: { kind: 'admin-global' },
     });
   });
 });
@@ -245,8 +248,10 @@ describe('use-event-stream diagnostics', () => {
     const queryClient = new QueryClient();
     const listKey = ['admin-users', 50, null, '', null, null] as const;
     const detailKey = ['admin-user', 'user-a'] as const;
+    const otherDetailKey = ['admin-user', 'user-b'] as const;
     queryClient.setQueryData(listKey, { items: [] });
     queryClient.setQueryData(detailKey, { id: 'user-a' });
+    queryClient.setQueryData(otherDetailKey, { id: 'user-b' });
 
     applyEventForDiagnostics(
       queryClient,
@@ -259,7 +264,27 @@ describe('use-event-stream diagnostics', () => {
     );
 
     expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
-    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherDetailKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('invalidates all administrator user details when a global list-change hint is malformed', () => {
+    const queryClient = new QueryClient();
+    const detailKey = ['admin-user', 'user-a'] as const;
+    queryClient.setQueryData(detailKey, { id: 'user-a' });
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'user_list_changed',
+      '{}',
+      undefined,
+      { kind: 'admin-global' },
+    );
+
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(true);
     queryClient.clear();
   });
 

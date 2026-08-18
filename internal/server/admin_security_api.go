@@ -42,6 +42,13 @@ func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request,
 	}
 	s.adminAuthorizationMu.Lock()
 	defer s.adminAuthorizationMu.Unlock()
+	gate := s.lifecycleGate(user.ID)
+	if gate == nil {
+		writeAPIError(w, http.StatusInternalServerError, "session_persist_failed", "failed to persist session")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	session, activityID, err := s.auth.adminStore.CreateSessionWithActivity(user.ID, user.Username, user.Role, r.RemoteAddr, r.UserAgent(), actor)
 	if errors.Is(err, ErrUserDisabled) {
 		writeAPIError(w, http.StatusUnauthorized, "user_disabled", "user is disabled")

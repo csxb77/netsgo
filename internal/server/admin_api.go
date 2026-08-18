@@ -82,6 +82,15 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONRequestDecodeError(w, err)
 		return
 	}
+	identityLimiterKey := loginIdentityLimiterKey(ip, req.Username)
+	if s.auth.loginLimiter != nil {
+		if allowed, retryAfter := s.auth.loginLimiter.Allow(identityLimiterKey); !allowed {
+			slog.Warn("Login identity rate limited", "ip", ip, "module", "security")
+			s.recordAuthFailure(r, "admin_login_rate_limited", "rate_limited")
+			writeRateLimitResponse(w, retryAfter)
+			return
+		}
+	}
 
 	if s.auth.adminStore == nil {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
@@ -91,7 +100,7 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.auth.adminStore.ValidateUserPassword(req.Username, req.Password)
 	if err != nil {
 		if s.auth.loginLimiter != nil {
-			s.auth.loginLimiter.RecordFailure(ip)
+			s.auth.loginLimiter.RecordFailure(identityLimiterKey)
 		}
 		if errors.Is(err, ErrUserDisabled) {
 			s.recordAuthFailure(r, "admin_login_disabled", "user_disabled")
@@ -105,13 +114,17 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Web user logged in", "user", user.Username, "is_admin", user.IsAdmin, "module", "auth")
 	if s.auth.loginLimiter != nil {
-		s.auth.loginLimiter.ResetFailures(ip)
+		s.auth.loginLimiter.ResetFailures(identityLimiterKey)
 	}
 
 	if s.maybeBeginMFALogin(w, r, user) {
 		return
 	}
 	s.createAdminLoginSession(w, r, *user)
+}
+
+func loginIdentityLimiterKey(ip, username string) string {
+	return "identity\x00" + ip + "\x00" + strings.TrimSpace(username)
 }
 
 func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
@@ -126,8 +139,13 @@ func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.adminAuthorizationMu.Lock()
-	defer s.adminAuthorizationMu.Unlock()
+	gate := s.lifecycleGate(info.UserID)
+	if gate == nil {
+		writeAPIError(w, http.StatusUnauthorized, "session_not_found", "session not found")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	activityID, err := s.auth.adminStore.DeleteSessionWithActivity(info.SessionID, s.activityActorForRequest(r))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "logout_persist_failed", "failed to persist logout")

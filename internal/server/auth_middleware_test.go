@@ -493,6 +493,93 @@ func TestRequireAdminMutationDoesNotBlockRevocationWhileReadingBody(t *testing.T
 	}
 }
 
+func TestSelfResourceMutationRevalidatesAfterConcurrentSessionRevocation(t *testing.T) {
+	store, cleanup := setupMockAdminStore(t)
+	defer cleanup()
+
+	s := New(0)
+	s.auth.adminStore = store
+	user, err := store.CreateUser("slow-body-user", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := mustCreateSession(t, store, user.ID, user.Username, user.Role, "127.0.0.1", "test-client")
+	token, err := s.GenerateAdminToken(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	committed := false
+	req := httptest.NewRequest(http.MethodPut, "/api/keys/key-a/disable", reader)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "test-client")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.requireSelfResourceScope(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]bool
+			if err := decodeJSONRequestBody(r, &body); err != nil {
+				writeJSONRequestDecodeError(w, err)
+				return
+			}
+			scope, ok := requireResourceScope(w, r)
+			if !ok {
+				return
+			}
+			release, err := s.acquireResourceMutation(scope, true)
+			if err != nil {
+				writeResourceLifecycleError(w, err)
+				return
+			}
+			defer release()
+			committed = true
+		}).ServeHTTP(resp, req)
+		close(done)
+	}()
+	if _, err := writer.Write([]byte(`{"value":`)); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked := make(chan error, 1)
+	go func() {
+		gate := s.lifecycleGate(user.ID)
+		gate.mu.Lock()
+		err := store.DeleteSessionsByUserID(user.ID)
+		gate.mu.Unlock()
+		revoked <- err
+	}()
+	select {
+	case err := <-revoked:
+		if err != nil {
+			_ = writer.CloseWithError(err)
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		_ = writer.CloseWithError(errors.New("test timed out"))
+		t.Fatal("session revocation blocked on an incomplete ordinary-user request body")
+	}
+
+	if _, err := writer.Write([]byte(`true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ordinary-user mutation did not finish after its body completed")
+	}
+	if committed {
+		t.Fatal("revoked ordinary-user session reached the mutation commit")
+	}
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusUnauthorized, resp.Body.String())
+	}
+}
+
 func TestAuthMiddleware_SessionEnvironmentMismatchActivityIsUnknownActor(t *testing.T) {
 	store, cleanup := setupMockAdminStore(t)
 	defer cleanup()
