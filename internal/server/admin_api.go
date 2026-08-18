@@ -120,7 +120,7 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 	if s.maybeBeginMFALogin(w, r, user) {
 		return
 	}
-	s.createAdminLoginSession(w, r, *user)
+	s.finishPasswordLogin(w, r, *user, req.Password)
 }
 
 func loginIdentityLimiterKey(ip, username string) string {

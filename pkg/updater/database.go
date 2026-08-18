@@ -40,24 +40,23 @@ func snapshotServerDatabase(units []string, tmpDir string) (*serverDatabaseSnaps
 
 	layout := newServiceLayoutFunc(svcmgr.RoleServer)
 	databasePath := filepath.Join(layout.RuntimeDir, "netsgo.db")
+	snapshot := &serverDatabaseSnapshot{
+		runtimeDir: layout.RuntimeDir,
+		files:      make([]databaseFileSnapshot, 0, len(serverDatabaseSuffixes)),
+	}
 	mainInfo, err := os.Lstat(databasePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("inspect server database: %w", err)
 	}
-	if err := validateDatabaseFile(databasePath, mainInfo); err != nil {
-		return nil, err
+	if err == nil {
+		if err := validateDatabaseFile(databasePath, mainInfo); err != nil {
+			return nil, err
+		}
 	}
 
 	backupDir := filepath.Join(tmpDir, "server-database")
 	if err := os.Mkdir(backupDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create server database snapshot directory: %w", err)
-	}
-	snapshot := &serverDatabaseSnapshot{
-		runtimeDir: layout.RuntimeDir,
-		files:      make([]databaseFileSnapshot, 0, len(serverDatabaseSuffixes)),
 	}
 	for _, suffix := range serverDatabaseSuffixes {
 		targetPath := databasePath + suffix

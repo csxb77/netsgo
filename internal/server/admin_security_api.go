@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+var errLoginCredentialChanged = errors.New("login credential changed")
+
 type authSuccessPayload struct {
 	Token string `json:"token"`
 	User  struct {
@@ -31,7 +33,40 @@ func newAuthSuccessPayload(token string, user AdminUser) authSuccessPayload {
 	return payload
 }
 
-func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request, user AdminUser) {
+func (s *Server) acquireLoginCommit(userID string) (func(), error) {
+	principal := &RequestPrincipal{UserID: userID}
+	s.runAdminAuthorizationHook("before_login_commit", principal)
+	s.adminAuthorizationMu.Lock()
+	gate := s.lifecycleGate(userID)
+	if gate == nil {
+		s.adminAuthorizationMu.Unlock()
+		return func() {}, ErrUserNotFound
+	}
+	gate.mu.Lock()
+	s.runAdminAuthorizationHook("after_login_commit", principal)
+	return func() {
+		gate.mu.Unlock()
+		s.adminAuthorizationMu.Unlock()
+	}, nil
+}
+
+func (s *Server) finishPasswordLogin(w http.ResponseWriter, r *http.Request, validated AdminUser, password string) {
+	release, err := s.acquireLoginCommit(validated.ID)
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, "login_credentials_changed", "login credentials changed; please try again")
+		return
+	}
+	defer release()
+
+	current, err := s.auth.adminStore.ValidateUserPassword(validated.Username, password)
+	if err != nil || current.ID != validated.ID {
+		writeAPIError(w, http.StatusUnauthorized, "login_credentials_changed", "login credentials changed; please try again")
+		return
+	}
+	s.createAdminLoginSessionLocked(w, r, *current)
+}
+
+func (s *Server) createAdminLoginSessionLocked(w http.ResponseWriter, r *http.Request, user AdminUser) {
 	actorType := "user"
 	if user.IsAdmin {
 		actorType = "admin"
@@ -40,15 +75,6 @@ func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request,
 	if raw, secretErr := s.auth.adminStore.GetJWTSecret(); secretErr == nil {
 		actor = NewActivityActor(actorType, user.ID, user.Username, s.clientIP(r), string(raw))
 	}
-	s.adminAuthorizationMu.Lock()
-	defer s.adminAuthorizationMu.Unlock()
-	gate := s.lifecycleGate(user.ID)
-	if gate == nil {
-		writeAPIError(w, http.StatusInternalServerError, "session_persist_failed", "failed to persist session")
-		return
-	}
-	gate.mu.Lock()
-	defer gate.mu.Unlock()
 	session, activityID, err := s.auth.adminStore.CreateSessionWithActivity(user.ID, user.Username, user.Role, r.RemoteAddr, r.UserAgent(), actor)
 	if errors.Is(err, ErrUserDisabled) {
 		writeAPIError(w, http.StatusUnauthorized, "user_disabled", "user is disabled")
@@ -103,6 +129,19 @@ func (s *Server) handleAPIMFAVerify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	release, err := s.acquireLoginCommit(challenge.UserID)
+	if err != nil {
+		s.recordAuthFailure(r, "mfa_failed", "invalid_token")
+		writeAPIError(w, http.StatusUnauthorized, "invalid_mfa_token", "invalid or expired mfa token")
+		return
+	}
+	defer release()
+	challenge, err = s.auth.adminStore.GetAuthChallenge(req.MFAToken, adminAuthChallengeKindMFA)
+	if err != nil {
+		s.recordAuthFailure(r, "mfa_failed", "invalid_token")
+		writeAPIError(w, http.StatusUnauthorized, "invalid_mfa_token", "invalid or expired mfa token")
+		return
+	}
 	user, err := s.auth.adminStore.GetAdminUserByID(challenge.UserID)
 	if err != nil {
 		s.recordAuthFailure(r, "mfa_failed", "invalid_token")
@@ -134,7 +173,7 @@ func (s *Server) handleAPIMFAVerify(w http.ResponseWriter, r *http.Request) {
 	if s.auth.mfaLimiter != nil {
 		s.auth.mfaLimiter.Reset(limiterKey)
 	}
-	s.createAdminLoginSession(w, r, user)
+	s.createAdminLoginSessionLocked(w, r, user)
 }
 
 func (s *Server) mfaAttemptLimiterKey(r *http.Request, userID string) string {
@@ -297,16 +336,76 @@ func (s *Server) handleAPIPasskeyLoginFinish(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	user := waUser.user
+	credentialID := credentialIDString(credential.ID)
+	verifiedPasskey, ok := findLoginPasskey(passkeys, user.ID, credentialID)
+	if !ok {
+		writeAPIError(w, http.StatusUnauthorized, "passkey_login_failed", "passkey credential changed; please try again")
+		s.recordAuthFailure(r, "passkey_login_failed", "credential_changed")
+		return
+	}
+	release, err := s.acquireLoginCommit(user.ID)
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, "passkey_login_failed", "passkey credential changed; please try again")
+		s.recordAuthFailure(r, "passkey_login_failed", "credential_changed")
+		return
+	}
+	defer release()
+	currentUser, err := s.revalidatePasskeyLoginCommit(user, verifiedPasskey, credentialID)
+	if errors.Is(err, errLoginCredentialChanged) {
+		writeAPIError(w, http.StatusUnauthorized, "passkey_login_failed", "passkey credential changed; please try again")
+		s.recordAuthFailure(r, "passkey_login_failed", "credential_changed")
+		return
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "passkey_load_failed", "failed to load passkeys")
+		return
+	}
 	if _, err := s.auth.adminStore.ConsumeAuthChallenge(req.ChallengeID, challenge.UserID, adminAuthChallengeKindPasskeyLogin); err != nil {
 		writeAPIError(w, http.StatusUnauthorized, "invalid_passkey_challenge", "invalid or expired passkey challenge")
 		s.recordAuthFailure(r, "passkey_login_failed", "invalid_challenge")
 		return
 	}
-	if err := s.auth.adminStore.TouchPasskey(user.ID, credentialIDString(credential.ID), *credential); err != nil {
+	if err := s.auth.adminStore.TouchPasskey(user.ID, credentialID, *credential); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "passkey_update_failed", "failed to update passkey")
 		return
 	}
-	s.createAdminLoginSession(w, r, user)
+	s.createAdminLoginSessionLocked(w, r, currentUser)
+}
+
+func findLoginPasskey(passkeys []AdminPasskey, userID, credentialID string) (AdminPasskey, bool) {
+	for _, passkey := range passkeys {
+		if passkey.UserID == userID && constantTimeStringEqual(passkey.CredentialID, credentialID) {
+			return passkey, true
+		}
+	}
+	return AdminPasskey{}, false
+}
+
+func (s *Server) revalidatePasskeyLoginCommit(verifiedUser AdminUser, verifiedPasskey AdminPasskey, credentialID string) (AdminUser, error) {
+	currentUser, err := s.auth.adminStore.GetAdminUserByID(verifiedUser.ID)
+	if err != nil || !sameLoginUserGeneration(currentUser, verifiedUser) {
+		return AdminUser{}, errLoginCredentialChanged
+	}
+	currentPasskeys, err := s.auth.adminStore.ListPasskeys(verifiedUser.ID)
+	if err != nil {
+		return AdminUser{}, err
+	}
+	current, exists := findLoginPasskey(currentPasskeys, verifiedUser.ID, credentialID)
+	if !exists || current.ID != verifiedPasskey.ID {
+		return AdminUser{}, errLoginCredentialChanged
+	}
+	return currentUser, nil
+}
+
+func sameLoginUserGeneration(current, verified AdminUser) bool {
+	return current.ID == verified.ID &&
+		current.Username == verified.Username &&
+		current.Role == verified.Role &&
+		current.Status == verified.Status &&
+		current.UpdatedAt.Equal(verified.UpdatedAt) &&
+		constantTimeStringEqual(current.PasswordHash, verified.PasswordHash) &&
+		current.TOTPEnabled == verified.TOTPEnabled &&
+		constantTimeStringEqual(current.TOTPSecret, verified.TOTPSecret)
 }
 
 func (s *Server) handleAPIAdminSecurity(w http.ResponseWriter, r *http.Request) {

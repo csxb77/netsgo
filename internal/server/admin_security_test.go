@@ -32,6 +32,119 @@ func countAdminPasskeys(t *testing.T, store *AdminStore) int {
 	return count
 }
 
+func TestPasswordLoginRevalidatesAtSessionCommit(t *testing.T) {
+	s, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+	user, err := s.auth.adminStore.CreateUser("stale-password-login", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enteredCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	released := false
+	defer func() {
+		s.adminAuthorizationHook = nil
+		if !released {
+			close(releaseCommit)
+		}
+	}()
+	s.adminAuthorizationHook = func(stage string, principal *RequestPrincipal) {
+		if stage == "before_login_commit" && principal != nil && principal.UserID == user.ID {
+			close(enteredCommit)
+			<-releaseCommit
+		}
+	}
+
+	loginResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		loginResult <- doMuxRequest(t, handler, http.MethodPost, "/api/auth/login", "", []byte(`{"username":"stale-password-login","password":"Password123"}`))
+	}()
+	select {
+	case <-enteredCommit:
+	case <-time.After(time.Second):
+		t.Fatal("password login did not reach its final commit boundary")
+	}
+
+	reset := doMuxRequest(t, handler, http.MethodPut, "/api/admin/users/"+user.ID+"/password", adminToken, []byte(`{"password":"ChangedPassword123"}`))
+	if reset.Code != http.StatusOK {
+		t.Fatalf("password reset status = %d: %s", reset.Code, reset.Body.String())
+	}
+	close(releaseCommit)
+	released = true
+
+	var login *httptest.ResponseRecorder
+	select {
+	case login = <-loginResult:
+	case <-time.After(time.Second):
+		t.Fatal("stale password login did not return")
+	}
+	if login.Code != http.StatusUnauthorized {
+		t.Fatalf("stale password login status = %d, want %d: %s", login.Code, http.StatusUnauthorized, login.Body.String())
+	}
+	var sessions int
+	if err := s.auth.adminStore.db.QueryRow(`SELECT COUNT(*) FROM user_sessions WHERE user_id = ?`, user.ID).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Fatalf("stale password login created %d session(s)", sessions)
+	}
+}
+
+func TestPasskeyLoginCommitRejectsChangedCredentials(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *AdminStore, AdminUser, AdminPasskey)
+	}{
+		{
+			name: "password reset",
+			mutate: func(t *testing.T, store *AdminStore, user AdminUser, _ AdminPasskey) {
+				if _, err := store.ResetUserPassword(user.ID, "ChangedPassword123"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "passkey deleted",
+			mutate: func(t *testing.T, store *AdminStore, user AdminUser, passkey AdminPasskey) {
+				if err := store.DeletePasskey(user.ID, passkey.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, cleanup := setupTestServerWithDB(t, true)
+			defer cleanup()
+			user, err := s.auth.adminStore.ValidateUserPassword("admin", "password123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			passkey := AdminPasskey{
+				ID:           "passkey-login-race",
+				UserID:       user.ID,
+				Name:         "Race key",
+				CredentialID: "credential-login-race",
+				RPID:         "localhost",
+				Origin:       "http://localhost",
+				CreatedAt:    time.Now(),
+			}
+			if _, err := s.auth.adminStore.db.Exec(`INSERT INTO admin_passkeys
+				(id, user_id, name, credential_id, credential_json, rp_id, origin, created_at, last_used_at)
+				VALUES (?, ?, ?, ?, '{}', ?, ?, ?, NULL)`,
+				passkey.ID, passkey.UserID, passkey.Name, passkey.CredentialID, passkey.RPID, passkey.Origin, formatTime(passkey.CreatedAt)); err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(t, s.auth.adminStore, *user, passkey)
+			if _, err := s.revalidatePasskeyLoginCommit(*user, passkey, passkey.CredentialID); !errors.Is(err, errLoginCredentialChanged) {
+				t.Fatalf("changed passkey login credential error = %v, want %v", err, errLoginCredentialChanged)
+			}
+		})
+	}
+}
+
 func countAdminAuthChallenges(t *testing.T, store *AdminStore) int {
 	t.Helper()
 	var count int

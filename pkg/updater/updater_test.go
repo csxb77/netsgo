@@ -28,6 +28,46 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestServerDatabaseSnapshotRestoresInitiallyMissingDatabase(t *testing.T) {
+	originalNewServiceLayout := newServiceLayoutFunc
+	t.Cleanup(func() { newServiceLayoutFunc = originalNewServiceLayout })
+
+	runtimeDir := filepath.Join(t.TempDir(), "server")
+	if err := os.MkdirAll(runtimeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	newServiceLayoutFunc = func(role svcmgr.Role) svcmgr.ServiceLayout {
+		layout := svcmgr.NewLayout(role)
+		layout.RuntimeDir = runtimeDir
+		return layout
+	}
+
+	snapshot, err := snapshotServerDatabase([]string{svcmgr.UnitName(svcmgr.RoleServer)}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == nil || len(snapshot.files) != len(serverDatabaseSuffixes) {
+		t.Fatalf("missing database snapshot = %+v", snapshot)
+	}
+	for _, entry := range snapshot.files {
+		if entry.backupPath != "" {
+			t.Fatalf("initially absent database file has backup path %q", entry.backupPath)
+		}
+		if err := os.WriteFile(entry.targetPath, []byte("created by new version"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := snapshot.restore(); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range snapshot.files {
+		if _, err := os.Lstat(entry.targetPath); !os.IsNotExist(err) {
+			t.Fatalf("upgrade-created database file still exists at %s: %v", entry.targetPath, err)
+		}
+	}
+}
+
 func TestUpgradeRollsBackWhenStartedServicesAreUnhealthy(t *testing.T) {
 	origDisableAndStop := disableAndStopFunc
 	origEnableAndStart := enableAndStartFunc

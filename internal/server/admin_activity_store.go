@@ -284,7 +284,12 @@ func (s *AdminStore) CreateSessionWithActivity(userID, username, role, ip, ua st
 	if err := s.maybeFailSave(); err != nil {
 		return nil, 0, err
 	}
-	activityID, err := s.appendActivityTx(tx, adminActivitySpec("admin_login_succeeded", actor, ActivitySummaryArgs{}))
+	activitySpec := adminActivitySpec("admin_login_succeeded", actor, ActivitySummaryArgs{})
+	activitySpec.SubjectUserID = currentUser.ID
+	if !currentUser.IsAdmin {
+		activitySpec.ScopeUserID = currentUser.ID
+	}
+	activityID, err := s.appendActivityTx(tx, activitySpec)
 	if err != nil {
 		return nil, 0, err
 	}
