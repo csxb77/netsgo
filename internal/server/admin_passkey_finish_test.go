@@ -35,8 +35,8 @@ func TestAPIPasskeyLoginFinishCreatesSessionAndPersistsCounter(t *testing.T) {
 		1:  int64(webauthncose.EllipticKey),
 		3:  int64(webauthncose.AlgES256),
 		-1: int64(webauthncose.P256),
-		-2: privateKey.PublicKey.X.FillBytes(make([]byte, 32)),
-		-3: privateKey.PublicKey.Y.FillBytes(make([]byte, 32)),
+		-2: privateKey.X.FillBytes(make([]byte, 32)),
+		-3: privateKey.Y.FillBytes(make([]byte, 32)),
 	})
 	if err != nil {
 		t.Fatalf("encode passkey public key: %v", err)
