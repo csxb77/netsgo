@@ -35,6 +35,12 @@ func (s *Server) handleUpdateDisplayName(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
 		return
 	}
+	releaseMutation, err := s.acquireResourceMutation(scope, true)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	defer releaseMutation()
 
 	activityID, err := s.auth.adminStore.UpdateClientDisplayNameWithActivity(clientID, req.DisplayName, s.activityActorForRequest(r))
 	if err != nil {
@@ -103,6 +109,12 @@ func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
 		return
 	}
+	releaseMutation, err := s.acquireResourceMutation(scope, true)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	defer releaseMutation()
 
 	activityID, err := s.auth.adminStore.UpdateClientBandwidthSettingsWithActivity(clientID, settings, s.activityActorForRequest(r))
 	if err != nil {
@@ -147,8 +159,12 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
 		return
 	}
-	s.clientTunnelMutationMu.Lock()
-	defer s.clientTunnelMutationMu.Unlock()
+	releaseMutation, err := s.acquireResourceTunnelMutation(scope, false)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	defer releaseMutation()
 	if _, ok := s.clients.Load(clientID); ok {
 		writeAPIError(w, http.StatusConflict, "client_online_delete_forbidden", "client is online or closing and cannot be deleted")
 		return

@@ -126,6 +126,8 @@ func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.adminAuthorizationMu.Lock()
+	defer s.adminAuthorizationMu.Unlock()
 	activityID, err := s.auth.adminStore.DeleteSessionWithActivity(info.SessionID, s.activityActorForRequest(r))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "logout_persist_failed", "failed to persist logout")

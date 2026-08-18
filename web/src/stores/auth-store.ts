@@ -11,6 +11,7 @@ interface AuthState {
   isResolved: boolean;
   setAuth: (user: Principal) => void;
   setUnauthenticated: () => void;
+  setResolutionFailed: () => void;
   setResolving: () => void;
   logout: () => void;
 }
@@ -23,6 +24,7 @@ export const useAuthStore = create<AuthState>()(
       isResolved: false,
       setAuth: (user) => set({ user, isAuthenticated: true, isResolved: true }),
       setUnauthenticated: () => set({ user: null, isAuthenticated: false, isResolved: true }),
+      setResolutionFailed: () => set({ user: null, isAuthenticated: false, isResolved: false }),
       setResolving: () => set({ isResolved: false }),
       logout: () => {
         set({ user: null, isAuthenticated: false, isResolved: true });

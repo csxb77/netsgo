@@ -35,9 +35,11 @@ type Server struct {
 	serverDBCloseErr                    error
 	sseConnectionMu                     sync.Mutex
 	sseConnections                      *sseConnectionRegistry
-	clientTunnelMutationMu              sync.Mutex // serializes registered-client deletion with tunnel target migration
-	userManagementMu                    sync.Mutex // serializes user status/admin/delete transactions and last-admin checks
-	userLifecycleLocks                  sync.Map   // userID -> *userLifecycleGate; entries live for the Server lifetime
+	clientTunnelMutationMu              sync.Mutex   // serializes registered-client deletion with tunnel target migration
+	userManagementMu                    sync.Mutex   // serializes user status/admin/delete transactions and last-admin checks
+	adminAuthorizationMu                sync.RWMutex // serializes privileged commits with role, status, and session changes
+	adminAuthorizationHook              func(stage string, principal *RequestPrincipal)
+	userLifecycleLocks                  sync.Map // userID -> *userLifecycleGate; entries live for the Server lifetime
 	userLifecycleHook                   func(stage, userID string)
 	userConvergenceHook                 func(context.Context, string) error
 	userConvergenceTimeout              time.Duration

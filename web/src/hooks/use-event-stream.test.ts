@@ -10,6 +10,7 @@ import {
   createActivityRecoveryState,
   createEventStreamSnapshotState,
   resolveEventStreamScope,
+  resolveEventStreamScopes,
 } from './use-event-stream';
 
 const selfScope = SELF_RESOURCE_SCOPE;
@@ -198,6 +199,44 @@ describe('event stream scope selection', () => {
   test('does not connect a global stream before entering the authenticated dashboard', () => {
     expect(resolveEventStreamScope(null, true, '/login')).toBeNull();
     expect(resolveEventStreamScope(null, false, '/dashboard/users')).toBeNull();
+  });
+
+  test('keeps a second self stream for an administrator sidebar on global pages', () => {
+    expect(resolveEventStreamScopes(
+      null,
+      SELF_RESOURCE_SCOPE,
+      true,
+      '/dashboard/users',
+    )).toEqual({
+      primary: { kind: 'admin-global' },
+      secondary: SELF_RESOURCE_SCOPE,
+    });
+  });
+
+  test('keeps the self sidebar live while viewing another user activity scope', () => {
+    expect(resolveEventStreamScopes(
+      null,
+      SELF_RESOURCE_SCOPE,
+      true,
+      '/dashboard/activity',
+      'user-b',
+    )).toEqual({
+      primary: { kind: 'admin-user', userId: 'user-b' },
+      secondary: SELF_RESOURCE_SCOPE,
+    });
+  });
+
+  test('does not duplicate a stream when page and sidebar scopes match', () => {
+    const targetScope = { kind: 'admin-user' as const, userId: 'user-a' };
+    expect(resolveEventStreamScopes(
+      targetScope,
+      targetScope,
+      true,
+      '/dashboard/users/user-a',
+    )).toEqual({
+      primary: targetScope,
+      secondary: null,
+    });
   });
 });
 

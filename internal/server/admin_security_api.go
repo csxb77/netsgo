@@ -40,6 +40,8 @@ func (s *Server) createAdminLoginSession(w http.ResponseWriter, r *http.Request,
 	if raw, secretErr := s.auth.adminStore.GetJWTSecret(); secretErr == nil {
 		actor = NewActivityActor(actorType, user.ID, user.Username, s.clientIP(r), string(raw))
 	}
+	s.adminAuthorizationMu.Lock()
+	defer s.adminAuthorizationMu.Unlock()
 	session, activityID, err := s.auth.adminStore.CreateSessionWithActivity(user.ID, user.Username, user.Role, r.RemoteAddr, r.UserAgent(), actor)
 	if errors.Is(err, ErrUserDisabled) {
 		writeAPIError(w, http.StatusUnauthorized, "user_disabled", "user is disabled")
@@ -184,22 +186,12 @@ func (s *Server) handleAPIPasskeyLoginBegin(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusNotFound, "passkey_not_registered", "no passkey is registered for this server address")
 		return
 	}
-	user, err := s.auth.adminStore.GetAdminUserByID(passkeys[0].UserID)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "admin_user_load_failed", "failed to load admin user")
-		return
-	}
-	waUser, err := webAuthnUserFromPasskeys(user, passkeys)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "passkey_load_failed", "failed to load passkeys")
-		return
-	}
 	wa, err := newWebAuthn(ctx)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "passkey_unavailable", err.Error())
 		return
 	}
-	assertion, session, err := wa.BeginLogin(waUser)
+	assertion, session, err := wa.BeginDiscoverableLogin()
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "passkey_begin_failed", err.Error())
 		return
@@ -209,7 +201,11 @@ func (s *Server) handleAPIPasskeyLoginBegin(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusInternalServerError, "passkey_begin_failed", "failed to persist passkey challenge")
 		return
 	}
-	challenge, err := s.auth.adminStore.StoreAuthChallenge(user.ID, adminAuthChallengeKindPasskeyLogin, sessionJSON, ctx, webAuthnChallengeTTL(session))
+	// The challenge table requires an owning user for lifecycle cleanup. This
+	// value is storage metadata only: the discoverable assertion resolves and
+	// verifies the actual user from its user handle at finish time.
+	challengeOwnerID := passkeys[0].UserID
+	challenge, err := s.auth.adminStore.StoreAuthChallenge(challengeOwnerID, adminAuthChallengeKindPasskeyLogin, sessionJSON, ctx, webAuthnChallengeTTL(session))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "passkey_begin_failed", "failed to persist passkey challenge")
 		return
@@ -249,18 +245,7 @@ func (s *Server) handleAPIPasskeyLoginFinish(w http.ResponseWriter, r *http.Requ
 		s.recordAuthFailure(r, "passkey_login_failed", "origin_mismatch")
 		return
 	}
-	user, err := s.auth.adminStore.GetAdminUserByID(challenge.UserID)
-	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "invalid_passkey_challenge", "invalid or expired passkey challenge")
-		s.recordAuthFailure(r, "passkey_login_failed", "invalid_challenge")
-		return
-	}
 	passkeys, err := s.auth.adminStore.ListPasskeysByRP(ctx.RPID, ctx.Origin)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "passkey_load_failed", "failed to load passkeys")
-		return
-	}
-	waUser, err := webAuthnUserFromPasskeys(user, passkeys)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "passkey_load_failed", "failed to load passkeys")
 		return
@@ -281,12 +266,18 @@ func (s *Server) handleAPIPasskeyLoginFinish(w http.ResponseWriter, r *http.Requ
 		s.recordAuthFailure(r, "passkey_login_failed", "invalid_response")
 		return
 	}
-	credential, err := wa.FinishLogin(waUser, session, credentialRequest)
+	verifiedUser, credential, err := wa.FinishPasskeyLogin(s.passkeyLoginUserHandler(passkeys), session, credentialRequest)
 	if err != nil {
 		writeAPIError(w, http.StatusUnauthorized, "passkey_login_failed", err.Error())
 		s.recordAuthFailure(r, "passkey_login_failed", "assertion_failed")
 		return
 	}
+	waUser, ok := verifiedUser.(adminWebAuthnUser)
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "passkey_login_failed", "failed to resolve passkey user")
+		return
+	}
+	user := waUser.user
 	if _, err := s.auth.adminStore.ConsumeAuthChallenge(req.ChallengeID, challenge.UserID, adminAuthChallengeKindPasskeyLogin); err != nil {
 		writeAPIError(w, http.StatusUnauthorized, "invalid_passkey_challenge", "invalid or expired passkey challenge")
 		s.recordAuthFailure(r, "passkey_login_failed", "invalid_challenge")

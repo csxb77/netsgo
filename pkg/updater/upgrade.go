@@ -55,8 +55,16 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 	originalBinary := filepath.Join(tmpDir, filepath.Base(installedBinaryPath)+".backup")
 	backupAvailable := false
 	var envSnapshots []serviceEnvSnapshot
-	defer recoverUpdateOrUpgradeOnPanic(orch, &started, &stopped, &originalBinary, &backupAvailable, &envSnapshots)
+	var databaseSnapshot *serverDatabaseSnapshot
+	defer recoverUpdateOrUpgradeOnPanic(orch, &started, &stopped, &originalBinary, &backupAvailable, &envSnapshots, &databaseSnapshot)
 	stopPhaseArmed = false
+	databaseSnapshot, err = snapshotServerDatabase(units, tmpDir)
+	if err != nil {
+		if rollbackErr := orch.RestartStoppedServices(stopped); rollbackErr != nil {
+			return result, errors.Join(err, rollbackErr)
+		}
+		return result, err
+	}
 
 	if err := replaceBinaryFunc(installedBinaryPath, originalBinary); err != nil {
 		if rollbackErr := orch.RestartStoppedServices(stopped); rollbackErr != nil {
@@ -67,7 +75,7 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 	backupAvailable = true
 	result.BackupPath, err = persistUpgradeBackup(originalBinary, oldVersion)
 	if err != nil {
-		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, nil)
+		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, nil, databaseSnapshot)
 		if rollbackErr != nil {
 			return result, errors.Join(fmt.Errorf("retain backup: %w", err), rollbackErr)
 		}
@@ -76,7 +84,7 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 
 	envSnapshots, err = snapshotServiceEnvFiles(units)
 	if err != nil {
-		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, nil)
+		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, nil, databaseSnapshot)
 		if rollbackErr != nil {
 			return result, errors.Join(err, rollbackErr)
 		}
@@ -84,7 +92,7 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 	}
 
 	if err := replaceBinaryFunc(srcPath, installedBinaryPath); err != nil {
-		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, envSnapshots)
+		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, envSnapshots, databaseSnapshot)
 		if rollbackErr != nil {
 			return result, errors.Join(fmt.Errorf("replace: %w", err), rollbackErr)
 		}
@@ -92,7 +100,7 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 	}
 
 	if err := repairServiceEnvFilesFunc(units); err != nil {
-		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, envSnapshots)
+		rollbackErr := rollbackUpdateOrUpgrade(orch, nil, stopped, originalBinary, true, envSnapshots, databaseSnapshot)
 		if rollbackErr != nil {
 			return result, errors.Join(err, rollbackErr)
 		}
@@ -101,15 +109,15 @@ func Upgrade(srcPath, oldVersion, newVersion string) (*Result, error) {
 
 	err = orch.StartServices(units, &started)
 	if err != nil {
-		rollbackErr := rollbackUpdateOrUpgrade(orch, started, stopped, originalBinary, true, envSnapshots)
+		rollbackErr := rollbackUpdateOrUpgrade(orch, started, stopped, originalBinary, true, envSnapshots, databaseSnapshot)
 		if rollbackErr != nil {
 			return result, errors.Join(err, rollbackErr)
 		}
 		return result, err
 	}
 	if err := verifyStartedServicesFunc(units); err != nil {
-		rollbackErr := rollbackUpdateOrUpgrade(orch, started, stopped, originalBinary, true, envSnapshots)
-		return result, startupHealthFailure(units, result.BackupPath, err, rollbackErr)
+		rollbackErr := rollbackUpdateOrUpgrade(orch, started, stopped, originalBinary, true, envSnapshots, databaseSnapshot)
+		return result, startupHealthFailure(units, result.BackupPath, databaseSnapshot != nil, err, rollbackErr)
 	}
 	result.Started = started
 	return result, nil

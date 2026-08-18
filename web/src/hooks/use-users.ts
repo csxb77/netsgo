@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { type UserListQuery, usersApi } from '@/lib/api';
 import { adminUserResourceScope, removeResourceScope } from '@/lib/resource-scope';
-import type { ManagedUser } from '@/types';
+import type { ManagedUser, UserListResponse } from '@/types';
 
 export const USER_LIST_PAGE_SIZE = 50;
 
@@ -22,6 +22,34 @@ export function useUsers(query: UserListQuery = {}, options: { enabled?: boolean
     queryKey: buildUsersQueryKey(query),
     enabled: options.enabled ?? true,
     queryFn: () => usersApi.list({ limit: USER_LIST_PAGE_SIZE, ...query }),
+    staleTime: 15_000,
+  });
+}
+
+export async function fetchAllUsers(
+  listUsers: (query: UserListQuery) => Promise<UserListResponse> = usersApi.list,
+) {
+  const items: ManagedUser[] = [];
+  let cursor: string | undefined;
+  let hasMore = true;
+  while (hasMore) {
+    const page = await listUsers({ limit: USER_LIST_PAGE_SIZE, cursor });
+    items.push(...page.items);
+    hasMore = page.has_more;
+    if (!hasMore) break;
+    if (!page.next_cursor || page.next_cursor === cursor) {
+      throw new Error('user list pagination did not advance');
+    }
+    cursor = page.next_cursor;
+  }
+  return items;
+}
+
+export function useAllUsers(options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: ['admin-users', 'all'] as const,
+    enabled: options.enabled ?? true,
+    queryFn: () => fetchAllUsers(),
     staleTime: 15_000,
   });
 }

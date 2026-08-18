@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -690,6 +691,100 @@ func TestSelfTunnelCreateCapturedBeforeDisableCannotCommitAfterward(t *testing.T
 	}
 	if len(tunnels) != 0 {
 		t.Fatalf("stale self request persisted tunnels after disable: %+v", tunnels)
+	}
+}
+
+func TestClientMutationsCapturedBeforeDisableCannotCommitAfterward(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   func(string) string
+		body   []byte
+		assert func(*testing.T, RegisteredClient, RegisteredClient, bool)
+	}{
+		{
+			name:   "display name",
+			method: http.MethodPut,
+			path:   func(clientID string) string { return "/api/clients/" + clientID + "/display-name" },
+			body:   []byte(`{"display_name":"renamed"}`),
+			assert: func(t *testing.T, before, after RegisteredClient, exists bool) {
+				t.Helper()
+				if !exists || after.DisplayName != before.DisplayName {
+					t.Fatalf("display-name mutation committed after disable: before=%+v after=%+v exists=%v", before, after, exists)
+				}
+			},
+		},
+		{
+			name:   "bandwidth",
+			method: http.MethodPut,
+			path:   func(clientID string) string { return "/api/clients/" + clientID + "/bandwidth-settings" },
+			body:   []byte(`{"ingress_bps":128,"egress_bps":256}`),
+			assert: func(t *testing.T, before, after RegisteredClient, exists bool) {
+				t.Helper()
+				if !exists || after.IngressBPS != before.IngressBPS || after.EgressBPS != before.EgressBPS {
+					t.Fatalf("bandwidth mutation committed after disable: before=%+v after=%+v exists=%v", before, after, exists)
+				}
+			},
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+			path:   func(clientID string) string { return "/api/clients/" + clientID },
+			assert: func(t *testing.T, _, _ RegisteredClient, exists bool) {
+				t.Helper()
+				if !exists {
+					t.Fatal("client deletion committed after disable")
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
+			defer cleanup()
+			owner, err := s.auth.adminStore.CreateUser("client-mutation-"+strings.ReplaceAll(tc.name, " ", "-"), "Password123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownerToken := loginAdminTokenLocal(t, handler, owner.Username, "Password123")
+			client := createUnifiedAPITestClientForUser(t, s, owner.ID, "client-mutation-"+tc.name, "client-mutation")
+
+			enteredFinalGate := make(chan struct{})
+			releaseFinalGate := make(chan struct{})
+			var readGateCount atomic.Int32
+			s.userLifecycleHook = func(stage, userID string) {
+				if stage == "before_read_gate" && userID == owner.ID && readGateCount.Add(1) == 2 {
+					close(enteredFinalGate)
+					<-releaseFinalGate
+				}
+			}
+
+			responseCh := doMuxRequestAsync(t, handler, tc.method, tc.path(client.ID), ownerToken, tc.body)
+			select {
+			case <-enteredFinalGate:
+			case <-time.After(2 * time.Second):
+				t.Fatal("client mutation did not reach its final lifecycle gate")
+			}
+			disable := doMuxRequest(t, handler, http.MethodPost, "/api/admin/users/"+owner.ID+"/disable", adminToken, nil)
+			if disable.Code != http.StatusOK {
+				t.Fatalf("disable owner status = %d: %s", disable.Code, disable.Body.String())
+			}
+			close(releaseFinalGate)
+
+			var response *httptest.ResponseRecorder
+			select {
+			case response = <-responseCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("stale client mutation did not return")
+			}
+			if response.Code != http.StatusConflict {
+				t.Fatalf("stale client mutation status = %d: %s", response.Code, response.Body.String())
+			}
+			requireUserAPIErrorCode(t, response.Body.Bytes(), "user_lifecycle_changed")
+			after, exists := s.auth.adminStore.GetRegisteredClientForUser(owner.ID, client.ID)
+			tc.assert(t, client, after, exists)
+		})
 	}
 }
 

@@ -152,7 +152,7 @@ func probeServerManagementAPI() error {
 	return nil
 }
 
-func startupHealthFailure(units []string, backupPath string, healthErr, rollbackErr error) error {
+func startupHealthFailure(units []string, backupPath string, databaseRestored bool, healthErr, rollbackErr error) error {
 	journalCommand := journalCommandForUnits(units)
 	guidance := fmt.Sprintf(
 		"旧版本备份保留在 %s；请运行 %q 查看日志；若日志提示 migration 012 存在孤儿安全记录，请先备份 /var/lib/netsgo/server/netsgo.db，检查报错表中不在 admin_users 的 user_id，恢复缺失用户，或只处理已确认归属和处置方式的记录，然后重新升级",
@@ -162,7 +162,11 @@ func startupHealthFailure(units []string, backupPath string, healthErr, rollback
 	if rollbackErr != nil {
 		return fmt.Errorf("新版本服务启动后未通过健康检查，已尝试自动回滚但未完整完成: %w；回滚错误: %v；%s", healthErr, rollbackErr, guidance)
 	}
-	return fmt.Errorf("新版本服务启动后未通过健康检查，已自动恢复旧二进制和服务环境并重启原服务: %w；%s", healthErr, guidance)
+	restored := "旧二进制和服务环境"
+	if databaseRestored {
+		restored = "旧二进制、服务环境和服务端数据库"
+	}
+	return fmt.Errorf("新版本服务启动后未通过健康检查，已自动恢复%s并重启原服务: %w；%s", restored, healthErr, guidance)
 }
 
 func journalCommandForUnits(units []string) string {

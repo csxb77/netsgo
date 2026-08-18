@@ -29,9 +29,9 @@ export async function resolveCurrentPrincipal(force = false): Promise<Principal 
         useAuthStore.getState().setUnauthenticated();
         return null;
       }
-      // A malformed or unavailable session must not leave a persisted identity
-      // marked authenticated.  The next navigation may retry /api/auth/me.
-      useAuthStore.getState().setUnauthenticated();
+      // A transient failure clears the persisted rendering hint but remains
+      // unresolved so the next navigation retries /api/auth/me.
+      useAuthStore.getState().setResolutionFailed();
       return null;
     })
     .finally(() => {

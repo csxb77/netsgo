@@ -1,4 +1,4 @@
-import { createRoute, redirect, useParams, useNavigate } from '@tanstack/react-router';
+import { createRoute, useParams, useNavigate } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { dashboardRoute } from '@/routes/dashboard';
@@ -118,11 +118,6 @@ function SelfClientDetailRoute() {
 export const dashboardClientRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/clients/$clientId',
-  beforeLoad: async () => {
-    const { user } = await requireConsoleAuth();
-    if (user.is_admin) {
-      throw redirect({ to: '/dashboard/users' });
-    }
-  },
+  beforeLoad: requireConsoleAuth,
   component: SelfClientDetailRoute,
 });

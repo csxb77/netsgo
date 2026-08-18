@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -418,6 +419,88 @@ func TestAPI_PasskeyBeginRequiresRegisteredCredential(t *testing.T) {
 	}
 	if payload.Code != "passkey_not_registered" {
 		t.Fatalf("expected passkey_not_registered, got %#v", payload)
+	}
+}
+
+func TestAPI_PasskeyLoginUsesDiscoverableCredentialOwner(t *testing.T) {
+	t.Setenv("NETSGO_SERVER_ADDR", "http://localhost")
+	s, cleanup := setupTestServerWithDB(t, true)
+	defer cleanup()
+
+	initialAdmin, err := s.auth.adminStore.ValidateUserPassword("admin", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAdmin, err := s.auth.adminStore.CreateUser("passkey-admin", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.auth.adminStore.SetUserAdmin(initialAdmin.ID, secondAdmin.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	credentials := []struct {
+		userID     string
+		credential webauthn.Credential
+	}{
+		{userID: initialAdmin.ID, credential: webauthn.Credential{ID: []byte("first-credential")}},
+		{userID: secondAdmin.ID, credential: webauthn.Credential{ID: []byte("second-credential")}},
+	}
+	for _, item := range credentials {
+		raw, err := json.Marshal(item.credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.auth.adminStore.db.Exec(`INSERT INTO admin_passkeys
+			(id, user_id, name, credential_id, credential_json, rp_id, origin, created_at)
+			VALUES (?, ?, ?, ?, ?, 'localhost', 'http://localhost', ?)`,
+			generateUUID(), item.userID, "key", credentialIDString(item.credential.ID), string(raw), formatTime(time.Now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passkey/begin", nil)
+	req.Header.Set("Origin", "http://localhost")
+	w := httptest.NewRecorder()
+	s.handleAPIPasskeyLoginBegin(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("passkey begin status = %d: %s", w.Code, w.Body.String())
+	}
+	var begin struct {
+		ChallengeID string `json:"challenge_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &begin); err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := s.auth.adminStore.GetAuthChallenge(begin.ChallengeID, adminAuthChallengeKindPasskeyLogin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := unmarshalWebAuthnSession(challenge.SessionJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.UserID) != 0 || len(session.AllowedCredentialIDs) != 0 {
+		t.Fatalf("passkey login session must be discoverable, got user=%q allowed=%d", session.UserID, len(session.AllowedCredentialIDs))
+	}
+
+	passkeys, err := s.auth.adminStore.ListPasskeysByRP("localhost", "http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := s.passkeyLoginUserHandler(passkeys)(credentials[1].credential.ID, []byte(secondAdmin.ID))
+	if err != nil {
+		t.Fatalf("resolve second administrator passkey: %v", err)
+	}
+	waUser, ok := resolved.(adminWebAuthnUser)
+	if !ok {
+		t.Fatalf("resolved user type = %T", resolved)
+	}
+	if waUser.user.ID != secondAdmin.ID || len(waUser.credentials) != 1 || credentialIDString(waUser.credentials[0].ID) != credentialIDString(credentials[1].credential.ID) {
+		t.Fatalf("resolved passkey user = %+v credentials=%v", waUser.user, waUser.credentials)
+	}
+	if _, err := s.passkeyLoginUserHandler(passkeys)(credentials[0].credential.ID, []byte(secondAdmin.ID)); err == nil {
+		t.Fatal("second administrator must not authenticate with the first administrator credential")
 	}
 }
 

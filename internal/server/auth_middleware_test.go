@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -320,6 +321,178 @@ func TestAuthMiddleware_ValidTokenSuccess(t *testing.T) {
 		t.Errorf("Handler was not called")
 	}
 }
+
+func TestRequireAdminMutationRevalidatesAfterConcurrentDemotion(t *testing.T) {
+	store, cleanup := setupMockAdminStore(t)
+	defer cleanup()
+
+	s := New(0)
+	s.auth.adminStore = store
+	initialAdmin, err := store.ValidateUserPassword("admin", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAdmin, err := store.CreateUser("second-admin", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.SetUserAdmin(initialAdmin.ID, secondAdmin.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	secondAdmin, err = store.GetUser(secondAdmin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := mustCreateSession(t, store, secondAdmin.ID, secondAdmin.Username, secondAdmin.Role, "127.0.0.1", "test-client")
+	token, err := s.GenerateAdminToken(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	boundaryReached := make(chan struct{})
+	s.adminAuthorizationHook = func(stage string, principal *RequestPrincipal) {
+		if stage == "before_mutation_boundary" && principal.UserID == secondAdmin.ID {
+			close(boundaryReached)
+		}
+	}
+
+	// Hold the final authorization boundary so the request is admitted by
+	// RequirePrincipal first, then revoke its administrator role before it can
+	// enter the privileged handler.
+	s.adminAuthorizationMu.Lock()
+	called := false
+	req := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "test-client")
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.RequireAdmin(func(http.ResponseWriter, *http.Request) {
+			called = true
+		}).ServeHTTP(w, req)
+		close(done)
+	}()
+	select {
+	case <-boundaryReached:
+	case <-time.After(time.Second):
+		s.adminAuthorizationMu.Unlock()
+		t.Fatal("request did not reach the final administrator boundary")
+	}
+	if _, _, err := store.SetUserAdmin(initialAdmin.ID, secondAdmin.ID, false); err != nil {
+		s.adminAuthorizationMu.Unlock()
+		t.Fatal(err)
+	}
+	s.adminAuthorizationMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("request did not finish after demotion")
+	}
+	if called {
+		t.Fatal("demoted administrator reached privileged mutation handler")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestRequireAdminMutationDoesNotBlockRevocationWhileReadingBody(t *testing.T) {
+	store, cleanup := setupMockAdminStore(t)
+	defer cleanup()
+
+	s := New(0)
+	s.auth.adminStore = store
+	initialAdmin, err := store.ValidateUserPassword("admin", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAdmin, err := store.CreateUser("slow-body-admin", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.SetUserAdmin(initialAdmin.ID, secondAdmin.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	secondAdmin, err = store.GetUser(secondAdmin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issueToken := func(user User) string {
+		session := mustCreateSession(t, store, user.ID, user.Username, user.Role, "127.0.0.1", "test-client")
+		token, err := s.GenerateAdminToken(session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	initialToken := issueToken(*initialAdmin)
+	secondToken := issueToken(secondAdmin)
+
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	called := false
+	slowReq := httptest.NewRequest(http.MethodPut, "/slow-config", reader)
+	slowReq.Header.Set("Authorization", "Bearer "+secondToken)
+	slowReq.Header.Set("User-Agent", "test-client")
+	slowResp := httptest.NewRecorder()
+	slowDone := make(chan struct{})
+	go func() {
+		s.RequireAdmin(func(http.ResponseWriter, *http.Request) {
+			called = true
+		}).ServeHTTP(slowResp, slowReq)
+		close(slowDone)
+	}()
+	if _, err := writer.Write([]byte(`{"value":`)); err != nil {
+		t.Fatal(err)
+	}
+
+	demoteResp := httptest.NewRecorder()
+	demoteReq := httptest.NewRequest(http.MethodPut, "/demote", nil)
+	demoteReq.Header.Set("Authorization", "Bearer "+initialToken)
+	demoteReq.Header.Set("User-Agent", "test-client")
+	demoteDone := make(chan struct{})
+	go func() {
+		s.RequireAdmin(func(w http.ResponseWriter, _ *http.Request) {
+			if _, _, err := store.SetUserAdmin(initialAdmin.ID, secondAdmin.ID, false); err != nil {
+				writeAPIError(w, http.StatusInternalServerError, "demote_failed", err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}).ServeHTTP(demoteResp, demoteReq)
+		close(demoteDone)
+	}()
+	select {
+	case <-demoteDone:
+	case <-time.After(time.Second):
+		_ = writer.CloseWithError(errors.New("test timed out"))
+		t.Fatal("administrator revocation blocked on an incomplete request body")
+	}
+	if demoteResp.Code != http.StatusNoContent {
+		_ = writer.CloseWithError(errors.New("demotion failed"))
+		t.Fatalf("demote status = %d: %s", demoteResp.Code, demoteResp.Body.String())
+	}
+	if _, err := writer.Write([]byte(`true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-slowDone:
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not finish after its body completed")
+	}
+	if called {
+		t.Fatal("revoked administrator reached privileged mutation handler")
+	}
+	if slowResp.Code != http.StatusUnauthorized {
+		t.Fatalf("slow request status = %d, want %d: %s", slowResp.Code, http.StatusUnauthorized, slowResp.Body.String())
+	}
+}
+
 func TestAuthMiddleware_SessionEnvironmentMismatchActivityIsUnknownActor(t *testing.T) {
 	store, cleanup := setupMockAdminStore(t)
 	defer cleanup()

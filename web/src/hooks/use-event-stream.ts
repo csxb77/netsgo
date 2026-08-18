@@ -7,7 +7,7 @@ import { useConnectionStore } from '@/stores/connection-store';
 import type { ConnectionStatus } from '@/stores/connection-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { clearClientSessionAndRedirect } from '@/lib/session';
-import { useDashboardResourceScope } from '@/hooks/use-dashboard-scope';
+import { useDashboardResourceScope, useDashboardSidebarScope } from '@/hooks/use-dashboard-scope';
 import { buildClientTrafficQueryKey } from '@/hooks/use-client-traffic';
 import { activityReadScopeKey, prependActivityToMatchingQueries } from '@/hooks/use-activity';
 import { resourceScopeKey, scopedQueryKey, SELF_RESOURCE_SCOPE, type ResourceScope } from '@/lib/resource-scope';
@@ -705,36 +705,33 @@ export function resolveEventStreamScope(
   return { kind: 'admin-global' };
 }
 
-export function useEventStream() {
-  const queryClient = useQueryClient();
-  const setStatus = useConnectionStore((state) => state.setStatus);
-  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
-  const principal = useAuthStore((state) => state.user);
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const selectedActivityUserId = useRouterState({
-    select: (state) => {
-      const value = state.location.search.user_id;
-      return typeof value === 'string' && value.length > 0 ? value : undefined;
-    },
-  });
-  const resourceScope = useDashboardResourceScope();
-  const resourceScopeKind = resourceScope?.kind;
-  const resourceScopeUserId = resourceScope?.kind === 'admin-user' ? resourceScope.userId : undefined;
-  const eventScope = useMemo<ActivityReadScope | null>(() => {
-    const stableResourceScope = resourceScopeKind === 'self'
-      ? SELF_RESOURCE_SCOPE
-      : resourceScopeKind === 'admin-user' && resourceScopeUserId
-        ? { kind: 'admin-user' as const, userId: resourceScopeUserId }
-        : null;
-    return resolveEventStreamScope(
-      stableResourceScope,
-      principal?.is_admin === true,
-      pathname,
-      selectedActivityUserId,
-    );
-  }, [pathname, principal?.is_admin, resourceScopeKind, resourceScopeUserId, selectedActivityUserId]);
-  const shouldConnect = isAuthenticated && eventScope !== null;
+function eventStreamScopesEqual(left: ActivityReadScope, right: ActivityReadScope) {
+  return left.kind === right.kind
+    && (left.kind !== 'admin-user' || (right.kind === 'admin-user' && left.userId === right.userId));
+}
 
+export function resolveEventStreamScopes(
+  resourceScope: ResourceScope | null,
+  sidebarScope: ResourceScope | null,
+  isAdmin: boolean,
+  pathname: string,
+  selectedActivityUserId?: string,
+) {
+  const primary = resolveEventStreamScope(resourceScope, isAdmin, pathname, selectedActivityUserId);
+  const secondary = primary && sidebarScope && !eventStreamScopesEqual(primary, sidebarScope)
+    ? sidebarScope
+    : null;
+  return { primary, secondary };
+}
+
+const ignoreConnectionStatus: (status: ConnectionStatus) => void = () => undefined;
+
+function useScopedEventStream(
+  queryClient: EventStreamQueryClient,
+  eventScope: ActivityReadScope | null,
+  shouldConnect: boolean,
+  setStatus: (status: ConnectionStatus) => void,
+) {
   useEffect(() => {
     if (!shouldConnect || !eventScope) {
       setStatus('disconnected');
@@ -829,4 +826,54 @@ export function useEventStream() {
       setStatus('disconnected');
     };
   }, [queryClient, eventScope, setStatus, shouldConnect]);
+}
+
+export function useEventStream() {
+  const queryClient = useQueryClient();
+  const setStatus = useConnectionStore((state) => state.setStatus);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const principal = useAuthStore((state) => state.user);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const selectedActivityUserId = useRouterState({
+    select: (state) => {
+      const value = state.location.search.user_id;
+      return typeof value === 'string' && value.length > 0 ? value : undefined;
+    },
+  });
+  const resourceScope = useDashboardResourceScope();
+  const sidebarScope = useDashboardSidebarScope();
+  const resourceScopeKind = resourceScope?.kind;
+  const resourceScopeUserId = resourceScope?.kind === 'admin-user' ? resourceScope.userId : undefined;
+  const sidebarScopeKind = sidebarScope?.kind;
+  const sidebarScopeUserId = sidebarScope?.kind === 'admin-user' ? sidebarScope.userId : undefined;
+  const eventScopes = useMemo(() => {
+    const stableResourceScope = resourceScopeKind === 'self'
+      ? SELF_RESOURCE_SCOPE
+      : resourceScopeKind === 'admin-user' && resourceScopeUserId
+        ? { kind: 'admin-user' as const, userId: resourceScopeUserId }
+        : null;
+    const stableSidebarScope = sidebarScopeKind === 'self'
+      ? SELF_RESOURCE_SCOPE
+      : sidebarScopeKind === 'admin-user' && sidebarScopeUserId
+        ? { kind: 'admin-user' as const, userId: sidebarScopeUserId }
+        : null;
+    return resolveEventStreamScopes(
+      stableResourceScope,
+      stableSidebarScope,
+      principal?.is_admin === true,
+      pathname,
+      selectedActivityUserId,
+    );
+  }, [
+    pathname,
+    principal?.is_admin,
+    resourceScopeKind,
+    resourceScopeUserId,
+    selectedActivityUserId,
+    sidebarScopeKind,
+    sidebarScopeUserId,
+  ]);
+
+  useScopedEventStream(queryClient, eventScopes.primary, isAuthenticated, setStatus);
+  useScopedEventStream(queryClient, eventScopes.secondary, isAuthenticated, ignoreConnectionStatus);
 }

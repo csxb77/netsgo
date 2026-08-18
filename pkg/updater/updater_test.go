@@ -51,10 +51,18 @@ func TestUpgradeRollsBackWhenStartedServicesAreUnhealthy(t *testing.T) {
 	tmpDir := t.TempDir()
 	installedPath := filepath.Join(tmpDir, "installed-netsgo")
 	newPath := filepath.Join(tmpDir, "new-netsgo")
+	serverRuntimeDir := filepath.Join(tmpDir, "server")
+	serverDBPath := filepath.Join(serverRuntimeDir, "netsgo.db")
 	if err := os.WriteFile(installedPath, []byte("old binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(newPath, []byte("new binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(serverRuntimeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(serverDBPath, []byte("old database"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	installedBinaryPath = installedPath
@@ -65,12 +73,21 @@ func TestUpgradeRollsBackWhenStartedServicesAreUnhealthy(t *testing.T) {
 	newServiceLayoutFunc = func(role svcmgr.Role) svcmgr.ServiceLayout {
 		layout := svcmgr.NewLayout(role)
 		layout.EnvPath = filepath.Join(tmpDir, string(role)+".env")
+		if role == svcmgr.RoleServer {
+			layout.RuntimeDir = serverRuntimeDir
+		}
 		return layout
 	}
 	repairServiceEnvFilesFunc = func([]string) error { return nil }
 	verifyStartedServicesFunc = func(got []string) error {
 		if fmt.Sprint(got) != fmt.Sprint(units) {
 			t.Fatalf("health check units = %v, want %v", got, units)
+		}
+		if err := os.WriteFile(serverDBPath, []byte("migrated database"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(serverDBPath+"-wal", []byte("new wal"), 0o640); err != nil {
+			t.Fatal(err)
 		}
 		return fmt.Errorf("server exited during startup")
 	}
@@ -101,6 +118,16 @@ func TestUpgradeRollsBackWhenStartedServicesAreUnhealthy(t *testing.T) {
 	}
 	if string(data) != "old binary" {
 		t.Fatalf("expected old binary restored, got %q", data)
+	}
+	databaseData, readErr := os.ReadFile(serverDBPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(databaseData) != "old database" {
+		t.Fatalf("expected old database restored, got %q", databaseData)
+	}
+	if _, statErr := os.Stat(serverDBPath + "-wal"); !os.IsNotExist(statErr) {
+		t.Fatalf("expected upgrade-created WAL to be removed, stat error = %v", statErr)
 	}
 	if len(stopCalls) != 4 || fmt.Sprint(stopCalls[2:]) != fmt.Sprint([]string{units[1], units[0]}) {
 		t.Fatalf("expected started services stopped in reverse order during rollback, got %v", stopCalls)
@@ -704,6 +731,26 @@ func TestUpgradeStopsAlreadyStartedServicesBeforeRollback(t *testing.T) {
 	}
 	if stoppedAgain[2] != "netsgo-server.service" {
 		t.Fatalf("expected already-started service to be stopped during rollback, got %v", stoppedAgain)
+	}
+}
+
+func TestStopStartedServicesAttemptsEveryUnitAfterFailure(t *testing.T) {
+	units := []string{"netsgo-server.service", "netsgo-client.service"}
+	var calls []string
+	orch := &Orchestrator{DisableAndStop: func(unit string) error {
+		calls = append(calls, unit)
+		if unit == units[1] {
+			return fmt.Errorf("client stop failed")
+		}
+		return nil
+	}}
+	err := orch.StopStartedServices(units)
+	if err == nil || !strings.Contains(err.Error(), "client stop failed") {
+		t.Fatalf("StopStartedServices() error = %v", err)
+	}
+	want := []string{units[1], units[0]}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("stop calls = %v, want %v", calls, want)
 	}
 }
 

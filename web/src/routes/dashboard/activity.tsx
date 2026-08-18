@@ -9,7 +9,7 @@ import { dashboardRoute } from '@/routes/dashboard';
 import { requireConsoleAuth } from '@/lib/auth';
 import { adminUserResourceScope, SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
 import { useAuthStore } from '@/stores/auth-store';
-import { useUsers } from '@/hooks/use-users';
+import { useAllUsers } from '@/hooks/use-users';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { ActivityCategory, ActivityScope, ActivitySeverity } from '@/types';
 
@@ -73,7 +73,7 @@ function ActivityPage() {
   const search = dashboardActivityRoute.useSearch();
   const navigate = useNavigate({ from: dashboardActivityRoute.fullPath });
   const isAdmin = principal?.is_admin === true;
-  const users = useUsers({ limit: 50 }, { enabled: isAdmin });
+  const users = useAllUsers({ enabled: isAdmin });
   // A selected user switches to the explicit target-user endpoint and SSE
   // scope.  That prevents a global stream event from being inserted into a
   // user-filtered cache before the browser can establish its ownership.
@@ -145,7 +145,7 @@ function ActivityPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__all__">{t('activity.allUsers')}</SelectItem>
-                    {(users.data?.items ?? []).map((user) => (
+                    {(users.data ?? []).map((user) => (
                       <SelectItem key={user.id} value={user.id}>{user.username}</SelectItem>
                     ))}
                   </SelectContent>

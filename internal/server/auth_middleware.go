@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -152,8 +154,87 @@ func (s *Server) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			writeAPIError(w, http.StatusForbidden, "administrator_access_required", "administrator access required")
 			return
 		}
+
+		if isAdminMutationRequest(r) {
+			if !bufferAdminMutationBody(w, r) {
+				return
+			}
+			s.runAdminAuthorizationHook("before_mutation_boundary", principal)
+			s.adminAuthorizationMu.Lock()
+			defer s.adminAuthorizationMu.Unlock()
+			s.runAdminAuthorizationHook("after_mutation_boundary", principal)
+			if !s.revalidateAdminPrincipal(w, principal) {
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Read-only and streaming handlers only need a current decision at their
+		// boundary. Holding the read lock for an SSE lifetime would prevent the
+		// revocation path that is responsible for closing that stream.
+		s.adminAuthorizationMu.RLock()
+		valid := s.revalidateAdminPrincipal(w, principal)
+		s.adminAuthorizationMu.RUnlock()
+		if !valid {
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func bufferAdminMutationBody(w http.ResponseWriter, r *http.Request) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, passkeyJSONRequestBodyLimitBytes+1))
+	_ = r.Body.Close()
+	if err != nil {
+		writeJSONRequestDecodeError(w, err)
+		return false
+	}
+	if int64(len(body)) > passkeyJSONRequestBodyLimitBytes {
+		writeJSONRequestDecodeError(w, errJSONRequestBodyTooLarge)
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
+}
+
+func isAdminMutationRequest(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *Server) revalidateAdminPrincipal(w http.ResponseWriter, principal *RequestPrincipal) bool {
+	if principal == nil || s.auth == nil || s.auth.adminStore == nil {
+		writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
+		return false
+	}
+	session := s.auth.adminStore.GetSession(principal.SessionID)
+	if session == nil || session.UserID != principal.UserID {
+		writeAPIError(w, http.StatusUnauthorized, "session_expired_or_revoked", "session expired or revoked")
+		return false
+	}
+	if session.Role != "admin" {
+		writeAPIError(w, http.StatusForbidden, "administrator_access_required", "administrator access required")
+		return false
+	}
+	principal.Username = session.Username
+	principal.Role = session.Role
+	principal.IsAdmin = true
+	return true
+}
+
+func (s *Server) runAdminAuthorizationHook(stage string, principal *RequestPrincipal) {
+	if s != nil && s.adminAuthorizationHook != nil {
+		s.adminAuthorizationHook(stage, principal)
+	}
 }
 
 func (s *Server) RequireActivityRead(next http.HandlerFunc) http.HandlerFunc {
