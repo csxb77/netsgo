@@ -91,6 +91,82 @@ func TestPasswordLoginRevalidatesAtSessionCommit(t *testing.T) {
 	}
 }
 
+func TestMFALoginRevalidatesPasswordBeforeChallengeCommit(t *testing.T) {
+	s, handler, adminToken, cleanup := setupTestServerWithStores(t, true)
+	defer cleanup()
+	admin, err := s.auth.adminStore.GetSingleAdminUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.auth.adminStore.CreateUser("stale-mfa-login", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := s.auth.adminStore.SetUserAdmin(admin.ID, user.ID, true); err != nil || !changed {
+		t.Fatalf("promote MFA user = (changed %v, err %v)", changed, err)
+	}
+	if _, err := s.auth.adminStore.db.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, "JBSWY3DPEHPK3PXP", user.ID); err != nil {
+		t.Fatalf("enable TOTP: %v", err)
+	}
+
+	enteredCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	released := false
+	defer func() {
+		s.adminAuthorizationHook = nil
+		if !released {
+			close(releaseCommit)
+		}
+	}()
+	s.adminAuthorizationHook = func(stage string, principal *RequestPrincipal) {
+		if stage == "before_login_commit" && principal != nil && principal.UserID == user.ID {
+			close(enteredCommit)
+			<-releaseCommit
+		}
+	}
+
+	loginResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		loginResult <- doMuxRequest(t, handler, http.MethodPost, "/api/auth/login", "", []byte(`{"username":"stale-mfa-login","password":"Password123"}`))
+	}()
+	select {
+	case <-enteredCommit:
+	case <-time.After(time.Second):
+		t.Fatal("MFA login did not reach its challenge commit boundary")
+	}
+
+	reset := doMuxRequest(t, handler, http.MethodPut, "/api/admin/users/"+user.ID+"/password", adminToken, []byte(`{"password":"ChangedPassword123"}`))
+	if reset.Code != http.StatusOK {
+		t.Fatalf("password reset status = %d: %s", reset.Code, reset.Body.String())
+	}
+	close(releaseCommit)
+	released = true
+
+	var login *httptest.ResponseRecorder
+	select {
+	case login = <-loginResult:
+	case <-time.After(time.Second):
+		t.Fatal("stale MFA login did not return")
+	}
+	if login.Code != http.StatusUnauthorized {
+		t.Fatalf("stale MFA login status = %d, want %d: %s", login.Code, http.StatusUnauthorized, login.Body.String())
+	}
+	var apiErr apiErrorResponse
+	if err := json.Unmarshal(login.Body.Bytes(), &apiErr); err != nil || apiErr.Code != "login_credentials_changed" {
+		t.Fatalf("stale MFA login error = (%+v, %v)", apiErr, err)
+	}
+	var challenges, sessions int
+	if err := s.auth.adminStore.db.QueryRow(`SELECT COUNT(*) FROM admin_auth_challenges WHERE user_id = ? AND kind = ?`, user.ID, adminAuthChallengeKindMFA).Scan(&challenges); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.auth.adminStore.db.QueryRow(`SELECT COUNT(*) FROM user_sessions WHERE user_id = ?`, user.ID).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if challenges != 0 || sessions != 0 {
+		t.Fatalf("stale MFA login persisted challenges=%d sessions=%d", challenges, sessions)
+	}
+}
+
 func TestPasskeyLoginCommitRejectsChangedCredentials(t *testing.T) {
 	tests := []struct {
 		name   string

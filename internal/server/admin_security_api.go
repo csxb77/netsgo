@@ -63,6 +63,10 @@ func (s *Server) finishPasswordLogin(w http.ResponseWriter, r *http.Request, val
 		writeAPIError(w, http.StatusUnauthorized, "login_credentials_changed", "login credentials changed; please try again")
 		return
 	}
+	if current.IsAdmin && current.TOTPEnabled {
+		s.beginMFALoginLocked(w, *current)
+		return
+	}
 	s.createAdminLoginSessionLocked(w, r, *current)
 }
 
@@ -905,14 +909,15 @@ func sanitizePasskey(passkey AdminPasskey) adminPasskeyResponse {
 	}
 }
 
-func (s *Server) maybeBeginMFALogin(w http.ResponseWriter, r *http.Request, user *AdminUser) bool {
-	if user == nil || !user.IsAdmin || !user.TOTPEnabled {
-		return false
-	}
+// beginMFALoginLocked creates the second-factor challenge while the caller
+// holds the user's login commit gate. Password resets are serialized with this
+// insertion, so they either invalidate an existing challenge or force the
+// password revalidation in finishPasswordLogin to fail first.
+func (s *Server) beginMFALoginLocked(w http.ResponseWriter, user AdminUser) {
 	challenge, err := s.auth.adminStore.StoreAuthChallenge(user.ID, adminAuthChallengeKindMFA, "{}", nil, adminAuthChallengeDefaultTTL)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "mfa_challenge_failed", "failed to create mfa challenge")
-		return true
+		return
 	}
 	encodeJSON(w, http.StatusOK, map[string]any{
 		"mfa_required": true,
@@ -923,5 +928,4 @@ func (s *Server) maybeBeginMFALogin(w http.ResponseWriter, r *http.Request, user
 			"role":     user.Role,
 		},
 	})
-	return true
 }

@@ -117,9 +117,6 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		s.auth.loginLimiter.ResetFailures(identityLimiterKey)
 	}
 
-	if s.maybeBeginMFALogin(w, r, user) {
-		return
-	}
 	s.finishPasswordLogin(w, r, *user, req.Password)
 }
 
