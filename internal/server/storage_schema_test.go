@@ -124,7 +124,7 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 		},
 		"admin_auth_challenges": {
 			{name: "id", typ: "TEXT", primaryKey: true},
-			{name: "user_id", typ: "TEXT", notNull: true},
+			{name: "user_id", typ: "TEXT"},
 			{name: "kind", typ: "TEXT", notNull: true},
 			{name: "session_json", typ: "TEXT", notNull: true},
 			{name: "metadata_json", typ: "TEXT", notNull: true, defaultValue: "'{}'"},
@@ -432,6 +432,7 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 		"008_socks5_endpoint_types",
 		"009_tunnel_total_bandwidth",
 		"012_multi_user_ownership",
+		"013_global_passkey_challenges",
 	}
 	if got := appliedMigrationNames(t, db, "schema_migrations"); !reflect.DeepEqual(got, wantStrictMigrationNames) {
 		t.Fatalf("strict applied migrations = %#v, want %#v", got, wantStrictMigrationNames)
@@ -476,6 +477,7 @@ func TestServerMigrationsLoadsEmbeddedFiles(t *testing.T) {
 		"010_client_auth_control",
 		"011_activity_events",
 		"012_multi_user_ownership",
+		"013_global_passkey_challenges",
 	}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("migration names = %#v, want %#v", gotNames, wantNames)
@@ -635,8 +637,8 @@ func TestOpenServerDBSkipsAppliedEmbeddedMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ` + serverCompatibleMigrationTable).Scan(&compatibleCount); err != nil {
 		t.Fatalf("count compatible migrations failed: %v", err)
 	}
-	if strictCount != 10 || compatibleCount != 2 {
-		t.Fatalf("migration counts = strict %d, compatible %d; want 10 and 2", strictCount, compatibleCount)
+	if strictCount != 11 || compatibleCount != 2 {
+		t.Fatalf("migration counts = strict %d, compatible %d; want 11 and 2", strictCount, compatibleCount)
 	}
 }
 
@@ -1337,7 +1339,7 @@ func strictServerMigrationsBeforeMultiUser(t *testing.T) []storage.Migration {
 	_, strict := partitionServerMigrations(migrations)
 	legacyStrict := make([]storage.Migration, 0, len(strict))
 	for _, migration := range strict {
-		if migration.Name != "012_multi_user_ownership" {
+		if migration.Name != "012_multi_user_ownership" && migration.Name != "013_global_passkey_challenges" {
 			legacyStrict = append(legacyStrict, migration)
 		}
 	}
@@ -1352,7 +1354,7 @@ func openServerDBThroughMigration011(t *testing.T, path string) *sql.DB {
 	}
 	legacyMigrations := make([]storage.Migration, 0, len(migrations)-1)
 	for _, migration := range migrations {
-		if migration.Name == "012_multi_user_ownership" {
+		if migration.Name == "012_multi_user_ownership" || migration.Name == "013_global_passkey_challenges" {
 			continue
 		}
 		legacyMigrations = append(legacyMigrations, migration)

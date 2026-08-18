@@ -94,6 +94,7 @@ func TestActivityAPIUserScopeAndSSEFiltering(t *testing.T) {
 	defer cleanup()
 	viewer, viewerToken := issueRoleToken(t, s, "viewer")
 	bob, _ := issueRoleToken(t, s, "bob")
+	_, adminToken := issueRoleToken(t, s, "admin")
 
 	activityReq := httptest.NewRequest(http.MethodGet, "/api/activity", nil)
 	activityReq.Header.Set("Authorization", "Bearer "+viewerToken)
@@ -154,6 +155,13 @@ func TestActivityAPIUserScopeAndSSEFiltering(t *testing.T) {
 	viewerSpec := testActivitySpec("updated", time.Now())
 	viewerSpec.ScopeUserID = viewer.ID
 	viewerSpec.SubjectUserID = viewer.ID
+	viewerSpec.Actor = ActivityActor{
+		Type:     "admin",
+		ID:       "administrator-id",
+		Name:     "administrator",
+		IPHash:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		IPPrefix: "198.51.100.0/24",
+	}
 	viewerEventID, err := s.activityStore.Append(viewerSpec)
 	if err != nil {
 		t.Fatal(err)
@@ -165,6 +173,33 @@ func TestActivityAPIUserScopeAndSSEFiltering(t *testing.T) {
 	}
 	if body := eventsResp.BodyString(); !strings.Contains(body, `event: activity_event`) || !strings.Contains(body, fmt.Sprintf(`"id":%d`, viewerEventID)) {
 		t.Fatalf("viewer SSE missed scoped activity event: %q", body)
+	}
+	if body := eventsResp.BodyString(); strings.Contains(body, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") || strings.Contains(body, "198.51.100.0/24") {
+		t.Fatalf("viewer SSE exposed administrator network identity: %q", body)
+	}
+
+	viewerActivityReq := httptest.NewRequest(http.MethodGet, "/api/activity", nil)
+	viewerActivityReq.Header.Set("Authorization", "Bearer "+viewerToken)
+	viewerActivityReq.Header.Set("User-Agent", "Go-http-client/1.1")
+	viewerActivityResp := httptest.NewRecorder()
+	handler.ServeHTTP(viewerActivityResp, viewerActivityReq)
+	if viewerActivityResp.Code != http.StatusOK {
+		t.Fatalf("viewer activity status = %d, body=%s", viewerActivityResp.Code, viewerActivityResp.Body.String())
+	}
+	if body := viewerActivityResp.Body.String(); strings.Contains(body, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") || strings.Contains(body, "198.51.100.0/24") {
+		t.Fatalf("viewer activity exposed administrator network identity: %q", body)
+	}
+
+	adminActivityReq := httptest.NewRequest(http.MethodGet, "/api/admin/users/"+viewer.ID+"/activity", nil)
+	adminActivityReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminActivityReq.Header.Set("User-Agent", "Go-http-client/1.1")
+	adminActivityResp := httptest.NewRecorder()
+	handler.ServeHTTP(adminActivityResp, adminActivityReq)
+	if adminActivityResp.Code != http.StatusOK {
+		t.Fatalf("administrator target activity status = %d, body=%s", adminActivityResp.Code, adminActivityResp.Body.String())
+	}
+	if body := adminActivityResp.Body.String(); !strings.Contains(body, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") || !strings.Contains(body, "198.51.100.0/24") {
+		t.Fatalf("administrator target activity lost network identity: %q", body)
 	}
 	s.events.PublishScopedJSON("client_online", viewer.ID, map[string]any{"client_id": "viewer-visible"})
 	deadline = time.Now().Add(time.Second)

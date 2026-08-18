@@ -201,11 +201,9 @@ func (s *Server) handleAPIPasskeyLoginBegin(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusInternalServerError, "passkey_begin_failed", "failed to persist passkey challenge")
 		return
 	}
-	// The challenge table requires an owning user for lifecycle cleanup. This
-	// value is storage metadata only: the discoverable assertion resolves and
-	// verifies the actual user from its user handle at finish time.
-	challengeOwnerID := passkeys[0].UserID
-	challenge, err := s.auth.adminStore.StoreAuthChallenge(challengeOwnerID, adminAuthChallengeKindPasskeyLogin, sessionJSON, ctx, webAuthnChallengeTTL(session))
+	// A discoverable assertion does not identify its user until finish time, so
+	// the shared challenge must not inherit any candidate user's lifecycle.
+	challenge, err := s.auth.adminStore.StoreAuthChallenge("", adminAuthChallengeKindPasskeyLogin, sessionJSON, ctx, webAuthnChallengeTTL(session))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "passkey_begin_failed", "failed to persist passkey challenge")
 		return

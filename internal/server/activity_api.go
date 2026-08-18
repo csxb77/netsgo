@@ -56,7 +56,27 @@ func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "activity_query_failed", "failed to query activity")
 		return
 	}
+	if principal := GetPrincipalFromContext(r.Context()); principal != nil && !principal.IsAdmin {
+		redactAdminActivityActorNetworkFromPage(&page)
+	}
 	encodeJSON(w, http.StatusOK, page)
+}
+
+func redactAdminActivityActorNetwork(item *ActivityItem) {
+	if item == nil || item.Actor.Type != "admin" {
+		return
+	}
+	item.Actor.IPHash = ""
+	item.Actor.IPPrefix = ""
+}
+
+func redactAdminActivityActorNetworkFromPage(page *ActivityPage) {
+	if page == nil {
+		return
+	}
+	for index := range page.Items {
+		redactAdminActivityActorNetwork(&page.Items[index])
+	}
 }
 
 func parseActivityQuery(r *http.Request) (ActivityQuery, error) {

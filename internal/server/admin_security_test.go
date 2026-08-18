@@ -476,12 +476,23 @@ func TestAPI_PasskeyLoginUsesDiscoverableCredentialOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if challenge.UserID != "" {
+		t.Fatalf("discoverable login challenge owner = %q, want no candidate user", challenge.UserID)
+	}
 	session, err := unmarshalWebAuthnSession(challenge.SessionJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(session.UserID) != 0 || len(session.AllowedCredentialIDs) != 0 {
 		t.Fatalf("passkey login session must be discoverable, got user=%q allowed=%d", session.UserID, len(session.AllowedCredentialIDs))
+	}
+	if _, changed, err := s.auth.adminStore.SetUserAdmin(secondAdmin.ID, initialAdmin.ID, false); err != nil {
+		t.Fatalf("demote unrelated challenge candidate: %v", err)
+	} else if !changed {
+		t.Fatal("expected unrelated challenge candidate to be demoted")
+	}
+	if _, err := s.auth.adminStore.GetAuthChallenge(begin.ChallengeID, adminAuthChallengeKindPasskeyLogin); err != nil {
+		t.Fatalf("discoverable login challenge followed unrelated user lifecycle: %v", err)
 	}
 
 	passkeys, err := s.auth.adminStore.ListPasskeysByRP("localhost", "http://localhost")

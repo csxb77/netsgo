@@ -455,6 +455,9 @@ func consumeRecoveryCodeInTx(tx *sql.Tx, userID, code string) (matched bool, err
 }
 
 func (s *AdminStore) StoreAuthChallenge(userID, kind, sessionJSON string, metadata any, ttl time.Duration) (AdminAuthChallenge, error) {
+	if userID == "" && kind != adminAuthChallengeKindPasskeyLogin {
+		return AdminAuthChallenge{}, errors.New("authentication challenge user is required")
+	}
 	if ttl <= 0 {
 		ttl = adminAuthChallengeDefaultTTL
 	}
@@ -491,12 +494,17 @@ func (s *AdminStore) StoreAuthChallenge(userID, kind, sessionJSON string, metada
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ? AND kind = ?`, userID, kind); err != nil {
+	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE expires_at <= ?`, formatTime(now)); err != nil {
 		return AdminAuthChallenge{}, err
+	}
+	if userID != "" {
+		if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ? AND kind = ?`, userID, kind); err != nil {
+			return AdminAuthChallenge{}, err
+		}
 	}
 	if _, err := tx.Exec(`INSERT INTO admin_auth_challenges (id, user_id, kind, session_json, metadata_json, created_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		challenge.ID, challenge.UserID, challenge.Kind, challenge.SessionJSON, challenge.MetadataJSON, formatTime(challenge.CreatedAt), formatTime(challenge.ExpiresAt)); err != nil {
+		challenge.ID, nullIfEmpty(challenge.UserID), challenge.Kind, challenge.SessionJSON, challenge.MetadataJSON, formatTime(challenge.CreatedAt), formatTime(challenge.ExpiresAt)); err != nil {
 		return AdminAuthChallenge{}, err
 	}
 	if err := s.maybeFailSave(); err != nil {
@@ -562,10 +570,12 @@ func (s *AdminStore) GetAuthChallenge(id, kind string) (AdminAuthChallenge, erro
 
 func scanAdminAuthChallenge(row dbScanner) (AdminAuthChallenge, error) {
 	var challenge AdminAuthChallenge
+	var userID sql.NullString
 	var createdAt, expiresAt string
-	if err := row.Scan(&challenge.ID, &challenge.UserID, &challenge.Kind, &challenge.SessionJSON, &challenge.MetadataJSON, &createdAt, &expiresAt); err != nil {
+	if err := row.Scan(&challenge.ID, &userID, &challenge.Kind, &challenge.SessionJSON, &challenge.MetadataJSON, &createdAt, &expiresAt); err != nil {
 		return AdminAuthChallenge{}, err
 	}
+	challenge.UserID = userID.String
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
 		return AdminAuthChallenge{}, err

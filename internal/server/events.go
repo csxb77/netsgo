@@ -259,7 +259,22 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !scope.allows(event) {
 				continue
 			}
-			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, event.Data); err != nil {
+			eventData := event.Data
+			if principal != nil && !principal.IsAdmin && event.Type == "activity_event" {
+				var item ActivityItem
+				if err := json.Unmarshal([]byte(eventData), &item); err != nil {
+					log.Printf("⚠️ Refusing to send malformed activity SSE event: %v", err)
+					continue
+				}
+				redactAdminActivityActorNetwork(&item)
+				raw, err := json.Marshal(item)
+				if err != nil {
+					log.Printf("⚠️ Failed to redact activity SSE event: %v", err)
+					continue
+				}
+				eventData = string(raw)
+			}
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, eventData); err != nil {
 				log.Printf("⚠️ Failed to write SSE event: %v", err)
 				return
 			}

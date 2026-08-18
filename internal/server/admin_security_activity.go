@@ -35,7 +35,8 @@ func (s *AdminStore) UpdateAdminUsernameWithActivity(userID, username string, ac
 		}
 		return 0, nil
 	}
-	if _, err := tx.Exec(`UPDATE users SET username = ? WHERE id = ?`, username, userID); err != nil {
+	now := time.Now()
+	if _, err := tx.Exec(`UPDATE users SET username = ?, updated_at = ? WHERE id = ?`, username, formatTime(now), userID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
@@ -83,7 +84,8 @@ func (s *AdminStore) UpdateAdminPasswordWithActivity(userID, currentPassword, ne
 	if currentPassword != "" && bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)) != nil {
 		return 0, errCurrentPassword
 	}
-	if _, err := tx.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, string(hash), userID); err != nil {
+	now := time.Now()
+	if _, err := tx.Exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, string(hash), formatTime(now), userID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
@@ -145,7 +147,8 @@ func (s *AdminStore) ConfirmTOTPSetupWithActivity(userID, challengeID, code stri
 		}
 		return nil, 0, sql.ErrNoRows
 	}
-	if _, err := tx.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ? WHERE id = ?`, metadata.Secret, userID); err != nil {
+	now := time.Now()
+	if _, err := tx.Exec(`UPDATE users SET totp_enabled = 1, totp_secret = ?, updated_at = ? WHERE id = ?`, metadata.Secret, formatTime(now), userID); err != nil {
 		return nil, 0, err
 	}
 	if err := replaceRecoveryCodesInTx(tx, userID, codes); err != nil {
@@ -172,7 +175,7 @@ func (s *AdminStore) ConfirmTOTPSetupWithActivity(userID, challengeID, code stri
 
 func (s *AdminStore) DisableTOTPWithActivity(userID string, actor ActivityActor) (int64, error) {
 	return s.securitySimpleActivity(userID, "totp_disabled", actor, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`UPDATE users SET totp_enabled = 0, totp_secret = '' WHERE id = ?`, userID); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET totp_enabled = 0, totp_secret = '', updated_at = ? WHERE id = ?`, formatTime(time.Now()), userID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM admin_totp_recovery_codes WHERE user_id = ?`, userID); err != nil {
