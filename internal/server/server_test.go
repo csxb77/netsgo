@@ -81,7 +81,11 @@ func initTestAdminStore(t *testing.T, s *Server) {
 func issueAdminToken(t *testing.T, s *Server) string {
 	t.Helper()
 
-	session := mustCreateSession(t, s.auth.adminStore, "user-1", "admin", "admin", "127.0.0.1", "Go-http-client/1.1")
+	user, err := s.auth.adminStore.ValidateAdminPassword("admin", "password123")
+	if err != nil {
+		t.Fatalf("load test administrator: %v", err)
+	}
+	session := mustCreateSession(t, s.auth.adminStore, user.ID, user.Username, user.Role, "127.0.0.1", "Go-http-client/1.1")
 	token, err := s.GenerateAdminToken(session)
 	if err != nil {
 		t.Fatalf("failed to generate admin token: %v", err)
@@ -94,6 +98,49 @@ func testReadTimeout(base time.Duration) time.Duration {
 		return base * 3
 	}
 	return base
+}
+
+func waitForLiveTestClient(t *testing.T, s *Server, clientID string) *ClientConn {
+	t.Helper()
+	deadline := time.NewTimer(testReadTimeout(5 * time.Second))
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if value, ok := s.clients.Load(clientID); ok {
+			client := value.(*ClientConn)
+			if client.isLive() {
+				return client
+			}
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for client %s to become live", clientID)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForTestClientStats(t *testing.T, s *Server, clientID string, wantCPU float64) *protocol.SystemStats {
+	t.Helper()
+	deadline := time.NewTimer(testReadTimeout(5 * time.Second))
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if value, ok := s.clients.Load(clientID); ok {
+			if stats := value.(*ClientConn).GetStats(); stats != nil && stats.CPUUsage == wantCPU {
+				return stats
+			}
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for client %s stats with CPU usage %.1f", clientID, wantCPU)
+		case <-ticker.C:
+		}
+	}
 }
 
 // doAuth completes authentication and returns the response
@@ -158,10 +205,11 @@ func TestControlAuthAcceptsNinetyDayInactiveTokenAfterUpgrade(t *testing.T) {
 	defer cleanup()
 
 	const installID = "install-upgrade-token"
-	token, _, err := s.auth.adminStore.ExchangeToken("test-key", installID, "client-upgrade-token", "192.0.2.10:4321")
+	exchange, err := s.auth.adminStore.RegisterClientAndExchangeToken("test-key", installID, protocol.ClientInfo{Hostname: "upgrade-host"}, "192.0.2.10:4321")
 	if err != nil {
 		t.Fatalf("exchange token: %v", err)
 	}
+	token := exchange.Token
 	ageClientTokenByInstallID(t, s.auth.adminStore, installID, 90*24*time.Hour)
 	if err := s.auth.adminStore.CleanExpiredTokens(); err != nil {
 		t.Fatalf("startup token cleanup: %v", err)
@@ -179,7 +227,7 @@ func TestControlAuthAcceptsNinetyDayInactiveTokenAfterUpgrade(t *testing.T) {
 	if !authResp.Success || authResp.Code != protocol.AuthCodeOK {
 		t.Fatalf("90-day token auth response = %+v", authResp)
 	}
-	if authResp.ClientID != "client-upgrade-token" {
+	if authResp.ClientID != exchange.Client.ID {
 		t.Fatalf("authenticated client ID = %q", authResp.ClientID)
 	}
 	if authResp.Token != "" {
@@ -375,6 +423,7 @@ func TestAPI_Status_ExtendedFields(t *testing.T) {
 }
 
 func TestAPI_ConsoleSnapshot(t *testing.T) {
+	t.Setenv("NETSGO_SERVER_ADDR", "https://Locked.EXAMPLE.com:443")
 	s, _, ts, cleanup := setupWSTest(t)
 	defer cleanup()
 
@@ -388,12 +437,21 @@ func TestAPI_ConsoleSnapshot(t *testing.T) {
 		t.Fatalf("initial clients should be empty, got %d", len(clients))
 	}
 
-	serverStatus, ok := result["server_status"].(map[string]any)
+	bootstrap, ok := result["bootstrap"].(map[string]any)
 	if !ok {
-		t.Fatalf("server_status should return an object, got %T", result["server_status"])
+		t.Fatalf("bootstrap should return an object, got %T", result["bootstrap"])
 	}
-	if serverStatus["status"] != "running" {
-		t.Fatalf("server_status.status: want running, got %v", serverStatus["status"])
+	if _, exists := result["server_status"]; exists {
+		t.Fatal("server_status should not be exposed by console snapshot")
+	}
+	if _, ok := bootstrap["version"].(string); !ok {
+		t.Fatalf("bootstrap.version should return a string, got %T", bootstrap["version"])
+	}
+	if bootstrap["server_addr"] != "https://locked.example.com" {
+		t.Fatalf("bootstrap.server_addr should use the effective env-locked address, got %v", bootstrap["server_addr"])
+	}
+	if ports, ok := bootstrap["allowed_ports"].([]any); !ok || ports == nil {
+		t.Fatalf("bootstrap.allowed_ports should return an array, got %T (%v)", bootstrap["allowed_ports"], bootstrap["allowed_ports"])
 	}
 
 	generatedAt, ok := result["generated_at"].(string)
@@ -410,7 +468,11 @@ func TestAPI_ConsoleSummaryContractAlignsAcrossStatusAndSnapshot(t *testing.T) {
 	s, conn, ts, cleanup := setupWSTest(t)
 	defer cleanup()
 
-	s.store = newTestTunnelStore(t)
+	var err error
+	s.store, err = newTunnelStoreWithDB(s.auth.adminStore.path, s.auth.adminStore.db, false)
+	if err != nil {
+		t.Fatalf("create shared TunnelStore: %v", err)
+	}
 
 	offlineInfo := protocol.ClientInfo{
 		Hostname: "offline-summary-host",
@@ -427,15 +489,15 @@ func TestAPI_ConsoleSummaryContractAlignsAcrossStatusAndSnapshot(t *testing.T) {
 	seedStoredTunnel(t, s, offlineRecord.ID, protocol.ProxyNewRequest{Name: "offline-stopped", Type: protocol.ProxyTypeTCP, RemotePort: 20003}, protocol.ProxyStatusStopped)
 
 	authResp := doAuthWithInstallID(t, conn, "online-summary-host", "install-online-summary-host", "test-key")
-	dataConn := connectDataWSForClient(t, ts, authResp)
-	defer mustClose(t, dataConn)
-	time.Sleep(50 * time.Millisecond)
-
 	val, ok := s.clients.Load(authResp.ClientID)
 	if !ok {
 		t.Fatalf("online client %s not found", authResp.ClientID)
 	}
 	client := val.(*ClientConn)
+	_, serverSession := newTestClientRelayDataSession(t)
+	if _, promoted, attached := s.attachDataSessionIfCurrent(client, serverSession); !attached || !promoted {
+		t.Fatalf("failed to attach live data session for client %s: attached=%v promoted=%v", authResp.ClientID, attached, promoted)
+	}
 	seedStoredTunnel(t, s, authResp.ClientID, protocol.ProxyNewRequest{Name: "active", Type: protocol.ProxyTypeHTTP, Domain: "active.example.com"}, protocol.ProxyStatusActive)
 	seedStoredTunnel(t, s, authResp.ClientID, protocol.ProxyNewRequest{Name: "pending", Type: protocol.ProxyTypeTCP, RemotePort: 20004}, protocol.ProxyStatusPending)
 	seedStoredTunnel(t, s, authResp.ClientID, protocol.ProxyNewRequest{Name: "error", Type: protocol.ProxyTypeTCP, RemotePort: 20005}, protocol.ProxyStatusActive)
@@ -476,12 +538,6 @@ func TestAPI_ConsoleSummaryContractAlignsAcrossStatusAndSnapshot(t *testing.T) {
 
 	snapshot := getAPIJSON(t, s, ts, "/api/console/snapshot")
 	assertConsoleSummaryMap(t, snapshot["summary"], expected)
-
-	serverStatus, ok := snapshot["server_status"].(map[string]any)
-	if !ok {
-		t.Fatalf("snapshot.server_status should return an object, got %T", snapshot["server_status"])
-	}
-	assertConsoleSummaryMap(t, serverStatus["summary"], expected)
 }
 
 func TestAPI_Status_TunnelCounts(t *testing.T) {
@@ -566,7 +622,7 @@ func TestAPI_Status_AfterDisconnect(t *testing.T) {
 
 func TestAPI_Clients_Empty(t *testing.T) {
 	s := New(8080)
-	req := httptest.NewRequest(http.MethodGet, "/api/clients", nil)
+	req := withTestResourceScope(httptest.NewRequest(http.MethodGet, "/api/clients", nil), "test-owner")
 	w := httptest.NewRecorder()
 	s.handleAPIClients(w, req)
 
@@ -620,15 +676,16 @@ func TestAPI_Clients_WithStats(t *testing.T) {
 	s, _, ts, cleanup := setupWSTest(t)
 	defer cleanup()
 
-	conn1, _ := connectAndAuth(t, ts, "stats-host")
+	conn1, authResp := connectAndAuth(t, ts, "stats-host")
 	defer mustClose(t, conn1)
+	waitForLiveTestClient(t, s, authResp.ClientID)
 
 	stats := protocol.SystemStats{CPUUsage: 55.5, MemUsage: 70.0, NumCPU: 8}
 	msg, _ := protocol.NewMessage(protocol.MsgTypeProbeReport, stats)
 	if err := conn1.WriteJSON(msg); err != nil {
 		t.Fatalf("WriteJSON failed: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	waitForTestClientStats(t, s, authResp.ClientID, stats.CPUUsage)
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/clients", nil)
 	req.Header.Set("Authorization", "Bearer "+issueAdminToken(t, s))
@@ -889,7 +946,11 @@ func TestAPI_Clients_OfflineLegacyErrorTunnelProjectsOfflineFromLiveFacts(t *tes
 func TestAPI_Clients_LiveTunnelUsesDesiredAndRuntimeStates(t *testing.T) {
 	s, ts, cleanup := setupWSTestNoConn(t)
 	defer cleanup()
-	s.store = newTestTunnelStore(t)
+	var err error
+	s.store, err = newTunnelStoreWithDB(s.auth.adminStore.path, s.auth.adminStore.db, false)
+	if err != nil {
+		t.Fatalf("create shared TunnelStore: %v", err)
+	}
 
 	wsConn, authResp := connectAndAuth(t, ts, "live-state-host")
 	defer mustClose(t, wsConn)
@@ -967,6 +1028,7 @@ func TestAPI_Clients_LiveTunnelUsesDesiredAndRuntimeStates(t *testing.T) {
 
 func TestEmitTunnelChanged_NormalizesDesiredAndRuntimeStates(t *testing.T) {
 	s := New(0)
+	s.clients.Store("client-1", &ClientConn{ID: "client-1", OwnerUserID: "user-1"})
 	ch := s.events.Subscribe()
 	defer s.events.Unsubscribe(ch)
 
@@ -1006,28 +1068,23 @@ func TestAPI_Clients_StatsUpdated(t *testing.T) {
 
 	conn1, authResp := connectAndAuth(t, ts, "update-host")
 	defer mustClose(t, conn1)
+	waitForLiveTestClient(t, s, authResp.ClientID)
 
 	stats1 := protocol.SystemStats{CPUUsage: 20.0}
 	msg1, _ := protocol.NewMessage(protocol.MsgTypeProbeReport, stats1)
 	if err := conn1.WriteJSON(msg1); err != nil {
 		t.Fatalf("WriteJSON failed: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitForTestClientStats(t, s, authResp.ClientID, stats1.CPUUsage)
 
 	stats2 := protocol.SystemStats{CPUUsage: 80.0}
 	msg2, _ := protocol.NewMessage(protocol.MsgTypeProbeReport, stats2)
 	if err := conn1.WriteJSON(msg2); err != nil {
 		t.Fatalf("WriteJSON failed: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
-
-	val, ok := s.clients.Load(authResp.ClientID)
-	if !ok {
-		t.Fatal("client not found")
-	}
-	client := val.(*ClientConn)
-	if client.GetStats().CPUUsage != 80.0 {
-		t.Errorf("Stats should be updated to the latest value 80.0, got %f", client.GetStats().CPUUsage)
+	gotStats := waitForTestClientStats(t, s, authResp.ClientID, stats2.CPUUsage)
+	if gotStats.CPUUsage != 80.0 {
+		t.Errorf("Stats should be updated to the latest value 80.0, got %f", gotStats.CPUUsage)
 	}
 }
 
@@ -1639,6 +1696,7 @@ func TestProbe_SingleReport(t *testing.T) {
 	authResp := doAuth(t, conn)
 	dataConn := connectDataWSForClient(t, ts, authResp)
 	defer mustClose(t, dataConn)
+	waitForLiveTestClient(t, s, authResp.ClientID)
 
 	stats := protocol.SystemStats{
 		CPUUsage: 42.5,
@@ -1652,25 +1710,15 @@ func TestProbe_SingleReport(t *testing.T) {
 		t.Fatalf("WriteJSON failed: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-
-	val, ok := s.clients.Load(authResp.ClientID)
-	if !ok {
-		t.Fatal("client is not registered")
+	gotStats := waitForTestClientStats(t, s, authResp.ClientID, stats.CPUUsage)
+	if gotStats.CPUUsage != 42.5 {
+		t.Errorf("CPUUsage: want 42.5, got %f", gotStats.CPUUsage)
 	}
-	client := val.(*ClientConn)
-	if client.GetStats() == nil {
-		t.Fatal("Stats should not be nil")
-		return
+	if gotStats.MemUsage != 60.0 {
+		t.Errorf("MemUsage: want 60.0, got %f", gotStats.MemUsage)
 	}
-	if client.GetStats().CPUUsage != 42.5 {
-		t.Errorf("CPUUsage: want 42.5, got %f", client.GetStats().CPUUsage)
-	}
-	if client.GetStats().MemUsage != 60.0 {
-		t.Errorf("MemUsage: want 60.0, got %f", client.GetStats().MemUsage)
-	}
-	if client.GetStats().NumCPU != 4 {
-		t.Errorf("NumCPU: want 4, got %d", client.GetStats().NumCPU)
+	if gotStats.NumCPU != 4 {
+		t.Errorf("NumCPU: want 4, got %d", gotStats.NumCPU)
 	}
 }
 
@@ -1681,6 +1729,8 @@ func TestProbe_ReportPersistedAfterDisconnect(t *testing.T) {
 	authResp := doAuth(t, conn)
 	dataConn := connectDataWSForClient(t, ts, authResp)
 	defer mustClose(t, dataConn)
+	waitForLiveTestClient(t, s, authResp.ClientID)
+	waitForLiveTestClient(t, s, authResp.ClientID)
 
 	stats := protocol.SystemStats{
 		CPUUsage: 42.5,
@@ -1692,9 +1742,30 @@ func TestProbe_ReportPersistedAfterDisconnect(t *testing.T) {
 		t.Fatalf("failed to send probe data: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	probeDeadline := time.Now().Add(testReadTimeout(5 * time.Second))
+	probePersisted := false
+	for time.Now().Before(probeDeadline) {
+		registered, ok := s.auth.adminStore.GetRegisteredClient(authResp.ClientID)
+		if ok && registered.Stats != nil && registered.Stats.CPUUsage == stats.CPUUsage {
+			probePersisted = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !probePersisted {
+		t.Fatal("probe report was not persisted before the deadline")
+	}
 	_ = conn.Close()
-	time.Sleep(100 * time.Millisecond)
+	disconnectDeadline := time.Now().Add(testReadTimeout(5 * time.Second))
+	for time.Now().Before(disconnectDeadline) {
+		if _, online := s.clients.Load(authResp.ClientID); !online {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, online := s.clients.Load(authResp.ClientID); online {
+		t.Fatal("client remained published after the disconnect deadline")
+	}
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/clients", nil)
 	req.Header.Set("Authorization", "Bearer "+issueAdminToken(t, s))
@@ -1819,12 +1890,14 @@ func TestAPI_Clients_ExposeTopLevelBandwidthFields(t *testing.T) {
 		t.Fatalf("failed to create live client record: %v", err)
 	}
 	liveClient := &ClientConn{
-		ID:         liveRecord.ID,
-		Info:       liveInfo,
-		RemoteAddr: "127.0.0.1:10002",
-		proxies:    make(map[string]*ProxyTunnel),
-		generation: 1,
-		state:      clientStateLive,
+		ID:          liveRecord.ID,
+		OwnerUserID: liveRecord.OwnerUserID,
+		OwnerEpoch:  1,
+		Info:        liveInfo,
+		RemoteAddr:  "127.0.0.1:10002",
+		proxies:     make(map[string]*ProxyTunnel),
+		generation:  1,
+		state:       clientStateLive,
 	}
 	if err := liveClient.SetBandwidthSettings(protocol.BandwidthSettings{IngressBPS: 1024, EgressBPS: 2048}); err != nil {
 		t.Fatalf("failed to set live client bandwidth: %v", err)
@@ -1928,15 +2001,11 @@ func TestProbe_MultipleReports(t *testing.T) {
 		if err := conn.WriteJSON(msg); err != nil {
 			t.Fatalf("WriteJSON failed: %v", err)
 		}
-		time.Sleep(30 * time.Millisecond)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-
-	val, _ := s.clients.Load(authResp.ClientID)
-	client := val.(*ClientConn)
-	if client.GetStats().CPUUsage != 50.0 {
-		t.Errorf("final CPUUsage should be 50.0 (the last report), got %f", client.GetStats().CPUUsage)
+	gotStats := waitForTestClientStats(t, s, authResp.ClientID, 50.0)
+	if gotStats.CPUUsage != 50.0 {
+		t.Errorf("final CPUUsage should be 50.0 (the last report), got %f", gotStats.CPUUsage)
 	}
 }
 
@@ -1949,13 +2018,7 @@ func TestLifecycle_Full(t *testing.T) {
 	defer cleanup()
 
 	conn, authResp := connectAndAuth(t, ts, "lifecycle-host")
-
-	time.Sleep(50 * time.Millisecond)
-
-	_, ok := s.clients.Load(authResp.ClientID)
-	if !ok {
-		t.Fatal("client should be registered after authentication")
-	}
+	waitForLiveTestClient(t, s, authResp.ClientID)
 
 	ping, _ := protocol.NewMessage(protocol.MsgTypePing, nil)
 	if err := conn.WriteJSON(ping); err != nil {
@@ -1975,18 +2038,26 @@ func TestLifecycle_Full(t *testing.T) {
 	if err := conn.WriteJSON(msg); err != nil {
 		t.Fatalf("WriteJSON failed: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
-
-	val, _ := s.clients.Load(authResp.ClientID)
-	if val.(*ClientConn).GetStats().CPUUsage != 33.3 {
+	if gotStats := waitForTestClientStats(t, s, authResp.ClientID, stats.CPUUsage); gotStats.CPUUsage != 33.3 {
 		t.Error("probe data was not updated correctly")
 	}
 
 	_ = conn.Close()
-	time.Sleep(100 * time.Millisecond)
-
-	_, ok = s.clients.Load(authResp.ClientID)
-	if ok {
+	disconnectDeadline := time.NewTimer(testReadTimeout(5 * time.Second))
+	defer disconnectDeadline.Stop()
+	disconnectTicker := time.NewTicker(5 * time.Millisecond)
+	defer disconnectTicker.Stop()
+	for {
+		if _, ok := s.clients.Load(authResp.ClientID); !ok {
+			break
+		}
+		select {
+		case <-disconnectDeadline.C:
+			t.Fatal("client should be removed from the map after disconnect")
+		case <-disconnectTicker.C:
+		}
+	}
+	if _, ok := s.clients.Load(authResp.ClientID); ok {
 		t.Error("client should be removed from the map after disconnect")
 	}
 }
@@ -2365,6 +2436,7 @@ func TestControlLoop_MalformedProbeReport(t *testing.T) {
 	s, ts, cleanup := setupWSTestNoConn(t)
 
 	conn, authResp := connectAndAuth(t, ts, "malformed-probe-host")
+	waitForLiveTestClient(t, s, authResp.ClientID)
 
 	// send a probe_report whose payload field types do not match
 	// (JSON format is valid, but cpu_usage is a string rather than a float, so ParsePayload will fail)
@@ -2428,7 +2500,10 @@ func TestServer_RestorePostAckStoreFailureMarksError(t *testing.T) {
 	defer cleanup()
 
 	var err error
-	s.store = newTestTunnelStore(t)
+	s.store, err = newTunnelStoreWithDB(s.auth.adminStore.path, s.auth.adminStore.db, false)
+	if err != nil {
+		t.Fatalf("create shared tunnel store: %v", err)
+	}
 
 	caps := protocol.DefaultClientCapabilities()
 	record, err := s.auth.adminStore.GetOrCreateClient(
@@ -2566,7 +2641,10 @@ func TestServer_RestoreActiveHTTPTunnel_DoesNotConflictWithSelf(t *testing.T) {
 	defer cleanup()
 
 	var err error
-	s.store = newTestTunnelStore(t)
+	s.store, err = newTunnelStoreWithDB(s.auth.adminStore.path, s.auth.adminStore.db, false)
+	if err != nil {
+		t.Fatalf("create shared tunnel store: %v", err)
+	}
 
 	record, err := s.auth.adminStore.GetOrCreateClient(
 		"install-restore-http",
@@ -2673,30 +2751,28 @@ func TestServer_RestoreTunnelsAPI(t *testing.T) {
 		t.Fatalf("Initialize failed: %v", err)
 	}
 
-	tunnelStorePath := filepath.Join(tmpDir, serverDBFileName)
-	tStore := newTestTunnelStoreAt(t, tunnelStorePath)
+	tStore, err := newTunnelStoreWithDB(store.path, store.db, false)
+	if err != nil {
+		t.Fatalf("failed to create shared TunnelStore: %v", err)
+	}
 
 	// prewrite two tunnels into Store (representing persisted data read on server restart)
-	if err := tStore.AddTunnel(StoredTunnel{
+	mustAddStableTunnel(t, tStore, StoredTunnel{
 		ProxyNewRequest: protocol.ProxyNewRequest{Name: "tunnel1", Type: "tcp", RemotePort: 1234},
 		DesiredState:    protocol.ProxyDesiredStateRunning,
 		RuntimeState:    protocol.ProxyRuntimeStateExposed,
 		ClientID:        "client-1",
 		Hostname:        "restore-host",
 		Binding:         TunnelBindingClientID,
-	}); err != nil {
-		t.Fatalf("AddTunnel tunnel1 failed: %v", err)
-	}
-	if err := tStore.AddTunnel(StoredTunnel{
+	})
+	mustAddStableTunnel(t, tStore, StoredTunnel{
 		ProxyNewRequest: protocol.ProxyNewRequest{Name: "tunnel2", Type: "tcp", RemotePort: 5678},
 		DesiredState:    protocol.ProxyDesiredStateStopped,
 		RuntimeState:    protocol.ProxyRuntimeStateIdle,
 		ClientID:        "client-1",
 		Hostname:        "restore-host",
 		Binding:         TunnelBindingClientID,
-	}); err != nil {
-		t.Fatalf("AddTunnel tunnel2 failed: %v", err)
-	}
+	})
 
 	s := New(0)
 	s.auth.adminStore = store

@@ -1,7 +1,8 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
 import type { InfiniteData, QueryClient, QueryKey } from '@tanstack/react-query';
 
-import { activityApi } from '@/lib/api';
+import { activityApi, type ActivityReadScope } from '@/lib/api';
+import { resourceScopeKey } from '@/lib/resource-scope';
 import type {
   ActivityCategory,
   ActivityItem,
@@ -33,10 +34,22 @@ export function normalizeActivityQuery(query: ActivityQuery = {}): NormalizedAct
   };
 }
 
-export function buildActivityQueryKey(query: ActivityQuery = {}) {
+export function activityReadScopeKey(readScope: ActivityReadScope) {
+  if (readScope.kind === 'admin-global') return 'admin-global';
+  return resourceScopeKey(readScope);
+}
+
+function activityReadScopeUserFilter(readScope: ActivityReadScope) {
+  return readScope.kind === 'admin-global' ? readScope.userId ?? null : null;
+}
+
+export function buildActivityQueryKey(readScope: ActivityReadScope, query: ActivityQuery = {}) {
   const normalized = normalizeActivityQuery(query);
   return [
+    'users',
+    activityReadScopeKey(readScope),
     'activity',
+    activityReadScopeUserFilter(readScope),
     normalized.scope,
     normalized.scopeId ?? null,
     normalized.limit,
@@ -47,12 +60,12 @@ export function buildActivityQueryKey(query: ActivityQuery = {}) {
   ] as const;
 }
 
-export function useActivity(query: ActivityQuery = {}) {
+export function useActivity(readScope: ActivityReadScope, query: ActivityQuery = {}) {
   const normalized = normalizeActivityQuery(query);
   const result = useInfiniteQuery({
-    queryKey: buildActivityQueryKey(normalized),
+    queryKey: buildActivityQueryKey(readScope, normalized),
     initialPageParam: undefined as number | undefined,
-    queryFn: ({ pageParam }) => activityApi.list({ ...normalized, before: pageParam }),
+    queryFn: ({ pageParam }) => activityApi.list(readScope, { ...normalized, before: pageParam }),
     getNextPageParam: (page) => page.has_more ? page.next_cursor : undefined,
   });
   return {
@@ -70,15 +83,15 @@ export function flattenActivityPages(data: InfiniteData<ActivityPage> | undefine
 }
 
 function activityQueryFromKey(queryKey: QueryKey): NormalizedActivityQuery | null {
-  if (queryKey[0] !== 'activity' || typeof queryKey[1] !== 'string' || typeof queryKey[3] !== 'number') return null;
+  if (queryKey[0] !== 'users' || queryKey[2] !== 'activity' || typeof queryKey[4] !== 'string' || typeof queryKey[6] !== 'number') return null;
   return {
-    scope: queryKey[1] as NormalizedActivityQuery['scope'],
-    scopeId: typeof queryKey[2] === 'string' ? queryKey[2] : undefined,
-    limit: queryKey[3],
-    severities: Array.isArray(queryKey[4]) ? queryKey[4] as ActivitySeverity[] : [],
-    categories: Array.isArray(queryKey[5]) ? queryKey[5] as ActivityCategory[] : [],
-    from: typeof queryKey[6] === 'string' ? queryKey[6] : undefined,
-    to: typeof queryKey[7] === 'string' ? queryKey[7] : undefined,
+    scope: queryKey[4] as NormalizedActivityQuery['scope'],
+    scopeId: typeof queryKey[5] === 'string' ? queryKey[5] : undefined,
+    limit: queryKey[6],
+    severities: Array.isArray(queryKey[7]) ? queryKey[7] as ActivitySeverity[] : [],
+    categories: Array.isArray(queryKey[8]) ? queryKey[8] as ActivityCategory[] : [],
+    from: typeof queryKey[9] === 'string' ? queryKey[9] : undefined,
+    to: typeof queryKey[10] === 'string' ? queryKey[10] : undefined,
   };
 }
 
@@ -93,8 +106,20 @@ export function activityMatchesQuery(item: ActivityItem, query: NormalizedActivi
   return true;
 }
 
-export function prependActivityToMatchingQueries(queryClient: QueryClient, item: ActivityItem) {
-  for (const query of queryClient.getQueryCache().findAll({ queryKey: ['activity'] })) {
+export function prependActivityToMatchingQueries(
+  queryClient: QueryClient,
+  readScope: ActivityReadScope,
+  item: ActivityItem,
+) {
+  const scopeKey = activityReadScopeKey(readScope);
+  // The global payload deliberately does not expose owner IDs.  A selected
+  // global-user filter therefore cannot safely accept an incremental event;
+  // refetch instead of risking a cross-user insertion.
+  if (readScope.kind === 'admin-global' && readScope.userId) {
+    void queryClient.invalidateQueries({ queryKey: ['users', scopeKey, 'activity'] });
+    return;
+  }
+  for (const query of queryClient.getQueryCache().findAll({ queryKey: ['users', scopeKey, 'activity'] })) {
     const metadata = activityQueryFromKey(query.queryKey);
     if (!metadata || !activityMatchesQuery(item, metadata)) continue;
     queryClient.setQueryData<InfiniteData<ActivityPage>>(query.queryKey, (old) => {

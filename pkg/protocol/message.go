@@ -60,6 +60,7 @@ const (
 	AuthCodeDisabledKey         = "disabled_key"
 	AuthCodeExpiredKey          = "expired_key"
 	AuthCodeMaxUsesExceeded     = "max_uses_exceeded"
+	AuthCodeUserDisabled        = "user_disabled"
 )
 
 // Message 是控制通道上传输的统一消息结构

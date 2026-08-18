@@ -79,6 +79,11 @@ func (s *TunnelStore) UpdateTunnelStatesWithActivity(clientID, id, desiredState,
 	if err != nil {
 		return StoredTunnel{}, 0, err
 	}
+	if action == "resumed" {
+		if err := ensureOperationalUserInTx(tx, before.OwnerUserID); err != nil {
+			return StoredTunnel{}, 0, err
+		}
+	}
 	after := before
 	setStoredTunnelStates(&after, desiredState, runtimeState, errMsg)
 	storageRuntimeState := storageRuntimeStateFromProtocol(after.RuntimeState)

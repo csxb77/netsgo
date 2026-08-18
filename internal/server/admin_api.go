@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -81,31 +82,46 @@ func (s *Server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONRequestDecodeError(w, err)
 		return
 	}
+	identityLimiterKey := loginIdentityLimiterKey(ip, req.Username)
+	if s.auth.loginLimiter != nil {
+		if allowed, retryAfter := s.auth.loginLimiter.Allow(identityLimiterKey); !allowed {
+			slog.Warn("Login identity rate limited", "ip", ip, "module", "security")
+			s.recordAuthFailure(r, "admin_login_rate_limited", "rate_limited")
+			writeRateLimitResponse(w, retryAfter)
+			return
+		}
+	}
 
 	if s.auth.adminStore == nil {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
 		return
 	}
 
-	user, err := s.auth.adminStore.ValidateAdminPassword(req.Username, req.Password)
+	user, err := s.auth.adminStore.ValidateUserPassword(req.Username, req.Password)
 	if err != nil {
 		if s.auth.loginLimiter != nil {
-			s.auth.loginLimiter.RecordFailure(ip)
+			s.auth.loginLimiter.RecordFailure(identityLimiterKey)
+		}
+		if errors.Is(err, ErrUserDisabled) {
+			s.recordAuthFailure(r, "admin_login_disabled", "user_disabled")
+			writeAPIError(w, http.StatusUnauthorized, "user_disabled", "user is disabled")
+			return
 		}
 		s.recordAuthFailure(r, "admin_login_failed", "bad_credentials")
 		writeAPIError(w, http.StatusUnauthorized, "username_or_password_incorrect", "username or password incorrect")
 		return
 	}
 
-	slog.Info("Admin user logged in", "user", user.Username, "module", "auth")
+	slog.Info("Web user logged in", "user", user.Username, "is_admin", user.IsAdmin, "module", "auth")
 	if s.auth.loginLimiter != nil {
-		s.auth.loginLimiter.ResetFailures(ip)
+		s.auth.loginLimiter.ResetFailures(identityLimiterKey)
 	}
 
-	if s.maybeBeginMFALogin(w, r, user) {
-		return
-	}
-	s.createAdminLoginSession(w, r, *user)
+	s.finishPasswordLogin(w, r, *user, req.Password)
+}
+
+func loginIdentityLimiterKey(ip, username string) string {
+	return "identity\x00" + ip + "\x00" + strings.TrimSpace(username)
 }
 
 func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
@@ -120,11 +136,19 @@ func (s *Server) handleAPILogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	gate := s.lifecycleGate(info.UserID)
+	if gate == nil {
+		writeAPIError(w, http.StatusUnauthorized, "session_not_found", "session not found")
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	activityID, err := s.auth.adminStore.DeleteSessionWithActivity(info.SessionID, s.activityActorForRequest(r))
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "logout_persist_failed", "failed to persist logout")
 		return
 	}
+	s.cancelSSEForSession(info.SessionID, "logout")
 	s.publishActivityID(activityID)
 	slog.Info("Admin user logged out", "user", info.Username, "module", "auth")
 
@@ -202,10 +226,18 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
 		return
 	}
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
-		keys := s.auth.adminStore.GetAPIKeys()
+		keys, err := s.auth.adminStore.GetAPIKeysForUser(scope.OwnerUserID)
+		if err != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
+			return
+		}
 		encodeJSON(w, http.StatusOK, sanitizeAPIKeys(keys))
 
 	case http.MethodPost:
@@ -217,6 +249,10 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := decodeJSONRequestBody(r, &req); err != nil {
 			writeJSONRequestDecodeError(w, err)
+			return
+		}
+		if _, err := normalizeKeyPermissions(req.Permissions); err != nil || req.MaxUses < 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid_api_key", "invalid API key settings")
 			return
 		}
 
@@ -237,17 +273,20 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, "api_key_generate_failed", "failed to generate api key")
 			return
 		}
-		key, activityID, err := s.auth.adminStore.AddAPIKeyWithActivity(req.Name, rawKey, req.Permissions, expiresAt, req.MaxUses, s.activityActorForRequest(r))
+		releaseMutation, err := s.acquireResourceMutation(scope, true)
 		if err != nil {
-			encodeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":   err.Error(),
-				"message": err.Error(),
-				"code":    "api_key_create_failed",
-			})
+			writeResourceLifecycleError(w, err)
+			return
+		}
+		key, activityID, err := s.auth.adminStore.AddAPIKeyForUserWithActivity(scope.OwnerUserID, req.Name, rawKey, req.Permissions, expiresAt, req.MaxUses, s.activityActorForRequest(r))
+		if err != nil {
+			releaseMutation()
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 
 		s.publishActivityID(activityID)
+		releaseMutation()
 
 		slog.Info("Created new API Key", "name", req.Name, "module", "admin")
 
@@ -256,7 +295,8 @@ func (s *Server) handleAPIAdminKeys(w http.ResponseWriter, r *http.Request) {
 		if s.auth.adminStore != nil {
 			// Best-effort response enrichment only: API key creation already
 			// succeeded, so config read failure should not roll it back.
-			serverAddr = s.auth.adminStore.GetServerConfig().ServerAddr
+			config := s.auth.adminStore.GetServerConfig()
+			serverAddr = resourceServerAddr(&config, config.ServerAddr)
 		}
 
 		// return the full response including the raw key (only visible at creation time!)
@@ -284,6 +324,10 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store not initialized")
 		return
 	}
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 
 	keyID := r.PathValue("id")
 	action := r.PathValue("action")
@@ -301,12 +345,23 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		activityID, err := s.auth.adminStore.SetAPIKeyActiveWithActivity(keyID, active, s.activityActorForRequest(r))
+		releaseMutation, err := s.acquireResourceMutation(scope, active)
 		if err != nil {
-			writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+			writeResourceLifecycleError(w, err)
+			return
+		}
+		activityID, err := s.auth.adminStore.SetAPIKeyActiveForUserWithActivity(scope.OwnerUserID, keyID, active, s.activityActorForRequest(r))
+		if err != nil {
+			releaseMutation()
+			if errors.Is(err, ErrAPIKeyNotFound) {
+				writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+				return
+			}
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 		s.publishActivityID(activityID)
+		releaseMutation()
 
 		actionText := "disabled"
 		if active {
@@ -317,12 +372,23 @@ func (s *Server) handleAPIAdminKeyItem(w http.ResponseWriter, r *http.Request) {
 		encodeJSON(w, http.StatusOK, map[string]any{"success": true})
 
 	case http.MethodDelete:
-		activityID, err := s.auth.adminStore.DeleteAPIKeyWithActivity(keyID, s.activityActorForRequest(r))
+		releaseMutation, err := s.acquireResourceMutation(scope, false)
 		if err != nil {
-			writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+			writeResourceLifecycleError(w, err)
+			return
+		}
+		activityID, err := s.auth.adminStore.DeleteAPIKeyForUserWithActivity(scope.OwnerUserID, keyID, s.activityActorForRequest(r))
+		if err != nil {
+			releaseMutation()
+			if errors.Is(err, ErrAPIKeyNotFound) {
+				writeAPIError(w, http.StatusNotFound, "api_key_not_found", "key not found")
+				return
+			}
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
 			return
 		}
 		s.publishActivityID(activityID)
+		releaseMutation()
 
 		slog.Info("API Key deleted", "key_id", keyID, "module", "admin")
 		w.WriteHeader(http.StatusNoContent)

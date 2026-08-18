@@ -5,6 +5,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { tunnelApi } from "@/lib/api";
+import { invalidateResourceScope, scopedQueryKey, type ResourceScope } from "@/lib/resource-scope";
 import {
   buildClientToClientTunnelSpecCreateRequest,
   buildTunnelSpecCreateRequest,
@@ -18,33 +19,31 @@ import type {
   UpdateTunnelInput,
 } from "@/types";
 
-export function invalidateTunnelQueries(queryClient: QueryClient) {
-  queryClient.invalidateQueries({ queryKey: ["clients"] });
-  queryClient.invalidateQueries({ queryKey: ["client-tunnels"] });
-  queryClient.invalidateQueries({ queryKey: ["client-traffic"] });
-  queryClient.invalidateQueries({ queryKey: ["console-summary"] });
-  queryClient.invalidateQueries({ queryKey: ["server-status"] });
+export function invalidateTunnelQueries(queryClient: QueryClient, scope: ResourceScope) {
+  return invalidateResourceScope(queryClient, scope);
 }
 
 export function buildClientTunnelRoleQueryKey(
+  scope: ResourceScope,
   clientId: string | undefined,
   role = "owner",
 ) {
-  return ["client-tunnels", clientId, role] as const;
+  return scopedQueryKey(scope, "client-tunnels", clientId, role);
 }
 
 export function useClientTunnelsByRole(
+  scope: ResourceScope,
   clientId: string | undefined,
   role: TunnelClientRole,
 ) {
   return useQuery({
-    queryKey: buildClientTunnelRoleQueryKey(clientId, role),
+    queryKey: buildClientTunnelRoleQueryKey(scope, clientId, role),
     enabled: Boolean(clientId),
     queryFn: () => {
       if (!clientId) {
         throw new Error("clientId is required to load tunnels by role");
       }
-      return tunnelApi.listByClientRole(clientId, role);
+      return tunnelApi.listByClientRole(scope, clientId, role);
     },
     staleTime: 30_000,
   });
@@ -94,38 +93,38 @@ function buildTunnelSpec(data: {
   return buildTunnelSpecCreateRequest(data);
 }
 
-export function useCreateTunnel() {
+export function useCreateTunnel(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: (data: CreateTunnelInput) =>
-      tunnelApi.create(buildTunnelSpec(data)),
+      tunnelApi.create(scope, buildTunnelSpec(data)),
     onSuccess: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }
 
-export function useResumeTunnel() {
+export function useResumeTunnel(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: ({ tunnelId }: { tunnelId: string }) =>
-      tunnelApi.resume(tunnelId),
+      tunnelApi.resume(scope, tunnelId),
     onSuccess: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }
 
-export function useStopTunnel() {
+export function useStopTunnel(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: ({ tunnelId }: { tunnelId: string }) =>
-      tunnelApi.stop(tunnelId),
+      tunnelApi.stop(scope, tunnelId),
     onSuccess: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }
@@ -138,7 +137,7 @@ export interface TunnelBatchResult {
   failed: number;
 }
 
-export function useBatchTunnelAction() {
+export function useBatchTunnelAction(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -150,7 +149,9 @@ export function useBatchTunnelAction() {
       tunnelIds: string[];
     }) => {
       const mutateTunnel =
-        action === "resume" ? tunnelApi.resume : tunnelApi.stop;
+        action === "resume"
+          ? (tunnelId: string) => tunnelApi.resume(scope, tunnelId)
+          : (tunnelId: string) => tunnelApi.stop(scope, tunnelId);
       const results = await Promise.allSettled(
         tunnelIds.map((tunnelId) => mutateTunnel(tunnelId)),
       );
@@ -165,39 +166,39 @@ export function useBatchTunnelAction() {
       } satisfies TunnelBatchResult;
     },
     onSettled: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }
 
-export function useDeleteTunnel() {
+export function useDeleteTunnel(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: ({ tunnelId }: { tunnelId: string }) =>
-      tunnelApi.delete(tunnelId),
+      tunnelApi.delete(scope, tunnelId),
     onSuccess: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }
 
-export function useUpdateTunnel() {
+export function useUpdateTunnel(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: (data: UpdateTunnelInput) =>
-      tunnelApi.update(data.tunnelId, {
+      tunnelApi.update(scope, data.tunnelId, {
         expected_revision: data.expected_revision,
         spec: buildTunnelSpec(data),
       }),
     onSuccess: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }
 
-export function useMigrateTunnel() {
+export function useMigrateTunnel(scope: ResourceScope) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -206,12 +207,12 @@ export function useMigrateTunnel() {
       expected_revision,
       target_client_id,
     }: MigrateTunnelInput) =>
-      tunnelApi.migrate(tunnelId, {
+      tunnelApi.migrate(scope, tunnelId, {
         expected_revision,
         target_client_id,
       }),
     onSuccess: () => {
-      invalidateTunnelQueries(queryClient);
+      void invalidateTunnelQueries(queryClient, scope);
     },
   });
 }

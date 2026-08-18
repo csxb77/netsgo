@@ -38,12 +38,14 @@ func clientManagementActivitySpec(action string, actor ActivityActor, client Reg
 	args := ActivitySummaryArgs{ClientName: activityClientDisplayName(client), Before: before, After: after}
 	payload := newActivityTransitionPayload(ActivityCategoryClient, action, args, before, after)
 	return ActivityEventSpec{
-		OccurredAt: time.Now().UTC(),
-		Category:   ActivityCategoryClient,
-		Action:     action,
-		Source:     "server",
-		Actor:      actor,
-		Payload:    payload,
+		OccurredAt:    time.Now().UTC(),
+		Category:      ActivityCategoryClient,
+		Action:        action,
+		Source:        "server",
+		Actor:         actor,
+		ScopeUserID:   client.OwnerUserID,
+		SubjectUserID: client.OwnerUserID,
+		Payload:       payload,
 		Clients: []ActivityClientSubject{{
 			ClientID:    client.ID,
 			Relation:    "subject",
@@ -262,38 +264,39 @@ func (s *AdminStore) UpdateClientBandwidthSettingsWithActivity(clientID string, 
 func (s *AdminStore) CreateSessionWithActivity(userID, username, role, ip, ua string, actor ActivityActor) (*AdminSession, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
 	sessionID, err := generateUUIDE()
 	if err != nil {
 		return nil, 0, err
 	}
-	session := AdminSession{ID: sessionID, UserID: userID, Username: username, Role: role, CreatedAt: now, ExpiresAt: now.Add(sessionDefaultTTL), IP: ip, UserAgent: ua}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, 0, err
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	session, currentUser, err := createSessionForActiveUserTx(tx, sessionID, userID, ip, ua, time.Now().UTC())
+	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := tx.Exec(`INSERT INTO admin_sessions (id, user_id, username, role, created_at, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, session.UserID, session.Username, session.Role, formatTime(session.CreatedAt), formatTime(session.ExpiresAt), session.IP, session.UserAgent); err != nil {
-		return nil, 0, err
-	}
-	if _, err := tx.Exec(`UPDATE admin_users SET last_login = ? WHERE id = ?`, formatTime(now), userID); err != nil {
-		return nil, 0, err
-	}
+	actor.ID = currentUser.ID
+	actor.Name = currentUser.Username
+	actor.Type = currentUser.Role
 	if err := s.maybeFailSave(); err != nil {
 		return nil, 0, err
 	}
-	activityID, err := s.appendActivityTx(tx, adminActivitySpec("admin_login_succeeded", actor, ActivitySummaryArgs{}))
+	activitySpec := adminActivitySpec("admin_login_succeeded", actor, ActivitySummaryArgs{})
+	activitySpec.SubjectUserID = currentUser.ID
+	if !currentUser.IsAdmin {
+		activitySpec.ScopeUserID = currentUser.ID
+	}
+	activityID, err := s.appendActivityTx(tx, activitySpec)
 	if err != nil {
 		return nil, 0, err
 	}
 	if err := commitTx(tx, &committed); err != nil {
 		return nil, 0, err
 	}
-	return &session, activityID, nil
+	return session, activityID, nil
 }
 
 func (s *AdminStore) DeleteSessionWithActivity(sessionID string, actor ActivityActor) (int64, error) {
@@ -305,7 +308,7 @@ func (s *AdminStore) DeleteSessionWithActivity(sessionID string, actor ActivityA
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-	result, err := tx.Exec(`DELETE FROM admin_sessions WHERE id = ?`, sessionID)
+	result, err := tx.Exec(`DELETE FROM user_sessions WHERE id = ?`, sessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -354,6 +357,14 @@ func (s *AdminStore) AddAPIKeyWithActivity(name, keyString string, permissions [
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
+	// This legacy helper is retained for internal callers that predate an
+	// explicit resource scope. Assign it deterministically instead of emitting
+	// an ownerless API key into the unified schema.
+	ownerUserID, err := legacyOwnerUserIDInTx(tx)
+	if err != nil {
+		return nil, 0, err
+	}
+	key.OwnerUserID = ownerUserID
 	if err := insertAPIKey(tx, key); err != nil {
 		return nil, 0, err
 	}
@@ -361,6 +372,54 @@ func (s *AdminStore) AddAPIKeyWithActivity(name, keyString string, permissions [
 		return nil, 0, err
 	}
 	activityID, err := s.appendActivityTx(tx, adminActivitySpec("api_key_created", actor, ActivitySummaryArgs{ResourceName: name, Value: int64(maxUses)}))
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return nil, 0, err
+	}
+	return &key, activityID, nil
+}
+
+// AddAPIKeyForUserWithActivity creates a key inside a server-selected user
+// scope.  It intentionally accepts the owner separately from the activity
+// actor: an administrator may manage a target user's keys without acquiring
+// ownership of them.
+func (s *AdminStore) AddAPIKeyForUserWithActivity(ownerUserID, name, keyString string, permissions []string, expiresAt *time.Time, maxUses int, actor ActivityActor) (*APIKey, int64, error) {
+	if ownerUserID == "" {
+		return nil, 0, fmt.Errorf("api key owner user id must not be empty")
+	}
+	if maxUses < 0 {
+		return nil, 0, fmt.Errorf("max_uses must not be negative")
+	}
+	key, err := s.newAPIKey(name, keyString, permissions, expiresAt)
+	if err != nil {
+		return nil, 0, err
+	}
+	key.OwnerUserID = ownerUserID
+	key.MaxUses = maxUses
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, 0, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	if err := ensureOperationalUserInTx(tx, ownerUserID); err != nil {
+		return nil, 0, err
+	}
+	if err := insertAPIKey(tx, key); err != nil {
+		return nil, 0, err
+	}
+	if err := s.maybeFailSave(); err != nil {
+		return nil, 0, err
+	}
+	activitySpec := adminActivitySpec("api_key_created", actor, ActivitySummaryArgs{ResourceName: name, Value: int64(maxUses)})
+	activitySpec.ScopeUserID = ownerUserID
+	activitySpec.SubjectUserID = ownerUserID
+	activityID, err := s.appendActivityTx(tx, activitySpec)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -410,6 +469,54 @@ func (s *AdminStore) SetAPIKeyActiveWithActivity(id string, active bool, actor A
 	return activityID, nil
 }
 
+// SetAPIKeyActiveForUserWithActivity modifies only a key owned by ownerUserID.
+// A missing or cross-owner key is indistinguishable to callers.
+func (s *AdminStore) SetAPIKeyActiveForUserWithActivity(ownerUserID, id string, active bool, actor ActivityActor) (int64, error) {
+	action := "api_key_disabled"
+	if active {
+		action = "api_key_enabled"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	var name string
+	var current int
+	if err := tx.QueryRow(`SELECT name, is_active FROM api_keys WHERE id = ? AND owner_user_id = ?`, id, ownerUserID).Scan(&name, &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrAPIKeyNotFound
+		}
+		return 0, err
+	}
+	if intToBool(current) == active {
+		if err := commitTx(tx, &committed); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	if _, err := tx.Exec(`UPDATE api_keys SET is_active = ? WHERE id = ? AND owner_user_id = ?`, boolToInt(active), id, ownerUserID); err != nil {
+		return 0, err
+	}
+	if err := s.maybeFailSave(); err != nil {
+		return 0, err
+	}
+	activitySpec := adminActivitySpec(action, actor, ActivitySummaryArgs{ResourceName: name})
+	activitySpec.ScopeUserID = ownerUserID
+	activitySpec.SubjectUserID = ownerUserID
+	activityID, err := s.appendActivityTx(tx, activitySpec)
+	if err != nil {
+		return 0, err
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return 0, err
+	}
+	return activityID, nil
+}
+
 func (s *AdminStore) DeleteAPIKeyWithActivity(id string, actor ActivityActor) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -430,6 +537,42 @@ func (s *AdminStore) DeleteAPIKeyWithActivity(id string, actor ActivityActor) (i
 		return 0, err
 	}
 	activityID, err := s.appendActivityTx(tx, adminActivitySpec("api_key_deleted", actor, ActivitySummaryArgs{ResourceName: name}))
+	if err != nil {
+		return 0, err
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return 0, err
+	}
+	return activityID, nil
+}
+
+// DeleteAPIKeyForUserWithActivity deletes only a key owned by ownerUserID.
+func (s *AdminStore) DeleteAPIKeyForUserWithActivity(ownerUserID, id string, actor ActivityActor) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	var name string
+	if err := tx.QueryRow(`SELECT name FROM api_keys WHERE id = ? AND owner_user_id = ?`, id, ownerUserID).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrAPIKeyNotFound
+		}
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM api_keys WHERE id = ? AND owner_user_id = ?`, id, ownerUserID); err != nil {
+		return 0, err
+	}
+	if err := s.maybeFailSave(); err != nil {
+		return 0, err
+	}
+	activitySpec := adminActivitySpec("api_key_deleted", actor, ActivitySummaryArgs{ResourceName: name})
+	activitySpec.ScopeUserID = ownerUserID
+	activitySpec.SubjectUserID = ownerUserID
+	activityID, err := s.appendActivityTx(tx, activitySpec)
 	if err != nil {
 		return 0, err
 	}

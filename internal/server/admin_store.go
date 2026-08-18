@@ -345,7 +345,10 @@ func (s *AdminStore) Initialize(username, password, serverAddr string, allowedPo
 		Username:     username,
 		PasswordHash: string(hash),
 		Role:         "admin",
+		IsAdmin:      true,
+		Status:       UserStatusActive,
 		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	s.mu.Lock()
@@ -366,7 +369,10 @@ func (s *AdminStore) Initialize(username, password, serverAddr string, allowedPo
 		return fmt.Errorf("service is already initialized; cannot initialize again")
 	}
 
-	if _, err := tx.Exec(`DELETE FROM admin_users`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM users`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges`); err != nil {
@@ -378,8 +384,8 @@ func (s *AdminStore) Initialize(username, password, serverAddr string, allowedPo
 	if _, err := tx.Exec(`DELETE FROM admin_totp_recovery_codes`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO admin_users (id, username, password_hash, role, created_at, last_login, totp_enabled, totp_secret) VALUES (?, ?, ?, ?, ?, NULL, 0, '')`,
-		user.ID, user.Username, user.PasswordHash, user.Role, formatTime(user.CreatedAt)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO users (id, username, password_hash, is_admin, status, created_at, updated_at, last_login, totp_enabled, totp_secret) VALUES (?, ?, ?, 1, ?, ?, ?, NULL, 0, '')`,
+		user.ID, user.Username, user.PasswordHash, string(user.Status), formatTime(user.CreatedAt), formatTime(user.UpdatedAt)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO server_config (id, initialized, jwt_secret, server_addr)
@@ -665,18 +671,25 @@ func (s *AdminStore) getDummyHash() []byte {
 }
 
 func adminUserSelectColumns() string {
-	return `id, username, password_hash, role, created_at, last_login, totp_enabled, totp_secret`
+	return `id, username, password_hash,
+		CASE WHEN is_admin = 1 THEN 'admin' ELSE 'user' END,
+		is_admin, status, created_at, updated_at, last_login, totp_enabled, totp_secret`
 }
 
 func scanAdminUser(row dbScanner) (AdminUser, error) {
 	var user AdminUser
-	var createdAt string
+	var createdAt, updatedAt string
 	var lastLogin sql.NullString
-	var totpEnabled int
-	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &createdAt, &lastLogin, &totpEnabled, &user.TOTPSecret); err != nil {
+	var isAdmin, totpEnabled int
+	var status string
+	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &isAdmin, &status, &createdAt, &updatedAt, &lastLogin, &totpEnabled, &user.TOTPSecret); err != nil {
 		return AdminUser{}, err
 	}
 	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return AdminUser{}, err
+	}
+	parsedUpdatedAt, err := parseTime(updatedAt)
 	if err != nil {
 		return AdminUser{}, err
 	}
@@ -685,16 +698,23 @@ func scanAdminUser(row dbScanner) (AdminUser, error) {
 		return AdminUser{}, err
 	}
 	user.CreatedAt = parsedCreatedAt
+	user.UpdatedAt = parsedUpdatedAt
 	user.LastLogin = parsedLastLogin
+	user.IsAdmin = intToBool(isAdmin)
+	user.Status = UserStatus(status)
 	user.TOTPEnabled = intToBool(totpEnabled)
 	return user, nil
 }
 
-func (s *AdminStore) ValidateAdminPassword(username, password string) (*AdminUser, error) {
+var ErrUserDisabled = errors.New("user is disabled")
+
+// ValidateUserPassword validates any active unified user.  The caller must
+// still decide whether an admin-only flow is appropriate.
+func (s *AdminStore) ValidateUserPassword(username, password string) (*User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	user, err := scanAdminUser(s.db.QueryRow(`SELECT `+adminUserSelectColumns()+` FROM admin_users WHERE username = ?`, username))
+	user, err := scanAdminUser(s.db.QueryRow(`SELECT `+adminUserSelectColumns()+` FROM users WHERE username = ?`, username))
 	if err == sql.ErrNoRows {
 		_ = bcrypt.CompareHashAndPassword(s.getDummyHash(), []byte(password))
 		return nil, fmt.Errorf("incorrect username or password")
@@ -705,7 +725,23 @@ func (s *AdminStore) ValidateAdminPassword(username, password string) (*AdminUse
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		return nil, fmt.Errorf("incorrect username or password")
 	}
+	if user.Status != UserStatusActive {
+		return nil, ErrUserDisabled
+	}
 	return &user, nil
+}
+
+// ValidateAdminPassword remains for callers that explicitly require an
+// administrator credential, including legacy security flows.
+func (s *AdminStore) ValidateAdminPassword(username, password string) (*AdminUser, error) {
+	user, err := s.ValidateUserPassword(username, password)
+	if err != nil {
+		return nil, err
+	}
+	if !user.IsAdmin {
+		return nil, fmt.Errorf("incorrect username or password")
+	}
+	return user, nil
 }
 
 func (s *AdminStore) ResetAdminUser(username, password string) error {
@@ -740,36 +776,29 @@ func (s *AdminStore) ResetAdminUser(username, password string) error {
 		return fmt.Errorf("service is not initialized; cannot reset admin user")
 	}
 
-	now := time.Now()
-	userID, err := generateUUIDE()
-	if err != nil {
+	var userID string
+	if err := tx.QueryRow(`SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at, id LIMIT 1`).Scan(&userID); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("service has no administrator to reset")
+		}
 		return err
 	}
-	user := AdminUser{
-		ID:           userID,
-		Username:     username,
-		PasswordHash: string(hash),
-		Role:         "admin",
-		CreatedAt:    now,
-	}
-
-	if _, err := tx.Exec(`DELETE FROM admin_sessions`); err != nil {
+	now := formatTime(time.Now())
+	if _, err := tx.Exec(`UPDATE users
+		SET username = ?, password_hash = ?, is_admin = 1, status = ?, updated_at = ?, last_login = NULL, totp_enabled = 0, totp_secret = ''
+		WHERE id = ?`, username, string(hash), string(UserStatusActive), now, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_passkeys`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM admin_auth_challenges WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_totp_recovery_codes`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM admin_passkeys WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM admin_users`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`INSERT INTO admin_users (id, username, password_hash, role, created_at, last_login, totp_enabled, totp_secret) VALUES (?, ?, ?, ?, ?, NULL, 0, '')`,
-		user.ID, user.Username, user.PasswordHash, user.Role, formatTime(user.CreatedAt)); err != nil {
+	if _, err := tx.Exec(`DELETE FROM admin_totp_recovery_codes WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
 	if err := s.maybeFailSave(); err != nil {
@@ -789,7 +818,8 @@ func (s *AdminStore) UpdateAdminLoginTime(id string) error {
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	result, err := tx.Exec(`UPDATE admin_users SET last_login = ? WHERE id = ?`, formatTime(time.Now()), id)
+	now := formatTime(time.Now())
+	result, err := tx.Exec(`UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?`, now, now, id)
 	if err != nil {
 		return err
 	}
@@ -814,6 +844,7 @@ func scanRegisteredClientBase(row dbScanner) (RegisteredClient, error) {
 	var createdAt, lastSeen, capabilitiesRaw string
 	if err := row.Scan(
 		&client.ID,
+		&client.OwnerUserID,
 		&client.InstallID,
 		&client.DisplayName,
 		&client.Info.Hostname,
@@ -853,7 +884,7 @@ func scanRegisteredClientBase(row dbScanner) (RegisteredClient, error) {
 }
 
 func registeredClientSelectColumns() string {
-	return `id, install_id, display_name, hostname, os, arch, ip, version, public_ipv4, public_ipv6, ingress_bps, egress_bps, created_at, last_seen, last_ip, last_capabilities`
+	return `id, owner_user_id, install_id, display_name, hostname, os, arch, ip, version, public_ipv4, public_ipv6, ingress_bps, egress_bps, created_at, last_seen, last_ip, last_capabilities`
 }
 
 func loadRegisteredClient(q dbQuerier, where string, args ...any) (RegisteredClient, error) {
@@ -894,9 +925,15 @@ func upsertClientInfo(exec dbExecer, clientID string, info protocol.ClientInfo, 
 	return nil
 }
 
-func getOrCreateClientInTx(tx *sql.Tx, installID string, info protocol.ClientInfo, lastIP string, now time.Time) (RegisteredClient, bool, error) {
+func getOrCreateClientInTx(tx *sql.Tx, ownerUserID, installID string, info protocol.ClientInfo, lastIP string, now time.Time) (RegisteredClient, bool, error) {
+	if ownerUserID == "" {
+		return RegisteredClient{}, false, fmt.Errorf("client owner user id must not be empty")
+	}
 	client, err := loadRegisteredClient(tx, `WHERE install_id = ?`, installID)
 	if err == nil {
+		if client.OwnerUserID != ownerUserID {
+			return RegisteredClient{}, false, ErrClientOwnerMismatch
+		}
 		client.Info = info
 		client.LastSeen = now
 		client.LastIP = lastIP
@@ -915,24 +952,66 @@ func getOrCreateClientInTx(tx *sql.Tx, installID string, info protocol.ClientInf
 		return RegisteredClient{}, false, err
 	}
 	client = RegisteredClient{
-		ID:        clientID,
-		InstallID: installID,
-		Info:      info,
-		CreatedAt: now,
-		LastSeen:  now,
-		LastIP:    lastIP,
+		ID:          clientID,
+		OwnerUserID: ownerUserID,
+		InstallID:   installID,
+		Info:        info,
+		CreatedAt:   now,
+		LastSeen:    now,
+		LastIP:      lastIP,
 	}
 	capabilitiesRaw, err := marshalClientCapabilities(info.Capabilities)
 	if err != nil {
 		return RegisteredClient{}, false, err
 	}
 	if _, err := tx.Exec(`INSERT INTO registered_clients
-		(id, install_id, display_name, hostname, os, arch, ip, version, public_ipv4, public_ipv6, ingress_bps, egress_bps, created_at, last_seen, last_ip, last_capabilities)
-		VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
-		client.ID, client.InstallID, info.Hostname, info.OS, info.Arch, info.IP, info.Version, info.PublicIPv4, info.PublicIPv6, formatTime(now), formatTime(now), lastIP, capabilitiesRaw); err != nil {
+		(id, owner_user_id, install_id, display_name, hostname, os, arch, ip, version, public_ipv4, public_ipv6, ingress_bps, egress_bps, created_at, last_seen, last_ip, last_capabilities)
+		VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+		client.ID, client.OwnerUserID, client.InstallID, info.Hostname, info.OS, info.Arch, info.IP, info.Version, info.PublicIPv4, info.PublicIPv6, formatTime(now), formatTime(now), lastIP, capabilitiesRaw); err != nil {
 		return RegisteredClient{}, false, err
 	}
 	return client, true, nil
+}
+
+var ErrClientOwnerMismatch = errors.New("registered client belongs to another user")
+
+// GetOrCreateClientForUser registers or reconnects a client for an explicit
+// owner.  Production authentication paths must use this method.
+func (s *AdminStore) GetOrCreateClientForUser(ownerUserID, installID string, info protocol.ClientInfo, remoteAddr string) (*RegisteredClient, error) {
+	if installID == "" {
+		return nil, fmt.Errorf("install_id must not be empty")
+	}
+	if ownerUserID == "" {
+		return nil, fmt.Errorf("owner user id must not be empty")
+	}
+
+	lastIP := remoteIP(remoteAddr)
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+
+	if err := ensureOperationalUserInTx(tx, ownerUserID); err != nil {
+		return nil, err
+	}
+	client, _, err := getOrCreateClientInTx(tx, ownerUserID, installID, info, lastIP, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.maybeFailSave(); err != nil {
+		return nil, err
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return nil, err
+	}
+	return &client, nil
 }
 
 func (s *AdminStore) GetOrCreateClient(installID string, info protocol.ClientInfo, remoteAddr string) (*RegisteredClient, error) {
@@ -953,7 +1032,11 @@ func (s *AdminStore) GetOrCreateClient(installID string, info protocol.ClientInf
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	client, _, err := getOrCreateClientInTx(tx, installID, info, lastIP, now)
+	ownerUserID, err := legacyOwnerUserIDInTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	client, _, err := getOrCreateClientInTx(tx, ownerUserID, installID, info, lastIP, now)
 	if err != nil {
 		return nil, err
 	}
@@ -964,55 +1047,6 @@ func (s *AdminStore) GetOrCreateClient(installID string, info protocol.ClientInf
 		return nil, err
 	}
 	return &client, nil
-}
-
-func (s *AdminStore) TouchClient(clientID string, info protocol.ClientInfo, remoteAddr string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	lastIP := remoteIP(remoteAddr)
-	now := time.Now()
-	if lastIP == "" {
-		var existing string
-		err := s.db.QueryRow(`SELECT last_ip FROM registered_clients WHERE id = ?`, clientID).Scan(&existing)
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("client %q not found", clientID)
-		}
-		if err != nil {
-			return err
-		}
-		lastIP = existing
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	capabilitiesRaw, err := marshalClientCapabilities(info.Capabilities)
-	if err != nil {
-		return err
-	}
-	result, err := tx.Exec(`UPDATE registered_clients
-		SET hostname = ?, os = ?, arch = ?, ip = ?, version = ?, public_ipv4 = ?, public_ipv6 = ?, last_seen = ?, last_ip = ?, last_capabilities = ?
-		WHERE id = ?`,
-		info.Hostname, info.OS, info.Arch, info.IP, info.Version, info.PublicIPv4, info.PublicIPv6, formatTime(now), lastIP, capabilitiesRaw, clientID)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("client %q not found", clientID)
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
 }
 
 func cloneSystemStats(stats *protocol.SystemStats) *protocol.SystemStats {
@@ -1318,6 +1352,40 @@ func (s *AdminStore) GetRegisteredClients() []RegisteredClient {
 	return clients
 }
 
+func (s *AdminStore) GetRegisteredClientsForUser(ownerUserID string) ([]RegisteredClient, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT `+registeredClientSelectColumns()+` FROM registered_clients WHERE owner_user_id = ? ORDER BY created_at, id`, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	clients := make([]RegisteredClient, 0)
+	for rows.Next() {
+		client, err := scanRegisteredClientBase(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		clients = append(clients, client)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	for i := range clients {
+		stats, err := loadClientStats(s.db, clients[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		clients[i].Stats = cloneSystemStats(stats)
+	}
+	return clients, nil
+}
+
 func (s *AdminStore) GetRegisteredClient(clientID string) (RegisteredClient, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1328,6 +1396,21 @@ func (s *AdminStore) GetRegisteredClient(clientID string) (RegisteredClient, boo
 	}
 	if err != nil {
 		log.Printf("failed to get registered client %q: %v", clientID, err)
+		return RegisteredClient{}, false
+	}
+	client.Stats = cloneSystemStats(client.Stats)
+	return client, true
+}
+
+func (s *AdminStore) GetRegisteredClientForUser(ownerUserID, clientID string) (RegisteredClient, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	client, err := loadRegisteredClient(s.db, `WHERE id = ? AND owner_user_id = ?`, clientID, ownerUserID)
+	if err == sql.ErrNoRows {
+		return RegisteredClient{}, false
+	}
+	if err != nil {
+		log.Printf("failed to get scoped registered client %q: %v", clientID, err)
 		return RegisteredClient{}, false
 	}
 	client.Stats = cloneSystemStats(client.Stats)
@@ -1348,47 +1431,6 @@ func (s *AdminStore) GetRegisteredClientByInstallID(installID string) (Registere
 	}
 	client.Stats = cloneSystemStats(client.Stats)
 	return client, true
-}
-
-func (s *AdminStore) DeleteRegisteredClient(clientID string) error {
-	if clientID == "" {
-		return ErrRegisteredClientNotFound
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	var installID string
-	if err := tx.QueryRow(`SELECT install_id FROM registered_clients WHERE id = ?`, clientID).Scan(&installID); err != nil {
-		if err == sql.ErrNoRows {
-			return ErrRegisteredClientNotFound
-		}
-		return err
-	}
-
-	if _, err := tx.Exec(`DELETE FROM client_disk_partitions WHERE client_id = ?`, clientID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM client_stats WHERE client_id = ?`, clientID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM client_tokens WHERE client_id = ? OR install_id = ?`, clientID, installID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM registered_clients WHERE id = ?`, clientID); err != nil {
-		return err
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
 }
 
 func registeredClientBandwidthSettings(client RegisteredClient) protocol.BandwidthSettings {
@@ -1426,37 +1468,6 @@ func (s *AdminStore) UpdateClientBandwidthSettings(clientID string, settings pro
 	return commitTx(tx, &committed)
 }
 
-// ========== Display Name ==========
-
-// UpdateClientDisplayName updates the custom display name for a Client.
-func (s *AdminStore) UpdateClientDisplayName(clientID, displayName string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	result, err := tx.Exec(`UPDATE registered_clients SET display_name = ? WHERE id = ?`, displayName, clientID)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("client %q not found", clientID)
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
-}
-
 // ========== Sessions ==========
 
 func scanAdminSession(row dbScanner) (AdminSession, error) {
@@ -1483,37 +1494,18 @@ func (s *AdminStore) CreateSession(userID, username, role, ip, ua string) (*Admi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
 	sessionID, err := generateUUIDE()
 	if err != nil {
 		return nil, err
 	}
-	session := AdminSession{
-		ID:        sessionID,
-		UserID:    userID,
-		Username:  username,
-		Role:      role,
-		CreatedAt: now,
-		ExpiresAt: now.Add(sessionDefaultTTL),
-		IP:        ip,
-		UserAgent: ua,
-	}
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO admin_sessions (id, user_id, username, role, created_at, expires_at, ip, user_agent)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, session.UserID, session.Username, session.Role, formatTime(session.CreatedAt), formatTime(session.ExpiresAt), session.IP, session.UserAgent); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`UPDATE admin_users SET last_login = ? WHERE id = ?`, formatTime(time.Now()), userID); err != nil {
+	session, _, err := createSessionForActiveUserTx(tx, sessionID, userID, ip, ua, time.Now().UTC())
+	if err != nil {
 		return nil, err
 	}
 	if err := s.maybeFailSave(); err != nil {
@@ -1522,7 +1514,46 @@ func (s *AdminStore) CreateSession(userID, username, role, ip, ua string) (*Admi
 	if err := commitTx(tx, &committed); err != nil {
 		return nil, err
 	}
-	return &session, nil
+	return session, nil
+}
+
+func createSessionForActiveUserTx(tx *sql.Tx, sessionID, userID, ip, ua string, now time.Time) (*AdminSession, User, error) {
+	user, err := getUserInTx(tx, userID)
+	if err != nil {
+		return nil, User{}, err
+	}
+	if user.Status != UserStatusActive {
+		return nil, User{}, ErrUserDisabled
+	}
+	role := "user"
+	if user.IsAdmin {
+		role = "admin"
+	}
+	session := &AdminSession{
+		ID:        sessionID,
+		UserID:    user.ID,
+		Username:  user.Username,
+		Role:      role,
+		CreatedAt: now,
+		ExpiresAt: now.Add(sessionDefaultTTL),
+		IP:        ip,
+		UserAgent: ua,
+	}
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
+		return nil, User{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO user_sessions (id, user_id, created_at, expires_at, ip, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?)`, session.ID, session.UserID, formatTime(session.CreatedAt), formatTime(session.ExpiresAt), session.IP, session.UserAgent); err != nil {
+		return nil, User{}, err
+	}
+	nowText := formatTime(now)
+	if _, err := tx.Exec(`UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?`, nowText, nowText, userID); err != nil {
+		return nil, User{}, err
+	}
+	user.Role = role
+	user.LastLogin = &now
+	user.UpdatedAt = now
+	return session, user, nil
 }
 
 // GetSession retrieves the specified session (returns nil if not found or expired).
@@ -1530,7 +1561,11 @@ func (s *AdminStore) GetSession(sessionID string) *AdminSession {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	session, err := scanAdminSession(s.db.QueryRow(`SELECT id, user_id, username, role, created_at, expires_at, ip, user_agent FROM admin_sessions WHERE id = ?`, sessionID))
+	session, err := scanAdminSession(s.db.QueryRow(`SELECT s.id, s.user_id, u.username,
+		CASE WHEN u.is_admin = 1 THEN 'admin' ELSE 'user' END,
+		s.created_at, s.expires_at, s.ip, s.user_agent
+		FROM user_sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.id = ? AND u.status = ?`, sessionID, string(UserStatusActive)))
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -1556,7 +1591,7 @@ func (s *AdminStore) DeleteSession(sessionID string) error {
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE id = ?`, sessionID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE id = ?`, sessionID); err != nil {
 		return err
 	}
 	if err := s.maybeFailSave(); err != nil {
@@ -1577,7 +1612,7 @@ func (s *AdminStore) DeleteSessionsByUserID(userID string) error {
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	if _, err := tx.Exec(`DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
 	if err := s.maybeFailSave(); err != nil {
@@ -1599,7 +1634,7 @@ func (s *AdminStore) CleanExpiredSessions() error {
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 
-	result, err := tx.Exec(`DELETE FROM admin_sessions WHERE expires_at <= ?`, now)
+	result, err := tx.Exec(`DELETE FROM user_sessions WHERE expires_at <= ?`, now)
 	if err != nil {
 		return err
 	}
@@ -1628,7 +1663,7 @@ func scanAPIKeyBase(row dbScanner) (APIKey, error) {
 	var createdAt string
 	var expiresAt sql.NullString
 	var isActive int
-	if err := row.Scan(&key.ID, &key.Name, &key.KeyHash, &key.LookupDigest, &createdAt, &expiresAt, &isActive, &key.MaxUses, &key.UseCount); err != nil {
+	if err := row.Scan(&key.ID, &key.OwnerUserID, &key.Name, &key.KeyHash, &key.LookupDigest, &createdAt, &expiresAt, &isActive, &key.MaxUses, &key.UseCount); err != nil {
 		return APIKey{}, err
 	}
 	parsedCreatedAt, err := parseTime(createdAt)
@@ -1646,7 +1681,7 @@ func scanAPIKeyBase(row dbScanner) (APIKey, error) {
 }
 
 func apiKeySelectColumns() string {
-	return `id, name, key_hash, lookup_digest, created_at, expires_at, is_active, max_uses, use_count`
+	return `id, owner_user_id, name, key_hash, lookup_digest, created_at, expires_at, is_active, max_uses, use_count`
 }
 
 func loadAPIKeyPermissions(q dbQuerier, keyID string) (permissions []string, err error) {
@@ -1707,9 +1742,12 @@ func loadAPIKeys(q dbQuerier) ([]APIKey, error) {
 }
 
 func insertAPIKey(exec dbExecer, key APIKey) error {
-	if _, err := exec.Exec(`INSERT INTO api_keys (id, name, key_hash, lookup_digest, created_at, expires_at, is_active, max_uses, use_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		key.ID, key.Name, key.KeyHash, key.LookupDigest, formatTime(key.CreatedAt), optionalTimePtrValue(key.ExpiresAt), boolToInt(key.IsActive), key.MaxUses, key.UseCount); err != nil {
+	if key.OwnerUserID == "" {
+		return fmt.Errorf("api key owner user id must not be empty")
+	}
+	if _, err := exec.Exec(`INSERT INTO api_keys (id, owner_user_id, name, key_hash, lookup_digest, created_at, expires_at, is_active, max_uses, use_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		key.ID, key.OwnerUserID, key.Name, key.KeyHash, key.LookupDigest, formatTime(key.CreatedAt), optionalTimePtrValue(key.ExpiresAt), boolToInt(key.IsActive), key.MaxUses, key.UseCount); err != nil {
 		return err
 	}
 	for _, permission := range key.Permissions {
@@ -1765,6 +1803,17 @@ func (s *AdminStore) validateClientKeyLocked(q dbQuerier, key string) (bool, err
 
 	for _, k := range keys {
 		if err := bcrypt.CompareHashAndPassword([]byte(k.KeyHash), []byte(key)); err == nil {
+			var ownerStatus string
+			ownerErr := q.QueryRow(`SELECT status FROM users WHERE id = ?`, k.OwnerUserID).Scan(&ownerStatus)
+			if ownerErr == sql.ErrNoRows {
+				return false, ErrUserDisabled
+			}
+			if ownerErr != nil {
+				return false, fmt.Errorf("load API key owner: %w", ownerErr)
+			}
+			if UserStatus(ownerStatus) != UserStatusActive {
+				return false, ErrUserDisabled
+			}
 			if !k.IsActive {
 				return false, ErrClientKeyDisabled
 			}
@@ -1888,7 +1937,17 @@ func (s *AdminStore) RegisterClientAndExchangeToken(key, installID string, info 
 		return nil, fmt.Errorf("key validation failed: %w", err)
 	}
 
-	client, created, err := getOrCreateClientInTx(tx, installID, info, ip, now)
+	apiKey, err := findKeyByRawLocked(tx, key)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == nil {
+		return nil, ErrClientKeyInvalid
+	}
+	if err := ensureOperationalUserInTx(tx, apiKey.OwnerUserID); err != nil {
+		return nil, err
+	}
+	client, created, err := getOrCreateClientInTx(tx, apiKey.OwnerUserID, installID, info, ip, now)
 	if err != nil {
 		return nil, err
 	}
@@ -2322,22 +2381,22 @@ func (s *AdminStore) GetClientTokenByInstallID(installID string) *ClientToken {
 	return nil
 }
 
-func (s *AdminStore) AddAPIKey(name, keyString string, permissions []string, expiresAt *time.Time) (*APIKey, error) {
+func (s *AdminStore) newAPIKey(name, keyString string, permissions []string, expiresAt *time.Time) (APIKey, error) {
 	permissions, err := normalizeKeyPermissions(permissions)
 	if err != nil {
-		return nil, err
+		return APIKey{}, err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(keyString), s.bcryptCost)
 	if err != nil {
-		return nil, err
+		return APIKey{}, err
 	}
 
 	keyID, err := generateUUIDE()
 	if err != nil {
-		return nil, err
+		return APIKey{}, err
 	}
-	k := APIKey{
+	return APIKey{
 		ID:           keyID,
 		Name:         name,
 		KeyHash:      string(hash),
@@ -2346,7 +2405,18 @@ func (s *AdminStore) AddAPIKey(name, keyString string, permissions []string, exp
 		CreatedAt:    time.Now(),
 		ExpiresAt:    expiresAt,
 		IsActive:     true,
+	}, nil
+}
+
+func (s *AdminStore) addAPIKeyForUser(ownerUserID, name, keyString string, permissions []string, expiresAt *time.Time) (*APIKey, error) {
+	if ownerUserID == "" {
+		return nil, fmt.Errorf("api key owner user id must not be empty")
 	}
+	k, err := s.newAPIKey(name, keyString, permissions, expiresAt)
+	if err != nil {
+		return nil, err
+	}
+	k.OwnerUserID = ownerUserID
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2357,6 +2427,9 @@ func (s *AdminStore) AddAPIKey(name, keyString string, permissions []string, exp
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
+	if err := ensureOperationalUserInTx(tx, ownerUserID); err != nil {
+		return nil, err
+	}
 
 	if err := insertAPIKey(tx, k); err != nil {
 		return nil, err
@@ -2371,6 +2444,54 @@ func (s *AdminStore) AddAPIKey(name, keyString string, permissions []string, exp
 	return &k, nil
 }
 
+// AddAPIKeyForUser creates a key whose owner comes from the server-selected
+// user scope.  Request payloads must never supply a different owner.
+func (s *AdminStore) AddAPIKeyForUser(ownerUserID, name, keyString string, permissions []string, expiresAt *time.Time) (*APIKey, error) {
+	return s.addAPIKeyForUser(ownerUserID, name, keyString, permissions, expiresAt)
+}
+
+// AddAPIKey remains for existing internal fixtures.  It deterministically
+// assigns the oldest active administrator rather than permitting a NULL owner.
+func (s *AdminStore) AddAPIKey(name, keyString string, permissions []string, expiresAt *time.Time) (*APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Do not call addAPIKeyForUser while holding the lock.  This compatibility
+	// path duplicates the short transaction to preserve the single lock scope.
+	permissions, err := normalizeKeyPermissions(permissions)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(keyString), s.bcryptCost)
+	if err != nil {
+		return nil, err
+	}
+	keyID, err := generateUUIDE()
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	ownerUserID, err := legacyOwnerUserIDInTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	k := APIKey{ID: keyID, OwnerUserID: ownerUserID, Name: name, KeyHash: string(hash), LookupDigest: apiKeyLookupDigest(keyString), Permissions: permissions, CreatedAt: time.Now(), ExpiresAt: expiresAt, IsActive: true}
+	if err := insertAPIKey(tx, k); err != nil {
+		return nil, err
+	}
+	if err := s.maybeFailSave(); err != nil {
+		return nil, err
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
 func (s *AdminStore) GetAPIKeys() []APIKey {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2381,6 +2502,40 @@ func (s *AdminStore) GetAPIKeys() []APIKey {
 		return nil
 	}
 	return keys
+}
+
+func (s *AdminStore) GetAPIKeysForUser(ownerUserID string) ([]APIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT `+apiKeySelectColumns()+` FROM api_keys WHERE owner_user_id = ? ORDER BY created_at, id`, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]APIKey, 0)
+	for rows.Next() {
+		key, err := scanAPIKeyBase(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	for i := range keys {
+		permissions, err := loadAPIKeyPermissions(s.db, keys[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		keys[i].Permissions = permissions
+	}
+	return keys, nil
 }
 
 func (s *AdminStore) SetAPIKeyActive(id string, active bool) error {
@@ -2423,35 +2578,6 @@ func (s *AdminStore) DeleteAPIKey(id string) error {
 	defer rollbackUnlessCommitted(tx, &committed)
 
 	result, err := tx.Exec(`DELETE FROM api_keys WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("API key %q not found", id)
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
-}
-
-// SetAPIKeyMaxUses sets the maximum use count for an API key.
-func (s *AdminStore) SetAPIKeyMaxUses(id string, maxUses int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	result, err := tx.Exec(`UPDATE api_keys SET max_uses = ? WHERE id = ?`, maxUses, id)
 	if err != nil {
 		return err
 	}

@@ -45,7 +45,7 @@ func newInitializedAdminStore(t *testing.T) *AdminStore {
 func countAdminSessions(t *testing.T, store *AdminStore) int {
 	t.Helper()
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM admin_sessions`).Scan(&count); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM user_sessions`).Scan(&count); err != nil {
 		t.Fatalf("count admin sessions: %v", err)
 	}
 	return count
@@ -53,14 +53,14 @@ func countAdminSessions(t *testing.T, store *AdminStore) int {
 
 func expireAdminSession(t *testing.T, store *AdminStore, sessionID string) {
 	t.Helper()
-	if _, err := store.db.Exec(`UPDATE admin_sessions SET expires_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), sessionID); err != nil {
+	if _, err := store.db.Exec(`UPDATE user_sessions SET expires_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), sessionID); err != nil {
 		t.Fatalf("expire admin session: %v", err)
 	}
 }
 
 func expireAllAdminSessions(t *testing.T, store *AdminStore) {
 	t.Helper()
-	if _, err := store.db.Exec(`UPDATE admin_sessions SET expires_at = ?`, formatTime(time.Now().Add(-time.Hour))); err != nil {
+	if _, err := store.db.Exec(`UPDATE user_sessions SET expires_at = ?`, formatTime(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatalf("expire admin sessions: %v", err)
 	}
 }
@@ -68,7 +68,7 @@ func expireAllAdminSessions(t *testing.T, store *AdminStore) {
 func adminUserLastLogin(t *testing.T, store *AdminStore, userID string) *time.Time {
 	t.Helper()
 	var raw sql.NullString
-	if err := store.db.QueryRow(`SELECT last_login FROM admin_users WHERE id = ?`, userID).Scan(&raw); err != nil {
+	if err := store.db.QueryRow(`SELECT last_login FROM users WHERE id = ?`, userID).Scan(&raw); err != nil {
 		t.Fatalf("load admin user last_login: %v", err)
 	}
 	lastLogin, err := parseOptionalTime(raw)
@@ -322,7 +322,7 @@ func TestAdminStore_ResetAdminUser(t *testing.T) {
 	}
 
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM admin_users`).Scan(&count); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		t.Fatalf("count admin users: %v", err)
 	}
 	if count != 1 {
@@ -426,13 +426,8 @@ func TestAdminStore_NewCorruptedFileFails(t *testing.T) {
 }
 
 func TestAdminStore_ClientBandwidthSettingsRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, serverDBFileName)
-	store, err := NewAdminStore(path)
-	if err != nil {
-		t.Fatalf("NewAdminStore failed: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := newInitializedAdminStore(t)
+	path := store.path
 
 	client, err := store.GetOrCreateClient("install-bandwidth-roundtrip", protocol.ClientInfo{
 		Hostname: "bandwidth-roundtrip",
@@ -465,7 +460,7 @@ func TestAdminStore_ClientBandwidthSettingsRoundTrip(t *testing.T) {
 }
 
 func TestAdminStore_UpdateClientStatsPreservesZeroUpdatedAt(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	client, err := store.GetOrCreateClient("install-zero-updated-at", protocol.ClientInfo{
 		Hostname: "zero-updated-at",
 		OS:       "linux",
@@ -499,7 +494,7 @@ func TestAdminStore_UpdateClientStatsPreservesZeroUpdatedAt(t *testing.T) {
 }
 
 func TestAdminStore_UpdateClientStatsRejectsUint64SQLiteOverflow(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	client, err := store.GetOrCreateClient("install-overflow-stats", protocol.ClientInfo{
 		Hostname: "overflow-stats",
 		OS:       "linux",
@@ -522,7 +517,7 @@ func TestAdminStore_UpdateClientStatsRejectsUint64SQLiteOverflow(t *testing.T) {
 }
 
 func TestLoadClientStatsRejectsNegativePersistedCounter(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	client, err := store.GetOrCreateClient("install-negative-stats", protocol.ClientInfo{
 		Hostname: "negative-stats",
 		OS:       "linux",
@@ -612,7 +607,7 @@ func TestAdminStore_ValidateClientKey_NoKeysAfterInit(t *testing.T) {
 }
 
 func TestAdminStore_ValidateClientKey_Valid(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-test-key-123"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -625,7 +620,7 @@ func TestAdminStore_ValidateClientKey_Valid(t *testing.T) {
 }
 
 func TestAdminStore_ValidateClientKey_Invalid(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	if _, err := store.AddAPIKey("test", "sk-real-key", []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
 	}
@@ -661,7 +656,7 @@ func TestAdminStore_ValidateClientKey_InvalidModernDigestMiss(t *testing.T) {
 }
 
 func TestAdminStore_ValidateClientKey_EmptyWhenKeysExist(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	if _, err := store.AddAPIKey("test", "sk-real-key", []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
 	}
@@ -676,7 +671,7 @@ func TestAdminStore_ValidateClientKey_EmptyWhenKeysExist(t *testing.T) {
 }
 
 func TestAdminStore_ValidateClientKey_Expired(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	past := time.Now().Add(-1 * time.Hour)
 	if _, err := store.AddAPIKey("expired", "sk-expired-key", []string{"connect"}, &past); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -694,7 +689,7 @@ func TestAdminStore_ValidateClientKey_Expired(t *testing.T) {
 // --- API Key CRUD ---
 
 func TestAdminStore_AddAndGetAPIKeys(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 
 	keys := store.GetAPIKeys()
 	if len(keys) != 0 {
@@ -711,6 +706,81 @@ func TestAdminStore_AddAndGetAPIKeys(t *testing.T) {
 	keys = store.GetAPIKeys()
 	if len(keys) != 1 {
 		t.Errorf("expected 1 available key, got %d", len(keys))
+	}
+}
+
+func TestAdminStore_GetAPIKeysForUserCompletesWithSingleConnection(t *testing.T) {
+	store := newInitializedAdminStore(t)
+	owner, err := store.ValidateAdminPassword("admin", "Admin1234")
+	if err != nil {
+		t.Fatalf("load initialized owner: %v", err)
+	}
+	if _, err := store.AddAPIKeyForUser(owner.ID, "single-connection", "sk-single-connection", []string{"connect"}, nil); err != nil {
+		t.Fatalf("create API key: %v", err)
+	}
+
+	type result struct {
+		keys []APIKey
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		keys, err := store.GetAPIKeysForUser(owner.ID)
+		done <- result{keys: keys, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("list API keys: %v", got.err)
+		}
+		if len(got.keys) != 1 || len(got.keys[0].Permissions) != 1 || got.keys[0].Permissions[0] != "connect" {
+			t.Fatalf("listed API keys = %+v, want one key with its permission", got.keys)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("GetAPIKeysForUser did not finish with MaxOpenConns=1")
+	}
+}
+
+func TestAdminStore_GetRegisteredClientsForUserCompletesWithSingleConnection(t *testing.T) {
+	store := newInitializedAdminStore(t)
+	owner, err := store.ValidateAdminPassword("admin", "Admin1234")
+	if err != nil {
+		t.Fatalf("load initialized owner: %v", err)
+	}
+	client, err := store.GetOrCreateClientForUser(owner.ID, "single-connection-client", protocol.ClientInfo{
+		Hostname: "single-connection-client",
+		OS:       "linux",
+		Arch:     "amd64",
+	}, "127.0.0.1:1234")
+	if err != nil {
+		t.Fatalf("create registered client: %v", err)
+	}
+	stats := protocol.SystemStats{CPUUsage: 12.5, MemTotal: 1024, MemUsed: 512}
+	if err := store.UpdateClientStats(client.ID, client.Info, stats, "127.0.0.1:1235"); err != nil {
+		t.Fatalf("persist client stats: %v", err)
+	}
+
+	type result struct {
+		clients []RegisteredClient
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		clients, err := store.GetRegisteredClientsForUser(owner.ID)
+		done <- result{clients: clients, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("list registered clients: %v", got.err)
+		}
+		if len(got.clients) != 1 || got.clients[0].Stats == nil || got.clients[0].Stats.MemUsed != stats.MemUsed {
+			t.Fatalf("listed registered clients = %+v, want one client with persisted stats", got.clients)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("GetRegisteredClientsForUser did not finish with MaxOpenConns=1")
 	}
 }
 
@@ -954,7 +1024,7 @@ func TestAdminStore_Session_DeleteByUserID(t *testing.T) {
 	store := newInitializedAdminStore(t)
 
 	s1 := mustCreateSession(t, store, "user-1", "admin", "admin", "1.1.1.1", "ua")
-	if err := store.DeleteSessionsByUserID("user-1"); err != nil {
+	if err := store.DeleteSessionsByUserID(s1.UserID); err != nil {
 		t.Fatalf("DeleteSessionsByUserID failed: %v", err)
 	}
 
@@ -994,7 +1064,7 @@ func TestAdminStore_CreateSession_SaveFailureRollsBack(t *testing.T) {
 	store.failSaveErr = saveErr
 	store.failSaveCount = 1
 
-	session, err := store.CreateSession("user-1", "admin", "admin", "127.0.0.1", "ua")
+	session, err := store.CreateSession(user.ID, user.Username, user.Role, "127.0.0.1", "ua")
 	if !errors.Is(err, saveErr) {
 		t.Fatalf("CreateSession should return save error, got %v", err)
 	}
@@ -1130,7 +1200,7 @@ func TestAdminStore_GetServerConfigE_ReturnsStorageError(t *testing.T) {
 // ============================================================
 
 func TestAdminStore_Token_ExchangeAndValidate(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-test-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1162,7 +1232,7 @@ func TestAdminStore_Token_ExchangeAndValidate(t *testing.T) {
 	}
 }
 func TestAdminStore_Token_TouchRefreshesActivityAndIP(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-touch-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1194,7 +1264,7 @@ func TestAdminStore_Token_TouchRefreshesActivityAndIP(t *testing.T) {
 }
 
 func TestAdminStore_Token_ExchangeSaveFailureRollsBack(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-test-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1220,7 +1290,7 @@ func TestAdminStore_Token_ExchangeSaveFailureRollsBack(t *testing.T) {
 }
 
 func TestAdminStore_Token_ExchangeConsumesKeyUseCount(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-counted-key"
 	if _, err := store.AddAPIKey("counted", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1253,7 +1323,7 @@ func TestAdminStore_Token_ExchangeConsumesKeyUseCount(t *testing.T) {
 }
 
 func TestAdminStore_Token_ValidateExpired(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-expiry-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1277,7 +1347,7 @@ func TestAdminStore_Token_ValidateExpired(t *testing.T) {
 }
 
 func TestAdminStore_Token_ValidateNinetyDayInactiveTokenAndRefreshesActivity(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-upgrade-window-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1303,7 +1373,7 @@ func TestAdminStore_Token_ValidateNinetyDayInactiveTokenAndRefreshesActivity(t *
 }
 
 func TestAdminStore_Token_CleanupPreservesNinetyDayInactiveTokenAndDeletesExpiredBoundary(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-upgrade-cleanup-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1329,7 +1399,7 @@ func TestAdminStore_Token_CleanupPreservesNinetyDayInactiveTokenAndDeletesExpire
 }
 
 func TestAdminStore_Token_ValidateSaveFailureReturnsError(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-validate-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1366,7 +1436,7 @@ func TestAdminStore_Token_ValidateSaveFailureReturnsError(t *testing.T) {
 }
 
 func TestAdminStore_Token_ValidateRevoked(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-revoke-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1392,7 +1462,7 @@ func TestAdminStore_Token_ValidateRevoked(t *testing.T) {
 }
 
 func TestAdminStore_Token_ReuseExistingToken(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-reuse-key"
 	if _, err := store.AddAPIKey("reuse", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1430,7 +1500,7 @@ func TestAdminStore_Token_ReuseExistingToken(t *testing.T) {
 }
 
 func TestAdminStore_Token_ExchangeWithDifferentKeyForSameInstallCreatesNewToken(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	oldRawKey := "sk-old-key"
 	oldKey, err := store.AddAPIKey("old", oldRawKey, []string{"connect"}, nil)
 	if err != nil {
@@ -1509,7 +1579,7 @@ func TestAdminStore_Token_ExchangeWithDifferentKeyForSameInstallCreatesNewToken(
 }
 
 func TestAdminStore_RegisterClientAndExchangeTokenWithDifferentKeyRetainsClientID(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	keyA := "sk-register-key-a"
 	if _, err := store.AddAPIKey("key-a", keyA, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey(key A) error = %v", err)
@@ -1548,7 +1618,7 @@ func TestAdminStore_RegisterClientAndExchangeTokenWithDifferentKeyRetainsClientI
 }
 
 func TestAdminStore_Token_ReuseRequiresValidKey(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-reuse-key-guard"
 	if _, err := store.AddAPIKey("reuse-guard", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1564,7 +1634,7 @@ func TestAdminStore_Token_ReuseRequiresValidKey(t *testing.T) {
 }
 
 func TestAdminStore_Token_CleanExpired(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-clean-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)
@@ -1588,7 +1658,7 @@ func TestAdminStore_Token_CleanExpired(t *testing.T) {
 	}
 }
 func TestAdminStore_Token_CleanExpiredPreservesRecentlyTouched(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-clean-active-key"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)

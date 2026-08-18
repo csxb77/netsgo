@@ -2,16 +2,17 @@ import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Button } from '@/components/ui/button';
 import { Pencil, Check, X, Loader2, History } from 'lucide-react';
-import { api } from '@/lib/api';
+import { scopedClientApi } from '@/lib/api';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Client } from '@/types';
+import { invalidateResourceScope, type ResourceScope } from '@/lib/resource-scope';
 import { formatUptime } from '@/lib/format';
 import { getClientDisplayName } from '@/lib/client-utils';
-import { useAuthStore } from '@/stores/auth-store';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
 interface ClientHeaderProps {
+  scope: ResourceScope;
   client: Client;
   onShowActivity?: () => void;
 }
@@ -22,10 +23,9 @@ const osLabels: Record<string, string> = {
   windows: 'Windows',
 };
 
-export function ClientHeader({ client, onShowActivity }: ClientHeaderProps) {
+export function ClientHeader({ scope, client, onShowActivity }: ClientHeaderProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const canReadActivity = useAuthStore((state) => state.user?.role === 'admin');
 
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -57,10 +57,8 @@ export function ClientHeader({ client, onShowActivity }: ClientHeaderProps) {
   const saveDisplayName = async () => {
     setIsSaving(true);
     try {
-      await api.put(`/api/clients/${encodeURIComponent(client.id)}/display-name`, {
-        display_name: editValue.trim(),
-      });
-      queryClient.invalidateQueries({ queryKey: ['clients'] });
+      await scopedClientApi.updateDisplayName(scope, client.id, editValue.trim());
+      await invalidateResourceScope(queryClient, scope);
       setIsEditing(false);
       setSaveError(null);
     } catch (err) {
@@ -232,7 +230,7 @@ export function ClientHeader({ client, onShowActivity }: ClientHeaderProps) {
       </div>
 
       <div className="flex shrink-0 items-start">
-        {canReadActivity && onShowActivity ? (
+        {onShowActivity ? (
           <Button variant="outline" size="sm" className="gap-1.5" onClick={onShowActivity}>
             <History className="size-3.5" />
             {t('activity.viewTimeline')}

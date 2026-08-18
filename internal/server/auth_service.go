@@ -20,6 +20,7 @@ type AuthService struct {
 	clientRateLimitUpdateMu      sync.Mutex
 	clientRateLimitAfterSaveHook func()
 	mfaLimiter                   *mfaAttemptLimiter
+	passkeyBeginLimiter          *RateLimiter
 	authTimeout                  time.Duration
 }
 
@@ -42,6 +43,11 @@ func (a *AuthService) initRateLimiters(clientSettings ClientAuthRateLimitSetting
 
 	a.replaceClientRateLimiter(clientSettings)
 	a.mfaLimiter = newMFAAttemptLimiter(time.Minute, 10, 5*time.Minute)
+	a.passkeyBeginLimiter = NewRateLimiter(RateLimiterConfig{
+		WindowSize:      time.Minute,
+		MaxRequests:     adminPasskeyLoginBeginRateLimit,
+		CleanupInterval: 10 * time.Minute,
+	})
 }
 
 func newClientAuthRateLimiter(settings ClientAuthRateLimitSettings) *RateLimiter {
@@ -110,6 +116,9 @@ func (a *AuthService) deleteClientRateLimit(ip string) bool {
 func (a *AuthService) stopRateLimiters() {
 	if a.loginLimiter != nil {
 		a.loginLimiter.Stop()
+	}
+	if a.passkeyBeginLimiter != nil {
+		a.passkeyBeginLimiter.Stop()
 	}
 	a.clientLimiterMu.Lock()
 	clientLimiter := a.clientLimiter

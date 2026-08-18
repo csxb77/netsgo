@@ -1,11 +1,13 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"netsgo/pkg/protocol"
 )
@@ -56,6 +58,38 @@ func TestClientActivityOnlineBeforeOfflineAndDeduplicated(t *testing.T) {
 	}
 	if page.Items[0].Severity != ActivitySeverityWarning {
 		t.Fatalf("unexpected disconnect severity = %q", page.Items[0].Severity)
+	}
+}
+
+func TestClientActivityUsesRegisteredDisplayName(t *testing.T) {
+	s := newClientActivityServer(t)
+	now := formatTime(time.Now().UTC())
+	if _, err := s.serverDB.Exec(`INSERT INTO registered_clients
+		(id, install_id, display_name, hostname, created_at, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?)`, "client-display", "install-display", "Office Mac", "stored-host", now, now); err != nil {
+		t.Fatalf("insert registered client: %v", err)
+	}
+	client := &ClientConn{
+		ID: "client-display", InstallID: "install-display", Info: protocol.ClientInfo{Hostname: "wire-host"},
+		generation: 1, state: clientStatePendingData, proxies: make(map[string]*ProxyTunnel),
+	}
+	id := s.appendClientLifecycle(client, "online", clientDisconnectCause{})
+	if id == 0 {
+		t.Fatal("appendClientLifecycle() did not persist an event")
+	}
+	item, err := s.activityStore.GetByID(id)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	var payload activityPayloadV1
+	if err := json.Unmarshal(item.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.SummaryArgs.ClientName != "Office Mac" || item.Actor.Name != "Office Mac" {
+		t.Fatalf("client lifecycle names = payload %q actor %q", payload.SummaryArgs.ClientName, item.Actor.Name)
+	}
+	if len(item.Clients) != 1 || item.Clients[0].DisplayName != "Office Mac" || item.Clients[0].Hostname != "stored-host" {
+		t.Fatalf("client lifecycle snapshot = %+v", item.Clients)
 	}
 }
 

@@ -6,7 +6,11 @@ import { ActivityFilters } from '@/components/custom/activity/ActivityFilters';
 import type { ActivityFilterValue } from '@/components/custom/activity/severity-meta';
 import { ActivityTimeline } from '@/components/custom/activity/ActivityTimeline';
 import { dashboardRoute } from '@/routes/dashboard';
-import { requireActivityAdmin } from '@/lib/auth';
+import { requireConsoleAuth } from '@/lib/auth';
+import { adminUserResourceScope, SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
+import { useAuthStore } from '@/stores/auth-store';
+import { useAllUsers } from '@/hooks/use-users';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { ActivityCategory, ActivityScope, ActivitySeverity } from '@/types';
 
 const severityValues = new Set<ActivitySeverity>(['debug', 'info', 'warning', 'error']);
@@ -17,6 +21,7 @@ export interface ActivitySearch {
   scope: ActivityScope;
   client_id?: string;
   tunnel_id?: string;
+  user_id?: string;
   severity: ActivitySeverity[];
   category: ActivityCategory[];
   from?: string;
@@ -47,6 +52,7 @@ export function normalizeActivitySearch(search: Record<string, unknown>): Activi
     scope,
     client_id: scope === 'client' ? clientId : undefined,
     tunnel_id: scope === 'tunnel' ? tunnelId : undefined,
+    user_id: typeof search.user_id === 'string' && search.user_id.trim() ? search.user_id : undefined,
     severity: severity.length > 0 ? severity : defaultSeverities,
     category,
     from: validDate(search.from),
@@ -63,8 +69,19 @@ function dateBoundary(value: string | undefined, nextDay = false) {
 
 function ActivityPage() {
   const { t } = useTranslation();
+  const principal = useAuthStore((state) => state.user);
   const search = dashboardActivityRoute.useSearch();
   const navigate = useNavigate({ from: dashboardActivityRoute.fullPath });
+  const isAdmin = principal?.is_admin === true;
+  const users = useAllUsers({ enabled: isAdmin });
+  // A selected user switches to the explicit target-user endpoint and SSE
+  // scope.  That prevents a global stream event from being inserted into a
+  // user-filtered cache before the browser can establish its ownership.
+  const readScope = isAdmin
+    ? search.user_id
+      ? adminUserResourceScope(search.user_id)
+      : { kind: 'admin-global' as const }
+    : SELF_RESOURCE_SCOPE;
   const scopeId = search.scope === 'client' ? search.client_id : search.scope === 'tunnel' ? search.tunnel_id : undefined;
   const query = {
     scope: search.scope,
@@ -108,9 +125,35 @@ function ActivityPage() {
       <motion.div variants={fadeUp}>
         <section className="rounded-xl border border-border/40 bg-card/50 shadow-sm backdrop-blur-sm">
           <header className="rounded-t-xl border-b border-border/40 bg-muted/20 px-3 py-2.5 sm:px-4">
-            <ActivityFilters value={filters} onChange={updateFilters} />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <ActivityFilters value={filters} onChange={updateFilters} />
+              {isAdmin ? (
+                <Select
+                  value={search.user_id ?? '__all__'}
+                  onValueChange={(value) => {
+                    navigate({
+                      search: (current) => ({
+                        ...current,
+                        user_id: value === '__all__' ? undefined : value,
+                      }),
+                      replace: true,
+                    });
+                  }}
+                >
+                  <SelectTrigger size="sm" className="h-8 w-full sm:ml-auto sm:w-52">
+                    <SelectValue placeholder={t('activity.allUsers')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__all__">{t('activity.allUsers')}</SelectItem>
+                    {(users.data ?? []).map((user) => (
+                      <SelectItem key={user.id} value={user.id}>{user.username}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+            </div>
           </header>
-          <ActivityTimeline query={query} />
+          <ActivityTimeline readScope={readScope} query={query} />
         </section>
       </motion.div>
     </motion.div>
@@ -126,6 +169,6 @@ export const dashboardActivityRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/activity',
   validateSearch: normalizeActivitySearch,
-  beforeLoad: requireActivityAdmin,
+  beforeLoad: requireConsoleAuth,
   component: ActivityPage,
 });

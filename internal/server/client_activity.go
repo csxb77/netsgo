@@ -21,6 +21,8 @@ func normalizeClientDisconnectCause(reason string) clientDisconnectCause {
 		return clientDisconnectCause{ReasonCode: "normal_closure", Expected: true}
 	case "pending_data_timeout":
 		return clientDisconnectCause{ReasonCode: "timeout"}
+	case "user_disabled", "owner_not_operational":
+		return clientDisconnectCause{ReasonCode: "user_disabled", Expected: true}
 	case "data_session_closed":
 		return clientDisconnectCause{ReasonCode: "data_channel_closed"}
 	case "auth_response_failed", "data_session_start_failed", "control_loop_exit":
@@ -35,7 +37,21 @@ func normalizeClientDisconnectCause(reason string) clientDisconnectCause {
 func (s *Server) clientLifecycleSpec(client *ClientConn, action string, cause clientDisconnectCause) ActivityEventSpec {
 	info := client.GetInfo()
 	managed := !strings.HasPrefix(client.ID, "unmanaged-")
-	name := info.Hostname
+	displayName := ""
+	hostname := info.Hostname
+	if managed && s.serverDB != nil {
+		var persistedDisplayName, persistedHostname string
+		if err := s.serverDB.QueryRow(`SELECT display_name, hostname FROM registered_clients WHERE id = ?`, client.ID).Scan(&persistedDisplayName, &persistedHostname); err == nil {
+			displayName = persistedDisplayName
+			if strings.TrimSpace(persistedHostname) != "" {
+				hostname = persistedHostname
+			}
+		}
+	}
+	name := displayName
+	if strings.TrimSpace(name) == "" {
+		name = hostname
+	}
 	if name == "" {
 		name = client.ID
 	}
@@ -45,16 +61,18 @@ func (s *Server) clientLifecycleSpec(client *ClientConn, action string, cause cl
 		severity = ActivitySeverityWarning
 	}
 	return ActivityEventSpec{
-		OccurredAt: time.Now().UTC(),
-		Severity:   severity,
-		Category:   ActivityCategoryClient,
-		Action:     action,
-		Source:     "server",
-		Actor:      ActivityActor{Type: "client", ID: client.ID, Name: name},
-		DedupeKey:  fmt.Sprintf("%s:%s:%d:%s", s.activityBootID, client.ID, client.generation, action),
-		Payload:    payload,
+		OccurredAt:    time.Now().UTC(),
+		Severity:      severity,
+		Category:      ActivityCategoryClient,
+		Action:        action,
+		Source:        "server",
+		Actor:         ActivityActor{Type: "client", ID: client.ID, Name: name},
+		ScopeUserID:   client.OwnerUserID,
+		SubjectUserID: client.OwnerUserID,
+		DedupeKey:     fmt.Sprintf("%s:%s:%d:%s", s.activityBootID, client.ID, client.generation, action),
+		Payload:       payload,
 		Clients: []ActivityClientSubject{{
-			ClientID: client.ID, Relation: "subject", Hostname: info.Hostname,
+			ClientID: client.ID, Relation: "subject", DisplayName: displayName, Hostname: hostname,
 		}},
 	}
 }

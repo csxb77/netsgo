@@ -12,6 +12,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/custom/common/ConfirmDialog';
 import type { Client } from '@/types';
 import { getClientDisplayName } from '@/lib/client-utils';
+import { SELF_RESOURCE_SCOPE, type ResourceScope } from '@/lib/resource-scope';
+import { requireConsoleAuth } from '@/lib/auth';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
@@ -25,12 +27,11 @@ const fadeUp = {
   show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' as const } },
 };
 
-function ClientDetailPage() {
+export function ClientDetailPage({ scope, clientId }: { scope: ResourceScope; clientId: string }) {
   const { t } = useTranslation();
-  const { clientId } = useParams({ from: '/dashboard/clients/$clientId' });
   const navigate = useNavigate();
-  const { data: clients, isLoading, isFetching } = useClients();
-  const deleteClient = useDeleteClient();
+  const { data: clients, isLoading, isFetching } = useClients(scope);
+  const deleteClient = useDeleteClient(scope);
   const [deleteTarget, setDeleteTarget] = useState<Client | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
 
@@ -38,9 +39,13 @@ function ClientDetailPage() {
 
   useEffect(() => {
     if (!isLoading && !isFetching && clients && !client) {
+      if (scope.kind === 'admin-user') {
+        navigate({ to: '/dashboard/users/$userId', params: { userId: scope.userId } });
+        return;
+      }
       navigate({ to: '/dashboard' });
     }
-  }, [isLoading, isFetching, clients, client, navigate]);
+  }, [isLoading, isFetching, clients, client, navigate, scope]);
 
   if (isLoading) {
     return (
@@ -64,13 +69,14 @@ function ClientDetailPage() {
       initial="hidden"
       animate="show"
     >
-      <motion.div variants={fadeUp}><ClientHeader client={client} onShowActivity={() => setActivityOpen(true)} /></motion.div>
-      <motion.div variants={fadeUp}><ClientInfoCard client={client} onRequestDelete={setDeleteTarget} /></motion.div>
-      <motion.div variants={fadeUp}><TunnelTable client={client} clients={clients ?? []} /></motion.div>
+      <motion.div variants={fadeUp}><ClientHeader scope={scope} client={client} onShowActivity={() => setActivityOpen(true)} /></motion.div>
+      <motion.div variants={fadeUp}><ClientInfoCard scope={scope} client={client} onRequestDelete={setDeleteTarget} /></motion.div>
+      <motion.div variants={fadeUp}><TunnelTable scope={scope} client={client} clients={clients ?? []} /></motion.div>
       <motion.div variants={fadeUp}>
-        <TrafficChart clientId={clientId} tunnels={client.proxies ?? []} />
+        <TrafficChart scope={scope} clientId={clientId} tunnels={client.proxies ?? []} />
       </motion.div>
       <ClientActivitySheet
+        scope={scope}
         key={clientId}
         client={client}
         open={activityOpen}
@@ -88,6 +94,10 @@ function ClientDetailPage() {
           deleteClient.mutate(target.id, {
             onSuccess: () => {
               toast.success(t('dashboard.nodeDeleted', { name: getClientDisplayName(target) }));
+              if (scope.kind === 'admin-user') {
+                navigate({ to: '/dashboard/users/$userId', params: { userId: scope.userId } });
+                return;
+              }
               navigate({ to: '/dashboard' });
             },
             onError: (err) => toast.error((err as Error).message),
@@ -100,8 +110,14 @@ function ClientDetailPage() {
   );
 }
 
+function SelfClientDetailRoute() {
+  const { clientId } = useParams({ from: '/dashboard/clients/$clientId' });
+  return <ClientDetailPage scope={SELF_RESOURCE_SCOPE} clientId={clientId} />;
+}
+
 export const dashboardClientRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/clients/$clientId',
-  component: ClientDetailPage,
+  beforeLoad: requireConsoleAuth,
+  component: SelfClientDetailRoute,
 });

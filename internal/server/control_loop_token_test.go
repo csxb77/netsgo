@@ -6,7 +6,7 @@ import (
 )
 
 func TestTouchClientTokenIfDueThrottlesSuccessfulRefreshes(t *testing.T) {
-	store := newTestAdminStore(t)
+	store := newInitializedAdminStore(t)
 	rawKey := "sk-control-touch"
 	if _, err := store.AddAPIKey("test", rawKey, []string{"connect"}, nil); err != nil {
 		t.Fatalf("AddAPIKey failed: %v", err)

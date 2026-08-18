@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"io/fs"
 	"net"
@@ -32,7 +33,16 @@ type Server struct {
 	activityBootID                      string              // random per complete server start; scopes lifecycle dedupe keys
 	serverDBCloseOnce                   sync.Once
 	serverDBCloseErr                    error
-	clientTunnelMutationMu              sync.Mutex        // serializes registered-client deletion with tunnel target migration
+	sseConnectionMu                     sync.Mutex
+	sseConnections                      *sseConnectionRegistry
+	clientTunnelMutationMu              sync.Mutex   // serializes registered-client deletion with tunnel target migration
+	userManagementMu                    sync.Mutex   // serializes user status/admin/delete transactions and last-admin checks
+	adminAuthorizationMu                sync.RWMutex // serializes privileged commits with role, status, and session changes
+	adminAuthorizationHook              func(stage string, principal *RequestPrincipal)
+	userLifecycleLocks                  sync.Map // userID -> *userLifecycleGate; entries live for the Server lifetime
+	userLifecycleHook                   func(stage, userID string)
+	userConvergenceHook                 func(context.Context, string) error
+	userConvergenceTimeout              time.Duration
 	serverConfigMutationMu              sync.Mutex        // serializes config persistence with port-policy enforcement
 	tunnelEventMu                       sync.Mutex        // preserves tunnel_changed ordering across state checks and publication
 	startTime                           time.Time         // server start time
@@ -73,11 +83,16 @@ type Server struct {
 	portPolicyAfterRuntimeCleanupHook   func(affectedTunnel)
 	p2pSignalDropHook                   func(string, string, protocol.P2PSignal) bool
 	restorePlaceholderBeforeInstallHook func(StoredTunnel, string)
+	controlAuthBeforeResponseHook       func(*ClientConn)
 }
 
 // ClientConn represents a connected client.
 type ClientConn struct {
-	ID             string
+	ID string
+	// OwnerUserID is resolved exclusively by Server control-channel
+	// authentication. It is never accepted from a Client protocol message.
+	OwnerUserID    string
+	OwnerEpoch     uint64
 	InstallID      string
 	Info           protocol.ClientInfo
 	infoMu         sync.RWMutex
@@ -90,7 +105,8 @@ type ClientConn struct {
 	prevStatsAt    time.Time             // time of previous snapshot
 	statsMu        sync.RWMutex          // protects stats / prevStats
 	conn           *websocket.Conn
-	mu             sync.Mutex
+	mu             sync.Mutex     // protects the control connection pointer
+	writeMu        sync.Mutex     // serializes control-channel writers without blocking connection teardown
 	dataSession    *yamux.Session // data channel yamux session
 	dataMu         sync.RWMutex   // protects dataSession
 	dataToken      string
@@ -112,6 +128,7 @@ func New(port int) *Server {
 		Port:                        port,
 		AllowLoopbackManagementHost: true,
 		events:                      NewEventBus(),
+		sseConnections:              newSSEConnectionRegistry(),
 		trafficAccumulator:          newTrafficAccumulator(),
 		auth:                        newAuthService(),
 		sessions:                    newSessionManager(),

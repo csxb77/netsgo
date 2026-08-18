@@ -107,7 +107,7 @@ func (s *Server) Start() error {
 	}
 
 	if err := s.initStore(); err != nil {
-		return fmt.Errorf("failed to initialize tunnel store: %w", err)
+		return fmt.Errorf("failed to initialize server storage: %w", err)
 	}
 
 	if s.auth.adminStore != nil {
@@ -269,6 +269,8 @@ func (s *Server) closeDone() {
 
 func (s *Server) Shutdown(ctx context.Context) (err error) {
 	log.Printf("🛑 Starting graceful shutdown...")
+	s.closeDone()
+	s.stopLongLivedAdmission()
 	defer func() {
 		if s.auth != nil && s.auth.adminStore != nil {
 			if closeErr := s.auth.adminStore.Close(); closeErr != nil {
@@ -310,9 +312,8 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 	select {
 	case <-s.p2pProjectionDone:
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
 	}
-	s.closeDone()
 	if s.auth != nil {
 		s.auth.stopRateLimiters()
 	}
@@ -322,6 +323,7 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 	}
 
 	if s.events != nil {
+		s.cancelAllSSE("server_shutdown")
 		s.events.Close()
 		log.Printf("📡 SSE event bus closed")
 	}
@@ -340,9 +342,21 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 
 	s.closeManagedConns("server_shutdown")
 
-	if err := s.waitForLongLivedHandlers(ctx); err != nil {
-		log.Printf("⚠️ Timed out waiting for long-lived handlers to exit: %v", err)
-		return err
+	if s.httpServer != nil {
+		if shutdownErr := s.httpServer.Shutdown(ctx); shutdownErr != nil {
+			log.Printf("⚠️ HTTP server shutdown failed: %v", shutdownErr)
+			_ = s.httpServer.Close()
+			if err == nil {
+				err = shutdownErr
+			}
+		}
+	}
+
+	if waitErr := s.waitForLongLivedHandlers(ctx); waitErr != nil {
+		log.Printf("⚠️ Timed out waiting for long-lived handlers to exit: %v", waitErr)
+		if err == nil {
+			err = waitErr
+		}
 	}
 
 	if s.trafficStore != nil {
@@ -352,15 +366,8 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 		}
 	}
 
-	if s.httpServer != nil {
-		if err := s.httpServer.Shutdown(ctx); err != nil {
-			log.Printf("⚠️ HTTP server shutdown failed: %v", err)
-			return err
-		}
-	}
-
 	log.Printf("✅ Graceful shutdown complete")
-	return nil
+	return err
 }
 
 func (s *Server) closeServerDB() error {

@@ -9,6 +9,10 @@ import (
 )
 
 func (s *Server) handleUpdateDisplayName(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
 	if clientID == "" {
 		writeAPIError(w, http.StatusBadRequest, "missing_client_id", "missing client id")
@@ -27,6 +31,16 @@ func (s *Server) handleUpdateDisplayName(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store unavailable")
 		return
 	}
+	if _, ok := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !ok {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
+		return
+	}
+	releaseMutation, err := s.acquireResourceMutation(scope, true)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	defer releaseMutation()
 
 	activityID, err := s.auth.adminStore.UpdateClientDisplayNameWithActivity(clientID, req.DisplayName, s.activityActorForRequest(r))
 	if err != nil {
@@ -55,6 +69,10 @@ func validateBandwidthSettings(settings protocol.BandwidthSettings) error {
 }
 
 func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
 	if clientID == "" {
 		writeAPIError(w, http.StatusBadRequest, "missing_client_id", "missing client id")
@@ -87,6 +105,16 @@ func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store unavailable")
 		return
 	}
+	if _, ok := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !ok {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
+		return
+	}
+	releaseMutation, err := s.acquireResourceTunnelMutation(scope, true)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	defer releaseMutation()
 
 	activityID, err := s.auth.adminStore.UpdateClientBandwidthSettingsWithActivity(clientID, settings, s.activityActorForRequest(r))
 	if err != nil {
@@ -114,6 +142,10 @@ func (s *Server) handleUpdateBandwidthSettings(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
+	scope, scopeOK := requireResourceScope(w, r)
+	if !scopeOK {
+		return
+	}
 	clientID := r.PathValue("id")
 	if clientID == "" {
 		writeAPIError(w, http.StatusBadRequest, "missing_client_id", "missing client id")
@@ -123,8 +155,16 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "admin_store_unavailable", "admin store unavailable")
 		return
 	}
-	s.clientTunnelMutationMu.Lock()
-	defer s.clientTunnelMutationMu.Unlock()
+	if _, ok := s.auth.adminStore.GetRegisteredClientForUser(scope.OwnerUserID, clientID); !ok {
+		writeAPIError(w, http.StatusNotFound, "client_not_found", "client not found")
+		return
+	}
+	releaseMutation, err := s.acquireResourceTunnelMutation(scope, false)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	defer releaseMutation()
 	if _, ok := s.clients.Load(clientID); ok {
 		writeAPIError(w, http.StatusConflict, "client_online_delete_forbidden", "client is online or closing and cannot be deleted")
 		return

@@ -7,6 +7,43 @@ import (
 	"netsgo/pkg/protocol"
 )
 
+func TestLoginActivityScopesUnifiedUsers(t *testing.T) {
+	store := newInitializedAdminStore(t)
+	member, err := store.CreateUser("activity-member", "Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberActor := ActivityActor{Type: "user", ID: member.ID, Name: member.Username}
+	_, memberActivityID, err := store.CreateSessionWithActivity(member.ID, member.Username, member.Role, "192.0.2.1", "test", memberActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberActivity, err := store.activityStore.GetByID(memberActivityID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if memberActivity.ScopeUserID != member.ID || memberActivity.SubjectUserID != member.ID {
+		t.Fatalf("member login scope/subject = %q/%q, want %q/%q", memberActivity.ScopeUserID, memberActivity.SubjectUserID, member.ID, member.ID)
+	}
+
+	admin, err := store.ValidateUserPassword("admin", "Admin1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminActor := ActivityActor{Type: "admin", ID: admin.ID, Name: admin.Username}
+	_, adminActivityID, err := store.CreateSessionWithActivity(admin.ID, admin.Username, admin.Role, "192.0.2.2", "test", adminActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminActivity, err := store.activityStore.GetByID(adminActivityID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adminActivity.ScopeUserID != "" || adminActivity.SubjectUserID != admin.ID {
+		t.Fatalf("admin login scope/subject = %q/%q, want global/%q", adminActivity.ScopeUserID, adminActivity.SubjectUserID, admin.ID)
+	}
+}
+
 func TestAdminActivityAPIKeyCreationIsAtomic(t *testing.T) {
 	store := newInitializedAdminStore(t)
 	actor := ActivityActor{Type: "admin", ID: "user", Name: "admin"}
