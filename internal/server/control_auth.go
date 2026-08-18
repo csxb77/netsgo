@@ -368,7 +368,7 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 		DataToken: client.dataToken,
 		Code:      protocol.AuthCodeOK,
 	}
-	if err := writeAuthResult(conn, authResp); err != nil {
+	if err := client.writeAuthResult(authResp); err != nil {
 		if current, ok := s.clients.Load(clientID); ok && current == client {
 			_ = s.invalidateLogicalSessionIfCurrent(clientID, client.generation, "auth_response_failed")
 		}
@@ -426,4 +426,12 @@ func writeAuthResult(conn *websocket.Conn, authResp protocol.AuthResponse) error
 		return err
 	}
 	return conn.WriteJSON(message)
+}
+
+func (c *ClientConn) writeAuthResult(authResp protocol.AuthResponse) error {
+	message, err := protocol.NewMessage(protocol.MsgTypeAuthResp, authResp)
+	if err != nil {
+		return err
+	}
+	return c.writeJSON(message)
 }
