@@ -359,6 +359,9 @@ func (s *Server) handleAuth(conn *websocket.Conn, r *http.Request, clientAddr st
 	if registrationActivityID > 0 {
 		s.publishActivityID(registrationActivityID)
 	}
+	if s.controlAuthBeforeResponseHook != nil {
+		s.controlAuthBeforeResponseHook(client)
+	}
 
 	authResp := protocol.AuthResponse{
 		Success:   true,

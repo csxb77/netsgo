@@ -83,6 +83,7 @@ type Server struct {
 	portPolicyAfterRuntimeCleanupHook   func(affectedTunnel)
 	p2pSignalDropHook                   func(string, string, protocol.P2PSignal) bool
 	restorePlaceholderBeforeInstallHook func(StoredTunnel, string)
+	controlAuthBeforeResponseHook       func(*ClientConn)
 }
 
 // ClientConn represents a connected client.

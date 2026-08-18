@@ -174,10 +174,10 @@ jobs:
       - name: Install Playwright browser
         working-directory: web
         run: bunx playwright install --with-deps chromium
-      - name: Run Playwright client-to-client smoke E2E
+      - name: Run full Playwright E2E
         env:
           PLAYWRIGHT_RUNNER: xvfb-run -a
-        run: make test-playwright-e2e-smoke
+        run: make test-playwright-e2e-full
 
   cross-version-smoke:
     runs-on: ubuntu-latest

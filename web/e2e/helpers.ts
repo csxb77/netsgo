@@ -72,13 +72,17 @@ async function expectDashboardShell(page: Page) {
   await expect(page.getByRole('tablist')).toBeVisible();
   await expect(page.getByRole('tab', { name: /Clients/i })).toBeVisible();
   await expect(page.getByRole('tab', { name: /Tunnels/i })).toBeVisible();
-  await expect(page.getByText('Runtime status', { exact: true })).toBeVisible();
 }
 
 export async function login(page: Page) {
+  await loginAs(page, e2eConfig.adminUser, e2eConfig.adminPass);
+  await expect(page.getByText('Runtime status', { exact: true })).toBeVisible();
+}
+
+export async function loginAs(page: Page, username: string, password: string) {
   await gotoWhenReady(page, '/#/login');
-  await page.getByPlaceholder('Enter user account').fill(e2eConfig.adminUser);
-  await page.getByPlaceholder('Enter password').fill(e2eConfig.adminPass);
+  await page.getByPlaceholder('Enter user account').fill(username);
+  await page.getByPlaceholder('Enter password').fill(password);
   await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await expectDashboardShell(page);
 }
