@@ -304,12 +304,6 @@ func TestAuthMiddleware_ValidTokenSuccess(t *testing.T) {
 		} else if info.SessionID != session.ID {
 			t.Errorf("Expected SessionID %s in context, got %s", session.ID, info.SessionID)
 		}
-
-		// 验证兼容接口
-		adminInfo := GetAdminFromContext(r.Context())
-		if adminInfo == nil || adminInfo.SessionID != session.ID {
-			t.Errorf("GetAdminFromContext failed to get info")
-		}
 	})
 
 	handler.ServeHTTP(w, req)

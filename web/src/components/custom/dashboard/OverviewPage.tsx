@@ -9,7 +9,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { ServerInfoCard } from './ServerInfoCard';
 import { DashboardClientTable } from './DashboardClientTable';
 import { DashboardTunnelTable } from './DashboardTunnelTable';
-import { NetworkTopology } from './NetworkTopology';
+import { NetworkTopology } from './topology/NetworkTopology';
 import { buildDashboardTabMetrics, formatDashboardTabCount } from './dashboard-tab-metrics';
 import type { ResourceScope } from '@/lib/resource-scope';
 

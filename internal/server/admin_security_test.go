@@ -183,7 +183,8 @@ func TestPasskeyLoginCommitRejectsChangedCredentials(t *testing.T) {
 		{
 			name: "passkey deleted",
 			mutate: func(t *testing.T, store *AdminStore, user AdminUser, passkey AdminPasskey) {
-				if err := store.DeletePasskey(user.ID, passkey.ID); err != nil {
+				actor := ActivityActor{Type: "admin", ID: user.ID, Name: user.Username}
+				if _, err := store.DeletePasskeyWithActivity(user.ID, passkey.ID, actor); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -255,13 +256,14 @@ func TestAdminStore_TOTPRecoveryCodesAndReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCode failed: %v", err)
 	}
-	if _, err := store.ConfirmTOTPSetup(user.ID, setupToken, "000000"); err == nil {
+	actor := ActivityActor{Type: "admin", ID: user.ID, Name: user.Username}
+	if _, _, err := store.ConfirmTOTPSetupWithActivity(user.ID, setupToken, "000000", actor); err == nil {
 		t.Fatal("wrong TOTP setup code should be rejected")
 	}
 	if _, err := store.GetAuthChallenge(setupToken, adminAuthChallengeKindTOTPSetup); err != nil {
 		t.Fatalf("wrong TOTP setup code should not consume setup token: %v", err)
 	}
-	recoveryCodes, err := store.ConfirmTOTPSetup(user.ID, setupToken, code)
+	recoveryCodes, _, err := store.ConfirmTOTPSetupWithActivity(user.ID, setupToken, code, actor)
 	if err != nil {
 		t.Fatalf("ConfirmTOTPSetup failed: %v", err)
 	}

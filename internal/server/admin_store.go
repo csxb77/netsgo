@@ -1049,55 +1049,6 @@ func (s *AdminStore) GetOrCreateClient(installID string, info protocol.ClientInf
 	return &client, nil
 }
 
-func (s *AdminStore) TouchClient(clientID string, info protocol.ClientInfo, remoteAddr string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	lastIP := remoteIP(remoteAddr)
-	now := time.Now()
-	if lastIP == "" {
-		var existing string
-		err := s.db.QueryRow(`SELECT last_ip FROM registered_clients WHERE id = ?`, clientID).Scan(&existing)
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("client %q not found", clientID)
-		}
-		if err != nil {
-			return err
-		}
-		lastIP = existing
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	capabilitiesRaw, err := marshalClientCapabilities(info.Capabilities)
-	if err != nil {
-		return err
-	}
-	result, err := tx.Exec(`UPDATE registered_clients
-		SET hostname = ?, os = ?, arch = ?, ip = ?, version = ?, public_ipv4 = ?, public_ipv6 = ?, last_seen = ?, last_ip = ?, last_capabilities = ?
-		WHERE id = ?`,
-		info.Hostname, info.OS, info.Arch, info.IP, info.Version, info.PublicIPv4, info.PublicIPv6, formatTime(now), lastIP, capabilitiesRaw, clientID)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("client %q not found", clientID)
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
-}
-
 func cloneSystemStats(stats *protocol.SystemStats) *protocol.SystemStats {
 	if stats == nil {
 		return nil
@@ -1482,47 +1433,6 @@ func (s *AdminStore) GetRegisteredClientByInstallID(installID string) (Registere
 	return client, true
 }
 
-func (s *AdminStore) DeleteRegisteredClient(clientID string) error {
-	if clientID == "" {
-		return ErrRegisteredClientNotFound
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	var installID string
-	if err := tx.QueryRow(`SELECT install_id FROM registered_clients WHERE id = ?`, clientID).Scan(&installID); err != nil {
-		if err == sql.ErrNoRows {
-			return ErrRegisteredClientNotFound
-		}
-		return err
-	}
-
-	if _, err := tx.Exec(`DELETE FROM client_disk_partitions WHERE client_id = ?`, clientID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM client_stats WHERE client_id = ?`, clientID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM client_tokens WHERE client_id = ? OR install_id = ?`, clientID, installID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM registered_clients WHERE id = ?`, clientID); err != nil {
-		return err
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
-}
-
 func registeredClientBandwidthSettings(client RegisteredClient) protocol.BandwidthSettings {
 	return protocol.BandwidthSettings{
 		IngressBPS: client.IngressBPS,
@@ -1551,37 +1461,6 @@ func (s *AdminStore) UpdateClientBandwidthSettings(clientID string, settings pro
 	}
 	if count == 0 {
 		return ErrRegisteredClientNotFound
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
-}
-
-// ========== Display Name ==========
-
-// UpdateClientDisplayName updates the custom display name for a Client.
-func (s *AdminStore) UpdateClientDisplayName(clientID, displayName string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	result, err := tx.Exec(`UPDATE registered_clients SET display_name = ? WHERE id = ?`, displayName, clientID)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("client %q not found", clientID)
 	}
 	if err := s.maybeFailSave(); err != nil {
 		return err
@@ -2699,35 +2578,6 @@ func (s *AdminStore) DeleteAPIKey(id string) error {
 	defer rollbackUnlessCommitted(tx, &committed)
 
 	result, err := tx.Exec(`DELETE FROM api_keys WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("API key %q not found", id)
-	}
-	if err := s.maybeFailSave(); err != nil {
-		return err
-	}
-	return commitTx(tx, &committed)
-}
-
-// SetAPIKeyMaxUses sets the maximum use count for an API key.
-func (s *AdminStore) SetAPIKeyMaxUses(id string, maxUses int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
-	result, err := tx.Exec(`UPDATE api_keys SET max_uses = ? WHERE id = ?`, maxUses, id)
 	if err != nil {
 		return err
 	}

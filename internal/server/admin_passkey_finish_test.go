@@ -53,13 +53,15 @@ func TestAPIPasskeyLoginFinishCreatesSessionAndPersistsCounter(t *testing.T) {
 			UserVerified: true,
 		},
 	}
-	if _, err := s.auth.adminStore.AddPasskey(
+	actor := ActivityActor{Type: "admin", ID: user.ID, Name: user.Username}
+	if _, _, err := s.auth.adminStore.AddPasskeyWithActivity(
 		user.ID,
 		"login-finish-test",
 		credentialIDString(credentialID),
 		storedCredential,
 		"localhost",
 		"http://localhost",
+		actor,
 	); err != nil {
 		t.Fatalf("store passkey: %v", err)
 	}

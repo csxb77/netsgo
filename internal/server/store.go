@@ -250,20 +250,6 @@ func p2pProjectionValues(stored StoredTunnel, transition P2PProjectionTransition
 	return state, message, sessionID, actualTransport
 }
 
-func (s *TunnelStore) UpdateP2PStateIfCurrent(tunnelID string, revision int64, state, message, sessionID, actualTransport string) (bool, error) {
-	if s == nil || s.db == nil || tunnelID == "" || revision <= 0 {
-		return false, nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	result, err := s.db.Exec(`UPDATE tunnels SET p2p_state = ?, p2p_error = ?, p2p_session_id = ?, actual_transport = ?, updated_at = ? WHERE id = ? AND revision = ?`, state, message, sessionID, actualTransport, formatTime(time.Now().UTC()), tunnelID, revision)
-	if err != nil {
-		return false, err
-	}
-	rows, err := result.RowsAffected()
-	return rows > 0, err
-}
-
 // NewTunnelStore creates or opens a standalone tunnel store that owns its DB.
 func NewTunnelStore(path string) (*TunnelStore, error) {
 	db, err := openServerDB(path)

@@ -106,16 +106,6 @@ func (s *budgetSlot) Take(maxBytes int) int {
 	return int(s.takeLocked(s.clock.Now(), int64(maxBytes)))
 }
 
-func (s *budgetSlot) Refund(bytes int) {
-	if bytes <= 0 {
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.refundLocked(s.clock.Now(), int64(bytes))
-}
-
 func (s *budgetSlot) previewLocked(now time.Time, maxBytes int64) int64 {
 	if maxBytes <= 0 {
 		return 0

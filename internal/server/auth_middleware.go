@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -237,17 +236,6 @@ func (s *Server) runAdminAuthorizationHook(stage string, principal *RequestPrinc
 	}
 }
 
-func (s *Server) RequireActivityRead(next http.HandlerFunc) http.HandlerFunc {
-	return s.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
-		info := GetPrincipalFromContext(r.Context())
-		if info == nil || !info.IsAdmin {
-			writeAPIError(w, http.StatusForbidden, "activity_read_forbidden", "administrator access required")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // sessionContextKey context key 类型（避免碰撞）
 type contextKey string
 
@@ -268,31 +256,6 @@ func GetPrincipalFromContext(ctx context.Context) *RequestPrincipal {
 		return nil
 	}
 	return info
-}
-
-// GetAdminFromContext 向后兼容的别名
-func GetAdminFromContext(ctx context.Context) *SessionInfo {
-	return GetSessionFromContext(ctx)
-}
-
-func (s *Server) RequireAuthIfInitialized(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.auth.adminStore == nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-		initialized, err := s.auth.adminStore.IsInitializedE()
-		if err != nil {
-			log.Printf("⚠️ failed to read initialization state for auth middleware: %v", err)
-			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_failure", "temporary storage failure")
-			return
-		}
-		if !initialized {
-			next.ServeHTTP(w, r)
-			return
-		}
-		s.RequireAuth(next).ServeHTTP(w, r)
-	}
 }
 
 // setSessionCookie 设置 httpOnly session cookie
