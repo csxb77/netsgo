@@ -1215,6 +1215,9 @@ func (s *ActivityStore) queryRows(predicate string, args []any, order string, li
 	if err := s.loadActivitySubjects(items); err != nil {
 		return nil, err
 	}
+	if err := s.resolveCurrentActivitySubjectNames(items); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -1283,6 +1286,121 @@ func (s *ActivityStore) loadActivitySubjects(items []ActivityItem) error {
 		return fmt.Errorf("close activity tunnel subjects: %w", err)
 	}
 	return nil
+}
+
+// resolveCurrentActivitySubjectNames overlays current resource names onto the
+// immutable activity references. Historical event facts remain in the event
+// tables; the view always identifies surviving resources by their current
+// user-facing name.
+func (s *ActivityStore) resolveCurrentActivitySubjectNames(items []ActivityItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	clientNames, err := s.currentActivityClientNames(items)
+	if err != nil {
+		return err
+	}
+	tunnelNames, err := s.currentActivityTunnelNames(items)
+	if err != nil {
+		return err
+	}
+	for itemIndex := range items {
+		for clientIndex := range items[itemIndex].Clients {
+			subject := &items[itemIndex].Clients[clientIndex]
+			if name, ok := clientNames[subject.ClientID]; ok {
+				subject.DisplayName = name.displayName
+				subject.Hostname = name.hostname
+			}
+		}
+		for tunnelIndex := range items[itemIndex].Tunnels {
+			subject := &items[itemIndex].Tunnels[tunnelIndex]
+			if name, ok := tunnelNames[subject.TunnelID]; ok {
+				subject.Name = name
+			}
+		}
+	}
+	return nil
+}
+
+type activityClientName struct {
+	displayName string
+	hostname    string
+}
+
+func (s *ActivityStore) currentActivityClientNames(items []ActivityItem) (map[string]activityClientName, error) {
+	ids := make(map[string]struct{})
+	for _, item := range items {
+		for _, subject := range item.Clients {
+			ids[subject.ClientID] = struct{}{}
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders, args := activitySubjectQueryArgs(ids)
+	rows, err := s.db.Query(`SELECT id, display_name, hostname FROM registered_clients WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query current activity client names: %w", err)
+	}
+	defer rows.Close()
+	names := make(map[string]activityClientName, len(ids))
+	for rows.Next() {
+		var id string
+		var name activityClientName
+		if err := rows.Scan(&id, &name.displayName, &name.hostname); err != nil {
+			return nil, fmt.Errorf("scan current activity client name: %w", err)
+		}
+		names[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate current activity client names: %w", err)
+	}
+	return names, nil
+}
+
+func (s *ActivityStore) currentActivityTunnelNames(items []ActivityItem) (map[string]string, error) {
+	ids := make(map[string]struct{})
+	for _, item := range items {
+		for _, subject := range item.Tunnels {
+			ids[subject.TunnelID] = struct{}{}
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders, args := activitySubjectQueryArgs(ids)
+	rows, err := s.db.Query(`SELECT id, name FROM tunnels WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query current activity tunnel names: %w", err)
+	}
+	defer rows.Close()
+	names := make(map[string]string, len(ids))
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("scan current activity tunnel name: %w", err)
+		}
+		names[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate current activity tunnel names: %w", err)
+	}
+	return names, nil
+}
+
+func activitySubjectQueryArgs(ids map[string]struct{}) (string, []any) {
+	keys := make([]string, 0, len(ids))
+	for id := range ids {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	placeholders := make([]string, len(keys))
+	args := make([]any, len(keys))
+	for index, id := range keys {
+		placeholders[index] = "?"
+		args[index] = id
+	}
+	return strings.Join(placeholders, ","), args
 }
 
 func (s *ActivityStore) Prune(now time.Time, policy ActivityRetentionPolicy) (int64, error) {

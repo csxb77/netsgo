@@ -90,7 +90,7 @@ func TestActivityStoreAppendQueryAndCursor(t *testing.T) {
 	}
 }
 
-func TestActivityStoreCapturesReadableSubjectSnapshots(t *testing.T) {
+func TestActivityStoreUsesCurrentClientNames(t *testing.T) {
 	store := newTestActivityStore(t)
 	now := formatTime(time.Now().UTC())
 	if _, err := store.db.Exec(`INSERT INTO registered_clients
@@ -110,15 +110,48 @@ func TestActivityStoreCapturesReadableSubjectSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
-	if _, err := store.db.Exec(`UPDATE registered_clients SET display_name = ? WHERE id = ?`, "Renamed Later", "client-readable"); err != nil {
+	if _, err := store.db.Exec(`UPDATE registered_clients SET display_name = ?, hostname = ? WHERE id = ?`, "Renamed Later", "renamed-host", "client-readable"); err != nil {
 		t.Fatalf("rename registered client: %v", err)
 	}
 	item, err := store.GetByID(id)
 	if err != nil {
 		t.Fatalf("GetByID() error = %v", err)
 	}
-	if len(item.Clients) != 1 || item.Clients[0].DisplayName != "Office Mac" || item.Clients[0].Hostname != "office-host" {
-		t.Fatalf("captured client snapshot = %+v", item.Clients)
+	if len(item.Clients) != 1 || item.Clients[0].DisplayName != "Renamed Later" || item.Clients[0].Hostname != "renamed-host" {
+		t.Fatalf("current client subject = %+v", item.Clients)
+	}
+}
+
+func TestActivityStoreUsesCurrentTunnelNames(t *testing.T) {
+	store := newTestActivityStore(t)
+	now := formatTime(time.Now().UTC())
+	if _, err := store.db.Exec(`INSERT INTO tunnels (
+		id, name, client_id, type, local_ip, local_port, remote_port, hostname,
+		binding, revision, topology, owner_client_id,
+		ingress_location, ingress_type, target_location, target_client_id, target_type,
+		transport_policy, desired_state, runtime_state, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"tunnel-renamed", "original-tunnel", "client-renamed", "tcp", "127.0.0.1", 8080, 18080, "",
+		"client_id", 1, "server_expose", "client-renamed",
+		"server", "tcp_listen", "client", "client-renamed", "tcp_service",
+		"server_relay_only", "running", "active", now, now); err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	spec := testActivitySpec("created", time.Now().UTC())
+	spec.Tunnels = []ActivityTunnelSubject{{TunnelID: "tunnel-renamed", Relation: "subject", Name: "original-tunnel", Type: "tcp", Topology: "server_expose"}}
+	id, err := store.Append(spec)
+	if err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE tunnels SET name = ? WHERE id = ?`, "renamed-tunnel", "tunnel-renamed"); err != nil {
+		t.Fatalf("rename tunnel: %v", err)
+	}
+	item, err := store.GetByID(id)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if len(item.Tunnels) != 1 || item.Tunnels[0].Name != "renamed-tunnel" {
+		t.Fatalf("current tunnel subject = %+v", item.Tunnels)
 	}
 }
 

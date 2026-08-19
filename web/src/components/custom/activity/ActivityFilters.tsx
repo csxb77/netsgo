@@ -1,5 +1,6 @@
 import { CalendarDays, Check, ChevronDown, RotateCcw } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
@@ -63,7 +64,7 @@ function FilterChip({ active, activeClass, icon: Icon, label, onToggle }: {
       aria-pressed={active}
       onClick={onToggle}
       className={cn(
-        'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors',
+        'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors',
         active
           ? (activeClass ?? 'border-foreground/15 bg-foreground/[0.06] font-medium text-foreground')
           : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground',
@@ -134,69 +135,79 @@ function RangeFilter({ value, onChange }: { value: ActivityFilterValue; onChange
   );
 }
 
-export function ActivityFilters({ value, onChange, showRange = true }: {
+export function ActivityFilters({ value, onChange, showRange = true, auxiliaryFilters }: {
   value: ActivityFilterValue;
   onChange: (value: ActivityFilterValue) => void;
   showRange?: boolean;
+  auxiliaryFilters?: ReactNode;
 }) {
   const { t } = useTranslation();
   const toggle = <T extends string>(items: T[], item: T) => items.includes(item) ? items.filter((entry) => entry !== item) : [...items, item];
   const allSeveritiesActive = allSeverities.every((severity) => value.severities.includes(severity));
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <div className="flex flex-wrap items-center gap-1">
-        <span className="mr-1 text-xs text-muted-foreground">{t('activity.filterSeverity')}</span>
-        <FilterChip
-          active={allSeveritiesActive}
-          label={t('activity.filterAll')}
-          onToggle={() => onChange({ ...value, severities: [...allSeverities] })}
-        />
-        {allSeverities.map((severity) => (
+    <div className="grid gap-2.5">
+      <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-x-1">
+        <span className="shrink-0 text-xs text-muted-foreground">{t('activity.filterSeverity')}</span>
+        <div className="flex min-w-0 gap-1 overflow-x-auto overscroll-x-contain pb-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <FilterChip
-            key={severity}
-            active={value.severities.includes(severity)}
-            activeClass={severityActiveClass[severity]}
-            icon={severityIcon[severity]}
-            label={t(`activity.severity.${severity}`)}
-            onToggle={() => {
-              const next = toggle(value.severities, severity);
-              if (next.length === 0) return;
-              onChange({ ...value, severities: next });
-            }}
+            active={allSeveritiesActive}
+            label={t('activity.filterAll')}
+            onToggle={() => onChange({ ...value, severities: [...allSeverities] })}
           />
-        ))}
+          {allSeverities.map((severity) => (
+            <FilterChip
+              key={severity}
+              active={value.severities.includes(severity)}
+              activeClass={severityActiveClass[severity]}
+              icon={severityIcon[severity]}
+              label={t(`activity.severity.${severity}`)}
+              onToggle={() => {
+                const next = toggle(value.severities, severity);
+                if (next.length === 0) return;
+                onChange({ ...value, severities: next });
+              }}
+            />
+          ))}
+        </div>
       </div>
-      <div className="flex flex-wrap items-center gap-1">
-        <span className="mr-1 text-xs text-muted-foreground">{t('activity.filterCategory')}</span>
-        <FilterChip
-          active={value.categories.length === 0}
-          label={t('activity.filterAll')}
-          onToggle={() => onChange({ ...value, categories: [] })}
-        />
-        {categories.map((category) => (
+      <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-x-1">
+        <span className="shrink-0 text-xs text-muted-foreground">{t('activity.filterCategory')}</span>
+        <div className="flex min-w-0 gap-1 overflow-x-auto overscroll-x-contain pb-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <FilterChip
-            key={category}
-            active={value.categories.includes(category)}
-            label={t(`activity.category.${category}`)}
-            onToggle={() => onChange({ ...value, categories: toggle(value.categories, category) })}
+            active={value.categories.length === 0}
+            label={t('activity.filterAll')}
+            onToggle={() => onChange({ ...value, categories: [] })}
           />
-        ))}
+          {categories.map((category) => (
+            <FilterChip
+              key={category}
+              active={value.categories.includes(category)}
+              label={t(`activity.category.${category}`)}
+              onToggle={() => onChange({ ...value, categories: toggle(value.categories, category) })}
+            />
+          ))}
+        </div>
       </div>
-      <div className="ms-auto flex items-center gap-1.5">
-        {showRange ? <RangeFilter value={value} onChange={onChange} /> : null}
-        {isFilterDirty(value) ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1.5 px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
-            onClick={() => onChange({ ...defaultActivityFilter })}
-          >
-            <RotateCcw className="size-3.5" />
-            {t('activity.filterReset')}
-          </Button>
-        ) : null}
-      </div>
+      {showRange || auxiliaryFilters || isFilterDirty(value) ? (
+        <div className="flex flex-col gap-2 border-t border-border/40 pt-2.5 sm:flex-row sm:items-center">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {showRange ? <RangeFilter value={value} onChange={onChange} /> : null}
+            {isFilterDirty(value) ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
+                onClick={() => onChange({ ...defaultActivityFilter })}
+              >
+                <RotateCcw className="size-3.5" />
+                {t('activity.filterReset')}
+              </Button>
+            ) : null}
+          </div>
+          {auxiliaryFilters ? <div className="w-full sm:ml-auto sm:w-52">{auxiliaryFilters}</div> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

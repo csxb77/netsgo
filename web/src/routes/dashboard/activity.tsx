@@ -125,9 +125,10 @@ function ActivityPage() {
       <motion.div variants={fadeUp}>
         <section className="rounded-xl border border-border/40 bg-card/50 shadow-sm backdrop-blur-sm">
           <header className="rounded-t-xl border-b border-border/40 bg-muted/20 px-3 py-2.5 sm:px-4">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <ActivityFilters value={filters} onChange={updateFilters} />
-              {isAdmin ? (
+            <ActivityFilters
+              value={filters}
+              onChange={updateFilters}
+              auxiliaryFilters={isAdmin ? (
                 <Select
                   value={search.user_id ?? '__all__'}
                   onValueChange={(value) => {
@@ -140,7 +141,7 @@ function ActivityPage() {
                     });
                   }}
                 >
-                  <SelectTrigger size="sm" className="h-8 w-full sm:ml-auto sm:w-52">
+                  <SelectTrigger size="sm" className="h-7 w-full text-xs shadow-none">
                     <SelectValue placeholder={t('activity.allUsers')} />
                   </SelectTrigger>
                   <SelectContent>
@@ -150,8 +151,8 @@ function ActivityPage() {
                     ))}
                   </SelectContent>
                 </Select>
-              ) : null}
-            </div>
+              ) : undefined}
+            />
           </header>
           <ActivityTimeline readScope={readScope} query={query} />
         </section>

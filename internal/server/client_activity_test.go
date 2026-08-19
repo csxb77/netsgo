@@ -93,6 +93,29 @@ func TestClientActivityUsesRegisteredDisplayName(t *testing.T) {
 	}
 }
 
+func TestNormalizeClientDisconnectCauseClassifiesUserVisibleOfflineReasons(t *testing.T) {
+	tests := []struct {
+		reason string
+		code   string
+	}{
+		{reason: "server_shutdown", code: "server_shutdown"},
+		{reason: "normal_closure", code: "normal_closure"},
+		{reason: "pending_data_timeout", code: "timeout"},
+		{reason: "user_disabled", code: "user_disabled"},
+		{reason: "data_session_closed", code: "data_channel_closed"},
+		{reason: "control_loop_exit", code: "transport_error"},
+		{reason: "replaced", code: "replaced"},
+		{reason: "unrecognized", code: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			if got := normalizeClientDisconnectCause(tt.reason).ReasonCode; got != tt.code {
+				t.Fatalf("normalizeClientDisconnectCause(%q) = %q, want %q", tt.reason, got, tt.code)
+			}
+		})
+	}
+}
+
 func TestClientActivityStaleGenerationProducesNoEvent(t *testing.T) {
 	s := newClientActivityServer(t)
 	current := &ClientConn{ID: "client-stale", generation: 2, state: clientStatePendingData, proxies: make(map[string]*ProxyTunnel)}

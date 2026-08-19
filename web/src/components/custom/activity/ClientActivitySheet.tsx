@@ -49,10 +49,10 @@ export function ClientActivitySheet({
           <SheetDescription>{t('activity.clientTimelineDescription')}</SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-2 border-b border-border/40 bg-muted/20 px-4 py-2.5">
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             {tunnels.length > 0 ? (
               <Select value={tunnelId} onValueChange={setTunnelId}>
-                <SelectTrigger size="sm" className="h-7 max-w-56 gap-1.5 text-xs shadow-none">
+                <SelectTrigger size="sm" className="h-7 min-w-0 flex-1 gap-1.5 text-xs shadow-none">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -67,7 +67,7 @@ export function ClientActivitySheet({
               asChild
               variant="ghost"
               size="sm"
-              className="ms-auto h-7 gap-1 px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
+              className="ml-auto h-7 shrink-0 gap-1 whitespace-nowrap px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
             >
               <Link
                 to="/dashboard/activity"

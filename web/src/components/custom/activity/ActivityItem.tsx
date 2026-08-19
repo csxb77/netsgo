@@ -44,24 +44,26 @@ function readableTunnelName(item: ActivityItemType, tunnelId: string, t: TFuncti
 function activitySummary(item: ActivityItemType, t: TFunction) {
   if (item.payload_version !== 1 || !item.payload.summary_key) return t('activity.unknownSummary');
   const args = { ...item.payload.summary_args };
-  if (args.client_name && item.clients.some((subject) => subject.client_id === args.client_name)) {
-    args.client_name = readableClientName(item, args.client_name, t);
-  }
-  if (args.tunnel_name && item.tunnels.some((subject) => subject.tunnel_id === args.tunnel_name)) {
-    args.tunnel_name = readableTunnelName(item, args.tunnel_name, t);
-  }
+  // 主题资源的当前名称优先；缺失时也回填，兼容未携带名称的旧记录
+  // （如 P2P attach/detach 事件），模板没有对应占位符时不会受影响。
+  const client = item.clients.find((subject) => subject.relation === 'subject');
+  const tunnel = item.tunnels.find((subject) => subject.relation === 'subject');
+  if (client) args.client_name = readableClientName(item, client.client_id, t);
+  if (tunnel) args.tunnel_name = readableTunnelName(item, tunnel.tunnel_id, t);
   return t(item.payload.summary_key, {
     ...args,
     defaultValue: t('activity.unknownSummary'),
   });
 }
 
-const namedActorTypes = new Set(['admin', 'user', 'client', 'system', 'security']);
-
-// 摘要文案通常已经点名了操作方，第三行只补充没有表达过的信息。
+// 摘要通常已经点名了操作方；system/unknown 只是记录方占位，没有信息量。
 function actorLabel(item: ActivityItemType, summary: string, t: TFunction) {
-  const typeLabel = namedActorTypes.has(item.actor.type) ? t(`activity.actor.${item.actor.type}`) : '';
-  const rawName = item.actor.name?.trim();
+  if (item.actor.type === 'system' || item.actor.type === 'unknown') return '';
+  const typeLabel = t(`activity.actor.${item.actor.type}`);
+  const subject = item.actor.type === 'client' && item.actor.id
+    ? item.clients.find((candidate) => candidate.client_id === item.actor.id)
+    : undefined;
+  const rawName = (subject ? readableClientName(item, subject.client_id, t) : '') || item.actor.name?.trim();
   const name = rawName && rawName !== item.actor.id ? rawName : '';
   const echoesCategory = item.actor.type === item.category;
   if (!name || summary.includes(name)) {
@@ -129,14 +131,31 @@ function activityReferences(item: ActivityItemType, summary: string, omitSubject
     ...tunnelReferences(item, summary, omitSubjectId, t),
   ];
 }
+// 离线原因只展示可归因的条目。链路中断（断网、进程退出、代理断开）无法归因，
+// 只显示“已离线”，不把断开表现当成原因；服务端仍完整记录 reason_code 供审计。
+const offlineCauseCode: Record<string, true> = {
+  normal_closure: true,
+  server_shutdown: true,
+  timeout: true,
+  user_disabled: true,
+  replaced: true,
+};
+
+function reasonText(item: ActivityItemType, t: TFunction) {
+  const code = item.payload.reason_code;
+  if (!code || code === 'unknown') return '';
+  if (item.category === 'client' && item.action === 'offline' && !offlineCauseCode[code]) return '';
+  return t(`activity.reason.${code}`, { defaultValue: '' });
+}
 
 export function ActivityItem({ item, omitSubjectId }: { item: ActivityItemType; omitSubjectId?: string }) {
   const { t } = useTranslation();
   const summary = activitySummary(item, t);
   const AccentIcon = severityAccentIcon[item.severity];
-  const reason = item.payload.reason_code
-    ? t(`activity.reason.${item.payload.reason_code}`, { defaultValue: '' })
-    : '';
+  const reason = reasonText(item, t);
+  const reasonLabel = item.category === 'client' && item.action === 'offline'
+    ? t('activity.diagnostic.clientOffline')
+    : t('activity.diagnostic.reason');
   const actor = actorLabel(item, summary, t);
   const references = activityReferences(item, summary, omitSubjectId, t);
   const hasMetadata = Boolean(actor) || references.length > 0;
@@ -167,7 +186,12 @@ export function ActivityItem({ item, omitSubjectId }: { item: ActivityItemType; 
       </div>
       <div className="min-w-0">
         <p className="text-sm font-medium leading-5 text-foreground">{summary}</p>
-        {reason ? <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{reason}</p> : null}
+        {reason ? (
+          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+            <span className="font-medium text-foreground/70">{reasonLabel}{t('activity.metadata.separator')}</span>
+            {reason}
+          </p>
+        ) : null}
         {hasMetadata ? (
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-5 text-muted-foreground">
             {actor ? <span>{t('activity.metadata.actor', { actor })}</span> : null}

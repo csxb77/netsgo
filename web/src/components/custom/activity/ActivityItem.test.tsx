@@ -92,7 +92,7 @@ describe('ActivityItem', () => {
     expect(markup).toContain('>P2P</span>');
     expect(markup).toContain('Participant client');
     expect(markup).toContain('Unknown client');
-    expect(markup).toContain('Shared-session tunnel');
+    expect(markup).toContain('Tunnel: ');
     expect(markup).toContain('Unknown tunnel');
     expect(markup).not.toContain('actor-opaque-id');
     expect(markup).not.toContain('client-opaque-id');
@@ -124,6 +124,41 @@ describe('ActivityItem', () => {
     expect(markup).not.toContain('original-hostname');
   });
 
+  test('uses the current client name even when the historical payload has a readable name', async () => {
+    await i18n.changeLanguage('en-US');
+    const markup = render(item({
+      severity: 'info',
+      category: 'client',
+      action: 'online',
+      actor: { type: 'client', id: 'client-id', name: 'Old device name' },
+      payload: {
+        summary_key: 'activity.client.online',
+        summary_args: { client_name: 'Old device name' },
+      },
+      clients: [{ client_id: 'client-id', relation: 'subject', display_name: 'Current device name' }],
+    }));
+
+    expect(markup).toContain('Current device name came online');
+    expect(markup).not.toContain('Old device name');
+  });
+
+  test('uses the current tunnel name even when the historical payload has a readable name', async () => {
+    await i18n.changeLanguage('en-US');
+    const markup = render(item({
+      severity: 'info',
+      category: 'tunnel',
+      action: 'updated',
+      payload: {
+        summary_key: 'activity.tunnel.updated',
+        summary_args: { tunnel_name: 'Old tunnel name' },
+      },
+      tunnels: [{ tunnel_id: 'tunnel-id', relation: 'subject', name: 'Current tunnel name' }],
+    }));
+
+    expect(markup).toContain('Current tunnel name was updated');
+    expect(markup).not.toContain('Old tunnel name');
+  });
+
   test('labels both sides of a tunnel migration with readable names', async () => {
     await i18n.changeLanguage('en-US');
     const markup = render(item({
@@ -150,5 +185,87 @@ describe('ActivityItem', () => {
     expect(markup).not.toContain('old-client-id');
     expect(markup).not.toContain('new-client-id');
     expect(markup).not.toContain('tunnel-id');
+  });
+
+  test('uses current subject names when the activity is rendered in Chinese', async () => {
+    await i18n.changeLanguage('zh-CN');
+    const markup = render(item({
+      severity: 'info',
+      category: 'client',
+      action: 'online',
+      payload: {
+        summary_key: 'activity.client.online',
+        summary_args: { client_name: '旧设备名' },
+      },
+      clients: [{ client_id: 'client-id', relation: 'subject', display_name: '现设备备注' }],
+    }));
+
+    expect(markup).toContain('现设备备注 已上线');
+    expect(markup).not.toContain('旧设备名');
+    await i18n.changeLanguage('en-US');
+  });
+
+  test('labels client, tunnel, and P2P diagnostics by affected link', async () => {
+    await i18n.changeLanguage('zh-CN');
+    const clientMarkup = render(item({
+      category: 'client',
+      action: 'offline',
+      payload: { summary_key: 'activity.client.offline', reason_code: 'timeout' },
+    }));
+    expect(clientMarkup).toContain('离线原因：');
+    expect(clientMarkup).toContain('等待数据通道建立超时。');
+    const tunnelMarkup = render(item({
+      category: 'tunnel',
+      action: 'runtime_error',
+      payload: { summary_key: 'activity.tunnel.runtime_error', reason_code: 'reconcile_failed' },
+    }));
+    expect(tunnelMarkup).toContain('原因：');
+    expect(tunnelMarkup).toContain('隧道配置下发失败。');
+    const p2pMarkup = render(item({
+      category: 'p2p',
+      action: 'session_closed',
+      payload: { summary_key: 'activity.p2p.session_closed', reason_code: 'participant_offline' },
+    }));
+    expect(p2pMarkup).toContain('原因：');
+    expect(p2pMarkup).toContain('一名 P2P 参与客户端已离线。');
+    await i18n.changeLanguage('en-US');
+  });
+
+  test('inlines the subject tunnel name for P2P attach events without payload names', async () => {
+    await i18n.changeLanguage('zh-CN');
+    const markup = render(item({
+      severity: 'debug',
+      category: 'p2p',
+      action: 'tunnel_attached',
+      actor: { type: 'system' },
+      payload: { summary_key: 'activity.p2p.tunnel_attached' },
+      tunnels: [{ tunnel_id: 'tunnel-id', relation: 'subject', name: '专线' }],
+    }));
+
+    expect(markup).toContain('专线 加入了 P2P 会话');
+    expect(markup).not.toContain('隧道：');
+    await i18n.changeLanguage('en-US');
+  });
+
+  test('hides noise: unattributable offline reasons and placeholder actors', async () => {
+    await i18n.changeLanguage('zh-CN');
+    for (const code of ['unknown', 'data_channel_closed', 'transport_error']) {
+      const markup = render(item({
+        severity: 'info',
+        category: 'client',
+        action: 'offline',
+        actor: { type: 'system' },
+        payload: {
+          summary_key: 'activity.client.offline',
+          summary_args: { client_name: '办公室主机' },
+          reason_code: code,
+        },
+        clients: [{ client_id: 'client-1', relation: 'subject', display_name: '办公室主机' }],
+      }));
+      expect(markup).toContain('办公室主机 已离线');
+      expect(markup).not.toContain('原因');
+      expect(markup).not.toContain('操作方');
+    }
+    await i18n.changeLanguage('en-US');
   });
 });
