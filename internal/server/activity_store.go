@@ -1342,7 +1342,7 @@ func (s *ActivityStore) currentActivityClientNames(items []ActivityItem) (map[st
 	if err != nil {
 		return nil, fmt.Errorf("query current activity client names: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	names := make(map[string]activityClientName, len(ids))
 	for rows.Next() {
 		var id string
@@ -1373,7 +1373,7 @@ func (s *ActivityStore) currentActivityTunnelNames(items []ActivityItem) (map[st
 	if err != nil {
 		return nil, fmt.Errorf("query current activity tunnel names: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	names := make(map[string]string, len(ids))
 	for rows.Next() {
 		var id, name string
