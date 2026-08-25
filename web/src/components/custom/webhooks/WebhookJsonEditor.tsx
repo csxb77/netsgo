@@ -1,13 +1,21 @@
 import { autocompletion, type CompletionContext } from '@codemirror/autocomplete';
 import { json, jsonParseLinter } from '@codemirror/lang-json';
 import { linter, lintGutter } from '@codemirror/lint';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
-import { WEBHOOK_VARIABLES, webhookVariableSample, type WebhookTargetKind } from './webhook-prototype-data';
+import {
+  getWebhookVariables,
+  webhookVariableSample,
+  type WebhookEventKey,
+  type WebhookPrototype,
+} from './webhook-prototype-data';
+import { getTemplateIssues } from './webhook-template';
 
 export interface WebhookJsonEditorHandle {
   focus: () => void;
@@ -20,26 +28,51 @@ interface WebhookJsonEditorProps {
   onChange: (value: string) => void;
   invalid?: boolean;
   className?: string;
-  targetKind: WebhookTargetKind;
+  events: WebhookEventKey[];
+  sampleEvent: WebhookEventKey;
+  webhook: Pick<WebhookPrototype, 'id' | 'name'>;
+  label: string;
 }
 
-function webhookVariableCompletion(targetKind: WebhookTargetKind) {
+function webhookVariableCompletion(
+  events: WebhookEventKey[],
+  sampleEvent: WebhookEventKey,
+  webhook: Pick<WebhookPrototype, 'id' | 'name'>,
+) {
   return (context: CompletionContext) => {
     const variable = context.matchBefore(/{{[\w.]*$/);
     if (!variable && !context.explicit) return null;
     return {
       from: variable?.from ?? context.pos,
-      options: WEBHOOK_VARIABLES
-        .filter((entry) => entry.availableFor.includes(targetKind))
+      options: getWebhookVariables(events, 'body')
         .map((entry) => ({
           label: `{{${entry.key}}}`,
           apply: `{{${entry.key}}}`,
           type: 'variable',
-          detail: webhookVariableSample(entry, targetKind),
+          detail: webhookVariableSample(entry, sampleEvent, webhook),
           boost: entry.group === 'event' ? 2 : 1,
         })),
     };
   };
+}
+
+function templateExtensions(
+  events: WebhookEventKey[],
+  sampleEvent: WebhookEventKey,
+  webhook: Pick<WebhookPrototype, 'id' | 'name'>,
+  label: string,
+  t: TFunction,
+) {
+  return [
+    linter((view) => getTemplateIssues(view.state.doc.toString(), events, 'body').map((issue) => ({
+      from: issue.from,
+      to: issue.to,
+      severity: 'error',
+      message: t(`webhooks.validation.${issue.code}`, { key: issue.key }),
+    }))),
+    autocompletion({ override: [webhookVariableCompletion(events, sampleEvent, webhook)] }),
+    EditorView.contentAttributes.of({ 'aria-label': label }),
+  ];
 }
 
 const webhookEditorTheme = EditorView.theme({
@@ -92,24 +125,28 @@ const webhookEditorTheme = EditorView.theme({
 }, { dark: false });
 
 export const WebhookJsonEditor = forwardRef<WebhookJsonEditorHandle, WebhookJsonEditorProps>(
-  function WebhookJsonEditor({ value, onChange, invalid = false, className, targetKind }, forwardedRef) {
+  function WebhookJsonEditor({ value, onChange, invalid = false, className, events, sampleEvent, webhook, label }, forwardedRef) {
+    const { t } = useTranslation();
     const hostRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
     const onChangeRef = useRef(onChange);
-    const valueRef = useRef(value);
-    onChangeRef.current = onChange;
-    valueRef.current = value;
+    const [templateCompartment] = useState(() => new Compartment());
+    const [initialValue] = useState(value);
+
+    useEffect(() => {
+      onChangeRef.current = onChange;
+    }, [onChange]);
 
     useEffect(() => {
       if (!hostRef.current) return;
       const state = EditorState.create({
-        doc: valueRef.current,
+        doc: initialValue,
         extensions: [
           basicSetup,
           json(),
           linter(jsonParseLinter()),
           lintGutter(),
-          autocompletion({ override: [webhookVariableCompletion(targetKind)] }),
+          templateCompartment.of([]),
           EditorView.lineWrapping,
           webhookEditorTheme,
           EditorView.updateListener.of((update) => {
@@ -123,7 +160,13 @@ export const WebhookJsonEditor = forwardRef<WebhookJsonEditorHandle, WebhookJson
         view.destroy();
         viewRef.current = null;
       };
-    }, [targetKind]);
+    }, [initialValue, templateCompartment]);
+
+    useEffect(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({ effects: templateCompartment.reconfigure(templateExtensions(events, sampleEvent, webhook, label, t)) });
+    }, [events, label, sampleEvent, t, templateCompartment, webhook]);
 
     useEffect(() => {
       const view = viewRef.current;

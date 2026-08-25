@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
+import type { TFunction } from 'i18next';
 import { motion } from 'motion/react';
 import toast from 'react-hot-toast';
 import {
   AlignLeft,
   Braces,
   Check,
-  CheckCircle2,
+  CircleHelp,
   CircleOff,
   Clock3,
   Copy,
@@ -19,6 +20,7 @@ import {
   Trash2,
   Waypoints,
   Webhook,
+  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -44,17 +46,27 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import {
   Field,
   FieldContent,
   FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
-  FieldTitle,
+  FieldLegend,
+  FieldSet,
 } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import {
   InputGroup,
+  InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
 } from '@/components/ui/input-group';
@@ -100,81 +112,50 @@ import {
   DEFAULT_TUNNEL_WEBHOOK_BODY,
   EMPTY_WEBHOOK,
   WEBHOOK_CLIENT_OPTIONS,
+  WEBHOOK_EVENT_FIXTURES,
   WEBHOOK_EVENT_OPTIONS,
   WEBHOOK_INVOCATIONS,
   WEBHOOK_PROTOTYPES,
   WEBHOOK_TUNNEL_OPTIONS,
-  WEBHOOK_VARIABLES,
+  getWebhookVariables,
   webhookVariableSample,
-  type WebhookEventGroup,
+  type WebhookEventFamily,
   type WebhookEventKey,
   type WebhookInvocation,
+  type WebhookInvocationStatus,
   type WebhookMethod,
   type WebhookPrototype,
   type WebhookTargetKind,
+  type WebhookTemplateSurface,
+  type WebhookVariable,
 } from '@/components/custom/webhooks/webhook-prototype-data';
+import {
+  getTemplateIssues,
+  renderWebhookRequest,
+  validateWebhook,
+  type WebhookValidationIssue,
+} from '@/components/custom/webhooks/webhook-template';
 
-const GROUP_ICONS: Record<WebhookEventGroup, typeof Server> = {
-  client: Server,
-  tunnel: Waypoints,
-};
-
-const GROUP_ACCENTS: Record<WebhookEventGroup, string> = {
-  client: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-  tunnel: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-};
+type PendingAction =
+  | { type: 'select'; id: string }
+  | { type: 'new' }
+  | { type: 'close' }
+  | null;
 
 function eventLabelKey(eventKey: WebhookEventKey) {
   return `webhooks.events.${eventKey}` as const;
 }
 
-function eventCategory(eventKey: WebhookEventKey) {
-  return eventKey.split('.')[0];
+function variableLabelKey(variable: WebhookVariable) {
+  return `webhooks.variables.item.${variable.key}` as const;
 }
 
-function insertAtSelection(
-  value: string,
-  token: string,
-  control: HTMLInputElement | HTMLTextAreaElement | null,
-  onChange: (value: string) => void,
-) {
-  const start = control?.selectionStart ?? value.length;
-  const end = control?.selectionEnd ?? value.length;
-  const nextPosition = start + token.length;
-  onChange(`${value.slice(0, start)}${token}${value.slice(end)}`);
-  window.requestAnimationFrame(() => {
-    control?.focus();
-    control?.setSelectionRange(nextPosition, nextPosition);
-  });
+function cloneWebhook(webhook: WebhookPrototype) {
+  return structuredClone(webhook);
 }
 
-function renderTemplate(value: string, values: Record<string, string>, encode = false) {
-  return value.replace(/{{\s*([^}]+?)\s*}}/g, (_, key: string) => {
-    const replacement = values[key] ?? `{{${key}}}`;
-    return encode ? encodeURIComponent(replacement) : replacement;
-  });
-}
-
-function renderJsonBody(body: string, values: Record<string, string>) {
-  const parsed: unknown = JSON.parse(body);
-  const visit = (value: unknown): unknown => {
-    if (typeof value === 'string') return renderTemplate(value, values);
-    if (Array.isArray(value)) return value.map(visit);
-    if (value && typeof value === 'object') {
-      return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, visit(entry)]));
-    }
-    return value;
-  };
-  return JSON.stringify(visit(parsed), null, 2);
-}
-
-function isValidJson(value: string) {
-  try {
-    JSON.parse(value);
-    return true;
-  } catch {
-    return false;
-  }
+function sameWebhook(left: WebhookPrototype | null, right: WebhookPrototype | null) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function formatShortTime(value: string | null, locale: string) {
@@ -188,191 +169,460 @@ function formatShortTime(value: string | null, locale: string) {
   }).format(new Date(value));
 }
 
+function validationIssueMessage(t: TFunction, issue: WebhookValidationIssue) {
+  return t(`webhooks.validation.${issue.code}`, { key: issue.key ?? '' });
+}
+
+function statusVariant(status: WebhookInvocationStatus | WebhookPrototype['lastStatus']) {
+  if (status === 'failed') return 'destructive' as const;
+  if (status === 'success') return 'secondary' as const;
+  return 'outline' as const;
+}
+
 export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdminScopeNote?: boolean }) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const [webhooks, setWebhooks] = useState<WebhookPrototype[]>(() => structuredClone(WEBHOOK_PROTOTYPES));
-  const [selectedId, setSelectedId] = useState(WEBHOOK_PROTOTYPES[0].id);
+  const [draft, setDraft] = useState<WebhookPrototype | null>(() => cloneWebhook(WEBHOOK_PROTOTYPES[0]));
+  const [invocations, setInvocations] = useState<WebhookInvocation[]>(() => structuredClone(WEBHOOK_INVOCATIONS));
   const [activeTab, setActiveTab] = useState<'configuration' | 'deliveries'>('configuration');
-  const selected = webhooks.find((item) => item.id === selectedId) ?? null;
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [testOpen, setTestOpen] = useState(false);
+  const [validationIssues, setValidationIssues] = useState<WebhookValidationIssue[]>([]);
+  const configurationScrollRef = useRef<HTMLDivElement>(null);
 
-  const updateSelected = <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => {
-    setWebhooks((current) => current.map((item) => item.id === selectedId ? { ...item, [key]: value } : item));
+  const saved = draft ? webhooks.find((item) => item.id === draft.id) ?? null : null;
+  const isNew = Boolean(draft && !saved);
+  const dirty = !sameWebhook(draft, saved);
+  const listItems = useMemo(
+    () => draft && isNew ? [...webhooks, draft] : webhooks,
+    [draft, isNew, webhooks],
+  );
+
+  const updateDraft = <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => {
+    setDraft((current) => current ? { ...current, [key]: value } : current);
+    setValidationIssues([]);
   };
 
-  const addWebhook = () => {
-    const id = `wh_draft_${Date.now()}`;
-    setWebhooks((current) => [...current, { ...structuredClone(EMPTY_WEBHOOK), id }]);
-    setSelectedId(id);
+  const resetConfigurationScroll = () => {
+    window.requestAnimationFrame(() => configurationScrollRef.current?.scrollTo({ top: 0 }));
+  };
+
+  const revealValidationIssue = (issue: WebhookValidationIssue) => {
     setActiveTab('configuration');
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const field = configurationScrollRef.current?.querySelector<HTMLElement>(`[data-webhook-field="${issue.field}"]`);
+      field?.scrollIntoView({ block: 'center' });
+      field?.querySelector<HTMLElement>('input, textarea, button, [role="textbox"], [role="checkbox"]')?.focus({ preventScroll: true });
+    }));
   };
 
-  const validate = () => {
-    if (!selected?.name.trim() || !selected.url.trim() || selected.events.length === 0) {
-      toast.error(t('webhooks.toast.validation'));
+  const loadWebhook = (id: string) => {
+    const webhook = webhooks.find((item) => item.id === id);
+    if (!webhook) return;
+    setDraft(cloneWebhook(webhook));
+    setValidationIssues([]);
+    setActiveTab('configuration');
+    resetConfigurationScroll();
+  };
+
+  const startNewWebhook = () => {
+    setDraft({ ...cloneWebhook(EMPTY_WEBHOOK), id: `wh_draft_${Date.now()}` });
+    setValidationIssues([]);
+    setActiveTab('configuration');
+    resetConfigurationScroll();
+  };
+
+  const requestAction = (action: Exclude<PendingAction, null>) => {
+    if (dirty) {
+      setPendingAction(action);
+      return;
+    }
+    if (action.type === 'select') loadWebhook(action.id);
+    if (action.type === 'new') startNewWebhook();
+    if (action.type === 'close') setOpen(false);
+  };
+
+  const confirmDiscard = () => {
+    const action = pendingAction;
+    setPendingAction(null);
+    if (!action) return;
+    if (action.type === 'select') loadWebhook(action.id);
+    if (action.type === 'new') startNewWebhook();
+    if (action.type === 'close') setOpen(false);
+  };
+
+  const persistDraft = (enable = false) => {
+    if (!draft) return false;
+    const candidate = enable ? { ...draft, enabled: true } : draft;
+    const issues = validateWebhook(candidate);
+    setValidationIssues(issues);
+    if (issues.length > 0) {
+      toast.error(validationIssueMessage(t, issues[0]));
+      revealValidationIssue(issues[0]);
       return false;
     }
-    if (selected.targetMode === 'selected' && selected.targetIds.length === 0) {
-      toast.error(t('webhooks.target.selectionRequired'));
-      return false;
-    }
-    if (selected.method === 'POST' && !isValidJson(selected.body)) {
-      toast.error(t('webhooks.toast.invalidJson'));
-      return false;
-    }
+    setWebhooks((current) => current.some((item) => item.id === candidate.id)
+      ? current.map((item) => item.id === candidate.id ? cloneWebhook(candidate) : item)
+      : [...current, cloneWebhook(candidate)]);
+    setDraft(cloneWebhook(candidate));
+    toast.success(isNew ? t('webhooks.toast.created') : t('webhooks.toast.saved'));
     return true;
   };
 
-  const save = () => {
-    if (validate()) toast.success(t('webhooks.toast.saved'));
+  const cancelChanges = () => {
+    if (saved) {
+      setDraft(cloneWebhook(saved));
+    } else if (webhooks[0]) {
+      setDraft(cloneWebhook(webhooks[0]));
+    } else {
+      setDraft(null);
+    }
+    setValidationIssues([]);
   };
 
-  const test = () => {
-    if (validate()) toast.success(t('webhooks.toast.tested'));
+  const requestTest = () => {
+    if (!draft) return;
+    const issues = validateWebhook(draft);
+    setValidationIssues(issues);
+    if (issues.length > 0) {
+      toast.error(validationIssueMessage(t, issues[0]));
+      revealValidationIssue(issues[0]);
+      return;
+    }
+    setTestOpen(true);
+  };
+
+  const addTestInvocation = (event: WebhookEventKey) => {
+    if (!draft) return;
+    const request = renderWebhookRequest(draft, event);
+    const now = new Date().toISOString();
+    const id = `dlv_test_${Date.now()}`;
+    setInvocations((current) => [{
+      id,
+      webhookId: draft.id,
+      eventId: String(WEBHOOK_EVENT_FIXTURES[event].values['event.id']),
+      event,
+      occurredAt: now,
+      status: 'success',
+      origin: 'test',
+      statusCode: 200,
+      durationMs: 126,
+      attempts: [{ number: 1, occurredAt: now, status: 'success', statusCode: 200, durationMs: 126 }],
+      requestUrl: request.url,
+      requestHeaders: Object.fromEntries(request.headers.map((header) => [header.key, header.value])),
+      requestBody: draft.method === 'POST' ? request.body : null,
+      responseHeaders: { 'Content-Type': 'application/json' },
+      responseBody: '{"accepted":true,"prototype":true}',
+    }, ...current]);
+  };
+
+  const deleteWebhook = () => {
+    if (!draft) return;
+    if (isNew) {
+      cancelChanges();
+      setDeleteOpen(false);
+      return;
+    }
+    const remaining = webhooks.filter((item) => item.id !== draft.id);
+    setWebhooks(remaining);
+    setDraft(remaining[0] ? cloneWebhook(remaining[0]) : null);
+    setValidationIssues([]);
+    setDeleteOpen(false);
+    toast.success(t('webhooks.toast.deleted'));
+  };
+
+  const replayInvocation = (invocation: WebhookInvocation) => {
+    const configuration = webhooks.find((item) => item.id === invocation.webhookId);
+    if (!configuration) {
+      toast.error(t('webhooks.toast.replayUnavailable'));
+      return;
+    }
+    const request = renderWebhookRequest(configuration, invocation.event);
+    const now = new Date().toISOString();
+    const id = `dlv_replay_${Date.now()}`;
+    setInvocations((current) => [{
+      ...invocation,
+      id,
+      occurredAt: now,
+      status: 'queued',
+      origin: 'replay',
+      statusCode: null,
+      durationMs: null,
+      attempts: [{ number: 1, occurredAt: now, status: 'pending', statusCode: null, durationMs: null }],
+      requestUrl: request.url,
+      requestHeaders: Object.fromEntries(request.headers.map((header) => [header.key, header.value])),
+      requestBody: configuration.method === 'POST' ? request.body : null,
+      responseHeaders: {},
+      responseBody: '',
+      error: undefined,
+    }, ...current]);
+    toast.success(t('webhooks.toast.replayed'));
+  };
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (nextOpen) {
+      setOpen(true);
+      return;
+    }
+    requestAction({ type: 'close' });
   };
 
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger asChild>
-        <Button variant="outline">
-          <Webhook data-icon="inline-start" />
-          {t('webhooks.manager.open')}
-          <Badge variant="secondary" className="ml-1">{webhooks.length}</Badge>
-        </Button>
-      </SheetTrigger>
-      <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-5xl">
-        <SheetHeader className="border-b pr-14">
-          <div className="flex flex-wrap items-center gap-2">
+    <>
+      <Sheet open={open} onOpenChange={handleOpenChange}>
+        <SheetTrigger asChild>
+          <Button variant="outline">
+            <Webhook data-icon="inline-start" />
+            {t('webhooks.manager.open')}
+            <Badge variant="secondary" className="ml-1">{webhooks.length}</Badge>
+          </Button>
+        </SheetTrigger>
+        <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-6xl">
+          <SheetHeader className="border-b pr-14">
             <SheetTitle>{t('webhooks.manager.title')}</SheetTitle>
-            <Badge variant="secondary">{t('webhooks.prototypeBadge')}</Badge>
-            <Badge variant="outline">{t('webhooks.spaceOnly')}</Badge>
-          </div>
-          <SheetDescription>{t('webhooks.manager.description')}</SheetDescription>
-        </SheetHeader>
+            <SheetDescription className="sr-only">
+              {t('webhooks.manager.description')} {showAdminScopeNote ? t('webhooks.manager.adminScope') : t('webhooks.manager.ownScope')}
+            </SheetDescription>
+          </SheetHeader>
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto md:grid-cols-[240px_minmax(0,1fr)] md:overflow-hidden">
-          <aside className="border-b bg-muted/15 md:overflow-y-auto md:border-r md:border-b-0">
-            <div className="sticky top-0 z-10 border-b bg-background/95 p-3 backdrop-blur">
-              <div className="mb-2">
-                <div className="text-sm font-medium">{t('webhooks.manager.listTitle')}</div>
-                <div className="text-xs text-muted-foreground">{t('webhooks.manager.configured', { count: webhooks.length })}</div>
-              </div>
-              <Button className="w-full" size="sm" onClick={addWebhook}>
-                <Plus data-icon="inline-start" />
-                {t('webhooks.manager.newWebhook')}
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex shrink-0 items-center gap-2 border-b bg-background p-2 md:hidden">
+              {draft ? (
+                <Select value={draft.id} onValueChange={(id) => id !== draft.id && requestAction({ type: 'select', id })}>
+                  <SelectTrigger className="min-w-0 flex-1" aria-label={t('webhooks.manager.selectWebhook')}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {listItems.map((item) => (
+                        <SelectItem key={item.id} value={item.id}>
+                          {item.name || t('webhooks.manager.webhookFallback')}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <div className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{t('webhooks.manager.emptySelection')}</div>
+              )}
+              <Button variant="outline" size="icon" onClick={() => requestAction({ type: 'new' })} aria-label={t('webhooks.manager.newWebhook')} title={t('webhooks.manager.newWebhook')}>
+                <Plus />
               </Button>
+              {draft ? (
+                <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} aria-label={t('webhooks.editor.delete')} title={t('webhooks.editor.delete')}>
+                  <Trash2 />
+                </Button>
+              ) : null}
             </div>
-            <div className="flex gap-2 overflow-x-auto p-2 md:flex-col md:overflow-x-visible">
-              {webhooks.map((item) => {
-                const calledAt = formatShortTime(item.lastCalledAt, i18n.resolvedLanguage ?? 'zh-CN');
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setSelectedId(item.id)}
-                    className={cn(
-                      'min-w-56 rounded-lg border bg-background p-2.5 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:min-w-0',
-                      selectedId === item.id && 'border-primary/40 bg-primary/5 ring-1 ring-primary/10',
-                      !item.enabled && 'opacity-65',
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="min-w-0 truncate text-sm font-medium">
-                        {item.name || t('webhooks.manager.webhookFallback')}
-                      </span>
-                      <span className={cn('mt-1 size-2 shrink-0 rounded-full', item.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40')} />
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-1">
-                      <Badge variant={item.method === 'POST' ? 'default' : 'outline'}>{item.method}</Badge>
-                      <Badge variant="outline">
-                        {item.targetMode === 'all'
-                          ? t(`webhooks.target.${item.targetKind === 'client' ? 'allClients' : 'allTunnels'}`)
-                          : t('webhooks.manager.targetSelected', { count: item.targetIds.length })}
-                      </Badge>
-                      <Badge variant="secondary">{t('webhooks.manager.eventCount', { count: item.events.length })}</Badge>
-                    </div>
-                    <div className="mt-2 truncate text-[11px] text-muted-foreground">
-                      {calledAt ?? t('webhooks.status.idle')} · {t('webhooks.manager.calls24h', { count: item.calls24h })}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </aside>
 
-          <main className="min-w-0 md:overflow-y-auto">
-            {selected ? (
-              <div className="flex min-h-full flex-col">
-                <div className="border-b bg-background px-4 py-3">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="truncate font-medium">{selected.name || t('webhooks.manager.webhookFallback')}</div>
-                      <code className="text-[11px] text-muted-foreground">{selected.id}</code>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button variant="outline" size="sm" onClick={test}>
-                        <Send data-icon="inline-start" />
-                        {t('webhooks.editor.test')}
-                      </Button>
-                      <Button size="sm" onClick={save}>
-                        <Check data-icon="inline-start" />
-                        {t('webhooks.editor.save')}
-                      </Button>
-                    </div>
+            <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[260px_minmax(0,1fr)]">
+              <aside className="hidden overflow-y-auto border-r bg-muted/15 md:block">
+                <div className="sticky top-0 border-b bg-background/95 p-3 backdrop-blur">
+                  <div className="mb-2">
+                    <div className="text-sm font-medium">{t('webhooks.manager.listTitle')}</div>
+                    <div className="text-xs text-muted-foreground">{t('webhooks.manager.configured', { count: webhooks.length })}</div>
                   </div>
-                  <div className="mt-3 rounded-md border border-sky-500/20 bg-sky-500/5 px-2.5 py-2 text-xs text-sky-700 dark:text-sky-300">
-                    {showAdminScopeNote ? t('webhooks.manager.adminScope') : t('webhooks.manager.ownScope')}
-                  </div>
+                  <Button className="w-full" size="sm" onClick={() => requestAction({ type: 'new' })}>
+                    <Plus data-icon="inline-start" />
+                    {t('webhooks.manager.newWebhook')}
+                  </Button>
                 </div>
+                <div className="flex flex-col gap-2 p-2">
+                  {listItems.map((item) => {
+                    const itemIsDraft = isNew && draft?.id === item.id;
+                    const calledAt = formatShortTime(item.lastCalledAt, i18n.resolvedLanguage ?? 'zh-CN');
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => item.id !== draft?.id && requestAction({ type: 'select', id: item.id })}
+                        className={cn(
+                          'rounded-lg border bg-background p-2.5 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
+                          draft?.id === item.id && 'border-primary/40 bg-primary/5 ring-1 ring-primary/10',
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="min-w-0 truncate text-sm font-medium">
+                            {item.name || t('webhooks.manager.webhookFallback')}
+                          </span>
+                          <Badge variant={itemIsDraft ? 'secondary' : item.enabled ? 'default' : 'outline'}>
+                            {itemIsDraft ? t('webhooks.status.draft') : t(`webhooks.status.${item.enabled ? 'enabled' : 'disabled'}`)}
+                          </Badge>
+                        </div>
+                        {!itemIsDraft ? (
+                          <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <span className="truncate">{t(`webhooks.health.${item.lastStatus}`)}</span>
+                            {calledAt ? <span aria-hidden>·</span> : null}
+                            {calledAt ? <span className="truncate">{calledAt}</span> : null}
+                          </div>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </aside>
 
-                <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as typeof activeTab)} className="flex-1 gap-0">
-                  <div className="border-b px-4 pt-2">
-                    <TabsList variant="line">
-                      <TabsTrigger value="configuration">{t('webhooks.manager.configuration')}</TabsTrigger>
-                      <TabsTrigger value="deliveries">
-                        {t('webhooks.manager.deliveries')}
-                        <Badge variant="secondary" className="ml-1">{WEBHOOK_INVOCATIONS.filter((item) => item.webhookId === selected.id).length}</Badge>
-                      </TabsTrigger>
-                    </TabsList>
+              <main className="min-h-0 min-w-0 overflow-hidden">
+              {draft ? (
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="hidden shrink-0 border-b bg-background px-4 py-2.5 md:block">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="truncate font-medium">{draft.name || t('webhooks.manager.webhookFallback')}</div>
+                          {isNew ? <Badge variant="secondary">{t('webhooks.status.draft')}</Badge> : null}
+                          {dirty ? <Badge variant="outline">{t('webhooks.status.unsaved')}</Badge> : null}
+                        </div>
+                      </div>
+                      <Button variant="ghost" size="icon-sm" onClick={() => setDeleteOpen(true)} aria-label={t('webhooks.editor.delete')} title={t('webhooks.editor.delete')}>
+                        <Trash2 />
+                      </Button>
+                    </div>
                   </div>
-                  <TabsContent value="configuration" className="p-4 sm:p-5">
-                    <WebhookConfiguration key={selected.id} webhook={selected} onUpdate={updateSelected} />
-                  </TabsContent>
-                  <TabsContent value="deliveries" className="p-4 sm:p-5">
-                    <WebhookDeliveryLog webhookId={selected.id} />
-                  </TabsContent>
-                </Tabs>
-              </div>
-            ) : (
-              <div className="flex min-h-80 items-center justify-center p-8 text-sm text-muted-foreground">
-                {t('webhooks.manager.emptySelection')}
-              </div>
-            )}
-          </main>
-        </div>
-      </SheetContent>
-    </Sheet>
+
+                  <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as typeof activeTab)} className="flex min-h-0 flex-1 flex-col gap-0">
+                    <div className="shrink-0 border-b px-4 pt-2">
+                      <TabsList variant="line">
+                        <TabsTrigger value="configuration">{t('webhooks.manager.configuration')}</TabsTrigger>
+                        <TabsTrigger value="deliveries">
+                          {t('webhooks.manager.deliveries')}
+                          <Badge variant="secondary" className="ml-1">{invocations.filter((item) => item.webhookId === draft.id).length}</Badge>
+                        </TabsTrigger>
+                      </TabsList>
+                    </div>
+                    <TabsContent ref={configurationScrollRef} value="configuration" className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+                      <WebhookConfiguration
+                        key={draft.id}
+                        webhook={draft}
+                        isNew={isNew}
+                        validationIssues={validationIssues}
+                        onUpdate={updateDraft}
+                        onTest={requestTest}
+                      />
+                    </TabsContent>
+                    <TabsContent value="deliveries" className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+                      <WebhookDeliveryLog
+                        webhookId={draft.id}
+                        invocations={invocations}
+                        onReplay={replayInvocation}
+                      />
+                    </TabsContent>
+                  </Tabs>
+
+                  {activeTab === 'configuration' ? (
+                    <footer className="flex shrink-0 flex-col gap-2 border-t bg-background px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="text-xs text-muted-foreground">{dirty ? t('webhooks.editor.unsavedHint') : null}</div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <Button variant="ghost" size="sm" onClick={cancelChanges} disabled={!dirty}>
+                          <X data-icon="inline-start" />
+                          {t('common.cancel')}
+                        </Button>
+                        <Button
+                          variant={isNew && !draft.enabled ? 'outline' : 'default'}
+                          size="sm"
+                          onClick={() => persistDraft(false)}
+                          disabled={!dirty}
+                        >
+                          <Check data-icon="inline-start" />
+                          {isNew && !draft.enabled ? t('webhooks.editor.saveDraft') : t('webhooks.editor.save')}
+                        </Button>
+                        {isNew && !draft.enabled ? (
+                          <Button size="sm" onClick={() => persistDraft(true)}>
+                            <Check data-icon="inline-start" />
+                            {t('webhooks.editor.saveAndEnable')}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </footer>
+                  ) : null}
+                </div>
+              ) : (
+                <Empty className="min-h-80">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon"><Webhook /></EmptyMedia>
+                    <EmptyTitle>{t('webhooks.manager.emptySelection')}</EmptyTitle>
+                    <EmptyDescription>{t('webhooks.manager.emptyDescription')}</EmptyDescription>
+                  </EmptyHeader>
+                  <EmptyContent><Button onClick={startNewWebhook}>{t('webhooks.manager.newWebhook')}</Button></EmptyContent>
+                </Empty>
+              )}
+              </main>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <AlertDialog open={pendingAction !== null} onOpenChange={(nextOpen) => !nextOpen && setPendingAction(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('webhooks.unsaved.title')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('webhooks.unsaved.description')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('webhooks.unsaved.keepEditing')}</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDiscard}>{t('webhooks.unsaved.discard')}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{isNew ? t('webhooks.delete.discardTitle') : t('webhooks.delete.title')}</AlertDialogTitle>
+            <AlertDialogDescription>{isNew ? t('webhooks.delete.discardDescription') : t('webhooks.delete.description')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction onClick={deleteWebhook}>{isNew ? t('webhooks.delete.discard') : t('webhooks.delete.confirm')}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {draft && testOpen ? (
+        <TestWebhookDialog
+          key={`${draft.id}-open`}
+          open={testOpen}
+          webhook={draft}
+          onOpenChange={setTestOpen}
+          onComplete={addTestInvocation}
+        />
+      ) : null}
+    </>
   );
 }
 
 function WebhookConfiguration({
   webhook,
+  isNew,
+  validationIssues,
   onUpdate,
+  onTest,
 }: {
   webhook: WebhookPrototype;
+  isNew: boolean;
+  validationIssues: WebhookValidationIssue[];
   onUpdate: <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => void;
+  onTest: () => void;
 }) {
   const { t } = useTranslation();
-  const [sampleEvent, setSampleEvent] = useState<WebhookEventKey>(webhook.events[0] ?? 'client.online');
+  const fallbackEvent = webhook.targetKind === 'client' ? 'client.online' : 'tunnel.runtime_changed';
+  const [sampleEvent, setSampleEvent] = useState<WebhookEventKey>(webhook.events[0] ?? fallbackEvent);
   const [pendingTargetKind, setPendingTargetKind] = useState<WebhookTargetKind | null>(null);
-  const bodyValid = webhook.method === 'GET' || isValidJson(webhook.body);
+  const [disableOpen, setDisableOpen] = useState(false);
+  const effectiveSampleEvent = webhook.events.includes(sampleEvent) ? sampleEvent : webhook.events[0] ?? fallbackEvent;
+  const liveBodyIssue = validateWebhook(webhook).find((issue) => issue.field === 'body');
+  const nameIssue = validationIssues.find((issue) => issue.field === 'name');
+  const eventIssue = validationIssues.find((issue) => issue.field === 'events');
+  const urlIssue = validationIssues.find((issue) => issue.field === 'url');
+  const headerIssue = validationIssues.find((issue) => issue.field === 'headers');
+  const eventFamilies: WebhookEventFamily[] = webhook.targetKind === 'client' ? ['client'] : ['tunnel', 'p2p'];
 
   const updateHeader = (headerId: string, field: 'key' | 'value', value: string) => {
-    onUpdate('headers', webhook.headers.map((header) => header.id === headerId ? { ...header, [field]: value } : header));
-  };
-
-  const requestTargetKindChange = (targetKind: WebhookTargetKind) => {
-    if (targetKind !== webhook.targetKind) setPendingTargetKind(targetKind);
+    onUpdate('headers', webhook.headers.map((header) => (
+      header.id === headerId ? { ...header, [field]: value } : header
+    )));
   };
 
   const confirmTargetKindChange = () => {
@@ -380,7 +630,7 @@ function WebhookConfiguration({
     if (!targetKind) return;
     const events: WebhookEventKey[] = targetKind === 'client'
       ? ['client.online', 'client.offline']
-      : ['tunnel.runtime_changed', 'tunnel.runtime_error', 'tunnel.runtime_recovered', 'p2p.failed', 'p2p.fallback'];
+      : ['tunnel.runtime_error', 'tunnel.runtime_recovered', 'p2p.failed', 'p2p.fallback'];
     onUpdate('targetKind', targetKind);
     onUpdate('targetMode', 'all');
     onUpdate('targetIds', []);
@@ -388,6 +638,11 @@ function WebhookConfiguration({
     onUpdate('body', targetKind === 'client' ? DEFAULT_CLIENT_WEBHOOK_BODY : DEFAULT_TUNNEL_WEBHOOK_BODY);
     setSampleEvent(events[0]);
     setPendingTargetKind(null);
+    const retainedTemplates = [
+      ...getTemplateIssues(webhook.url, events, 'url'),
+      ...webhook.headers.flatMap((header) => getTemplateIssues(header.value, events, 'header')),
+    ];
+    if (retainedTemplates.length > 0) toast.error(t('webhooks.target.retainedTemplateWarning'));
   };
 
   return (
@@ -398,68 +653,82 @@ function WebhookConfiguration({
       transition={{ duration: 0.18 }}
       className="flex flex-col gap-5"
     >
-      <EditorSection title={t('webhooks.basic.title')} description={t('webhooks.basic.description')}>
+      <EditorSection title={t('webhooks.basic.title')}>
         <FieldGroup>
-          <Field>
+          <Field data-webhook-field="name" data-invalid={Boolean(nameIssue)}>
             <FieldLabel htmlFor={`webhook-name-${webhook.id}`}>{t('webhooks.basic.name')}</FieldLabel>
             <Input
               id={`webhook-name-${webhook.id}`}
               value={webhook.name}
               onChange={(event) => onUpdate('name', event.target.value)}
               placeholder={t('webhooks.basic.namePlaceholder')}
+              aria-invalid={Boolean(nameIssue)}
             />
+            {nameIssue ? <FieldError>{validationIssueMessage(t, nameIssue)}</FieldError> : null}
           </Field>
-          <Field orientation="horizontal" className="rounded-lg border bg-muted/15 p-3">
-            <FieldContent>
-              <FieldTitle>{t('webhooks.basic.enabled')}</FieldTitle>
-              <FieldDescription>{t('webhooks.basic.enabledDescription')}</FieldDescription>
-            </FieldContent>
-            <Switch checked={webhook.enabled} onCheckedChange={(value) => onUpdate('enabled', value)} />
-          </Field>
+          {!isNew ? (
+            <Field orientation="horizontal">
+              <FieldContent><FieldLabel htmlFor={`webhook-enabled-${webhook.id}`}>{t('webhooks.basic.enabled')}</FieldLabel></FieldContent>
+              <Switch
+                id={`webhook-enabled-${webhook.id}`}
+                checked={webhook.enabled}
+                onCheckedChange={(value) => value ? onUpdate('enabled', true) : setDisableOpen(true)}
+              />
+            </Field>
+          ) : null}
         </FieldGroup>
       </EditorSection>
 
-      <ListeningTargetSection webhook={webhook} onUpdate={onUpdate} onTargetKindChange={requestTargetKindChange} />
+      <ListeningTargetSection webhook={webhook} validationIssues={validationIssues} onUpdate={onUpdate} onTargetKindChange={setPendingTargetKind} />
 
-      <EditorSection
-        title={t('webhooks.events.title')}
-        description={t('webhooks.events.description')}
-        action={<Badge variant="secondary">{t('webhooks.events.selected', { count: webhook.events.length })}</Badge>}
-      >
-        <div className="rounded-lg border bg-muted/10 p-2.5">
-          <div className="mb-2 flex items-center gap-2">
-            {(() => {
-              const Icon = GROUP_ICONS[webhook.targetKind];
-              return <span className={cn('flex size-7 items-center justify-center rounded-md', GROUP_ACCENTS[webhook.targetKind])}><Icon className="size-3.5" /></span>;
-            })()}
-            <span className="text-sm font-medium">{t(`webhooks.events.group.${webhook.targetKind}`)}</span>
-          </div>
-          <FieldGroup data-slot="checkbox-group" className="grid gap-2 sm:grid-cols-2">
-            {WEBHOOK_EVENT_OPTIONS.filter((option) => option.group === webhook.targetKind).map((option) => (
-              <FieldLabel key={option.key} className="cursor-pointer">
-                <Field orientation="horizontal">
-                  <Checkbox
-                    checked={webhook.events.includes(option.key)}
-                    onCheckedChange={(checked) => onUpdate('events', checked
-                      ? [...new Set([...webhook.events, option.key])]
-                      : webhook.events.filter((eventKey) => eventKey !== option.key))}
-                  />
-                  <FieldContent>
-                    <div className="flex items-center gap-1.5">
-                      <FieldTitle>{t(eventLabelKey(option.key))}</FieldTitle>
-                      {option.key.startsWith('p2p.') ? <Badge variant="outline">P2P</Badge> : null}
-                    </div>
-                    <code className="text-[10px] text-muted-foreground">{option.key}</code>
-                  </FieldContent>
-                </Field>
-              </FieldLabel>
-            ))}
-          </FieldGroup>
+      <EditorSection title={t('webhooks.events.title')}>
+        <div data-webhook-field="events" className="flex flex-col gap-3">
+          {eventFamilies.map((family) => {
+            const options = WEBHOOK_EVENT_OPTIONS.filter((option) => option.targetKind === webhook.targetKind && option.family === family);
+            return (
+              <FieldSet key={family}>
+                <FieldLegend variant="label" className={cn(eventFamilies.length === 1 && 'sr-only')}>
+                  <span className="inline-flex items-center gap-1">
+                    {t(`webhooks.events.group.${family}`)}
+                    {family !== 'client' ? <EventFamilyHelp family={family} /> : null}
+                  </span>
+                </FieldLegend>
+                <FieldGroup data-slot="checkbox-group" className="grid gap-2 sm:grid-cols-2">
+                  {options.map((option) => {
+                    const id = `event-${webhook.id}-${option.key}`;
+                    return (
+                      <Field key={option.key} orientation="horizontal">
+                        <Checkbox
+                          id={id}
+                          checked={webhook.events.includes(option.key)}
+                          onCheckedChange={(checked) => onUpdate('events', checked
+                            ? [...new Set([...webhook.events, option.key])]
+                            : webhook.events.filter((eventKey) => eventKey !== option.key))}
+                        />
+                        <FieldContent>
+                          <FieldLabel htmlFor={id}>{t(eventLabelKey(option.key))}</FieldLabel>
+                        </FieldContent>
+                      </Field>
+                    );
+                  })}
+                </FieldGroup>
+              </FieldSet>
+            );
+          })}
+          {eventIssue ? <FieldError>{validationIssueMessage(t, eventIssue)}</FieldError> : null}
         </div>
       </EditorSection>
 
-      <EditorSection title={t('webhooks.request.title')} description={t('webhooks.request.description')}>
-        <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_330px]">
+      <EditorSection
+        title={t('webhooks.request.title')}
+        action={(
+          <Button variant="outline" size="sm" onClick={onTest}>
+            <Send data-icon="inline-start" />
+            {t('webhooks.editor.test')}
+          </Button>
+        )}
+      >
+        <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_350px]">
           <FieldGroup>
             <Field>
               <FieldLabel>{t('webhooks.request.method')}</FieldLabel>
@@ -473,20 +742,24 @@ function WebhookConfiguration({
                 <ToggleGroupItem value="GET" className="px-6">GET</ToggleGroupItem>
                 <ToggleGroupItem value="POST" className="px-6">POST</ToggleGroupItem>
               </ToggleGroup>
-              <FieldDescription>{t('webhooks.request.methodDescription')}</FieldDescription>
             </Field>
 
-            <Field>
+            <Field data-webhook-field="url" data-invalid={Boolean(urlIssue)}>
               <FieldLabel>{t('webhooks.request.url')}</FieldLabel>
               <TemplatedInput
                 value={webhook.url}
-                targetKind={webhook.targetKind}
+                webhook={webhook}
+                events={webhook.events}
+                sampleEvent={effectiveSampleEvent}
+                surface="url"
                 onChange={(value) => onUpdate('url', value)}
+                placeholder={t('webhooks.request.urlPlaceholder')}
+                aria-invalid={Boolean(urlIssue)}
               />
-              <FieldDescription>{t('webhooks.request.urlDescription')}</FieldDescription>
+              {urlIssue ? <FieldError>{validationIssueMessage(t, urlIssue)}</FieldError> : null}
             </Field>
 
-            <Field>
+            <Field data-webhook-field="headers" data-invalid={Boolean(headerIssue)}>
               <div className="flex items-center justify-between gap-2">
                 <FieldLabel>{t('webhooks.request.headers')}</FieldLabel>
                 <Button
@@ -506,49 +779,45 @@ function WebhookConfiguration({
                       onChange={(event) => updateHeader(header.id, 'key', event.target.value)}
                       placeholder={t('webhooks.request.headerName')}
                       className="font-mono text-xs"
+                      aria-invalid={Boolean(headerIssue)}
                     />
                     <TemplatedInput
                       value={header.value}
-                      targetKind={webhook.targetKind}
+                      webhook={webhook}
+                      events={webhook.events}
+                      sampleEvent={effectiveSampleEvent}
+                      surface="header"
                       onChange={(value) => updateHeader(header.id, 'value', value)}
                       placeholder={t('webhooks.request.headerValue')}
+                      aria-invalid={Boolean(headerIssue)}
                     />
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => onUpdate('headers', webhook.headers.filter((item) => item.id !== header.id))}
-                      aria-label={t('webhooks.request.removeHeader')}
-                    >
+                    <Button variant="ghost" size="icon" onClick={() => onUpdate('headers', webhook.headers.filter((item) => item.id !== header.id))} aria-label={t('webhooks.request.removeHeader')}>
                       <Trash2 />
                     </Button>
                   </div>
                 ))}
-                {webhook.headers.length === 0 ? (
-                  <div className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">{t('webhooks.request.emptyHeaders')}</div>
-                ) : null}
+                {webhook.headers.length === 0 ? <FieldDescription>{t('webhooks.request.emptyHeaders')}</FieldDescription> : null}
               </div>
+              {headerIssue ? <FieldError>{validationIssueMessage(t, headerIssue)}</FieldError> : null}
             </Field>
 
             {webhook.method === 'POST' ? (
-              <Field data-invalid={!bodyValid}>
+              <Field data-webhook-field="body" data-invalid={Boolean(liveBodyIssue)}>
                 <FieldLabel>{t('webhooks.request.body')}</FieldLabel>
                 <JsonBodyEditor
                   value={webhook.body}
-                  targetKind={webhook.targetKind}
-                  invalid={!bodyValid}
+                  webhook={webhook}
+                  events={webhook.events}
+                  sampleEvent={effectiveSampleEvent}
+                  invalid={Boolean(liveBodyIssue)}
                   onChange={(value) => onUpdate('body', value)}
                 />
-                <FieldDescription>{t('webhooks.request.bodyDescription')}</FieldDescription>
-                {!bodyValid ? <FieldError>{t('webhooks.toast.invalidJson')}</FieldError> : null}
+                {liveBodyIssue ? <FieldError>{validationIssueMessage(t, liveBodyIssue)}</FieldError> : null}
               </Field>
-            ) : (
-              <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 text-sm text-sky-700 dark:text-sky-300">
-                {t('webhooks.request.getOnly')}
-              </div>
-            )}
+            ) : null}
           </FieldGroup>
 
-          <RequestPreview webhook={webhook} sampleEvent={sampleEvent} onSampleEventChange={setSampleEvent} />
+          <RequestPreview webhook={webhook} sampleEvent={effectiveSampleEvent} onSampleEventChange={setSampleEvent} />
         </div>
       </EditorSection>
 
@@ -564,21 +833,83 @@ function WebhookConfiguration({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={disableOpen} onOpenChange={setDisableOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('webhooks.disable.title')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('webhooks.disable.description')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => onUpdate('enabled', false)}>{t('webhooks.disable.confirm')}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
+  );
+}
+
+function EventFamilyHelp({ family }: { family: Extract<WebhookEventFamily, 'tunnel' | 'p2p'> }) {
+  const { t } = useTranslation();
+  const items = family === 'tunnel'
+    ? ['intent', 'changed', 'error'] as const
+    : ['checking', 'connected', 'failure', 'closed'] as const;
+  const label = t(`webhooks.events.help.${family}.label`);
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          className="-my-1 text-muted-foreground"
+          aria-label={label}
+          title={label}
+        >
+          <CircleHelp />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" collisionPadding={8} className="w-80 max-w-[calc(100vw-1rem)]">
+        <PopoverHeader>
+          <PopoverTitle>{t(`webhooks.events.help.${family}.title`)}</PopoverTitle>
+          <PopoverDescription className="text-xs leading-relaxed">
+            {t(`webhooks.events.help.${family}.description`)}
+          </PopoverDescription>
+        </PopoverHeader>
+        <dl className="flex flex-col gap-2 text-xs leading-relaxed">
+          {items.map((item) => (
+            <div key={item}>
+              <dt className="font-medium">{t(`webhooks.events.help.${family}.item.${item}.title`)}</dt>
+              <dd className="text-muted-foreground">{t(`webhooks.events.help.${family}.item.${item}.description`)}</dd>
+            </div>
+          ))}
+        </dl>
+      </PopoverContent>
+    </Popover>
   );
 }
 
 function ListeningTargetSection({
   webhook,
+  validationIssues,
   onUpdate,
   onTargetKindChange,
 }: {
   webhook: WebhookPrototype;
+  validationIssues: WebhookValidationIssue[];
   onUpdate: <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => void;
   onTargetKindChange: (targetKind: WebhookTargetKind) => void;
 }) {
   const { t } = useTranslation();
+  const [query, setQuery] = useState('');
+  const targetIssue = validationIssues.find((issue) => issue.field === 'targets');
   const targets = webhook.targetKind === 'client' ? WEBHOOK_CLIENT_OPTIONS : WEBHOOK_TUNNEL_OPTIONS;
+  const filteredTargets = targets.filter((target) => (
+    (!target.unavailable || webhook.targetIds.includes(target.id))
+    && `${target.name} ${target.detail} ${target.id}`.toLowerCase().includes(query.trim().toLowerCase())
+  ));
   const toggleTarget = (targetId: string, checked: boolean) => {
     onUpdate('targetIds', checked
       ? [...new Set([...webhook.targetIds, targetId])]
@@ -586,48 +917,35 @@ function ListeningTargetSection({
   };
 
   return (
-    <EditorSection title={t('webhooks.target.title')} description={t('webhooks.target.description')}>
+    <EditorSection title={t('webhooks.target.title')}>
       <FieldGroup>
         <Field>
           <FieldLabel>{t('webhooks.target.kind')}</FieldLabel>
           <ToggleGroup
             type="single"
             value={webhook.targetKind}
-            onValueChange={(value) => value && onTargetKindChange(value as WebhookTargetKind)}
+            onValueChange={(value) => value && value !== webhook.targetKind && onTargetKindChange(value as WebhookTargetKind)}
             variant="outline"
             spacing={2}
             className="grid w-full grid-cols-2"
           >
-            <ToggleGroupItem value="client" className="h-auto min-h-16 justify-start px-3 py-2 text-left whitespace-normal">
+            <ToggleGroupItem value="client" className="h-10 justify-start px-3 text-left whitespace-normal">
               <Server />
-              <span>
-                <span className="block text-sm font-medium">{t('webhooks.target.client')}</span>
-                <span className="block text-[11px] font-normal leading-relaxed text-muted-foreground">{t('webhooks.target.clientDescription')}</span>
-              </span>
+              <span className="text-sm font-medium">{t('webhooks.target.client')}</span>
             </ToggleGroupItem>
-            <ToggleGroupItem value="tunnel" className="h-auto min-h-16 justify-start px-3 py-2 text-left whitespace-normal">
+            <ToggleGroupItem value="tunnel" className="h-10 justify-start px-3 text-left whitespace-normal">
               <Waypoints />
-              <span>
-                <span className="block text-sm font-medium">{t('webhooks.target.tunnel')}</span>
-                <span className="block text-[11px] font-normal leading-relaxed text-muted-foreground">{t('webhooks.target.tunnelDescription')}</span>
-              </span>
+              <span className="text-sm font-medium">{t('webhooks.target.tunnel')}</span>
             </ToggleGroupItem>
           </ToggleGroup>
         </Field>
 
         <Field>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <FieldLabel>{t('webhooks.target.range')}</FieldLabel>
-            {webhook.targetMode === 'selected' ? <Badge variant="secondary">{t('webhooks.target.selectedCount', { count: webhook.targetIds.length })}</Badge> : null}
-          </div>
+          <FieldLabel>{t('webhooks.target.range')}</FieldLabel>
           <ToggleGroup
             type="single"
             value={webhook.targetMode}
-            onValueChange={(value) => {
-              if (!value) return;
-              onUpdate('targetMode', value as WebhookPrototype['targetMode']);
-              if (value === 'all') onUpdate('targetIds', []);
-            }}
+            onValueChange={(value) => value && onUpdate('targetMode', value as WebhookPrototype['targetMode'])}
             variant="outline"
             spacing={0}
           >
@@ -636,119 +954,125 @@ function ListeningTargetSection({
           </ToggleGroup>
         </Field>
 
-        {webhook.targetMode === 'all' ? (
-          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-300">
-              <CheckCircle2 className="size-4" />
-              {t(`webhooks.target.${webhook.targetKind === 'client' ? 'allClients' : 'allTunnels'}`)}
-            </div>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              {t(`webhooks.target.${webhook.targetKind === 'client' ? 'allClientsDescription' : 'allTunnelsDescription'}`)}
-            </p>
-          </div>
-        ) : (
-          <Field data-invalid={webhook.targetIds.length === 0}>
+        {webhook.targetMode === 'selected' ? (
+          <Field data-webhook-field="targets" data-invalid={Boolean(targetIssue)}>
             <FieldLabel>{t(`webhooks.target.${webhook.targetKind === 'client' ? 'selectedClients' : 'selectedTunnels'}`)}</FieldLabel>
-            <FieldGroup data-slot="checkbox-group" className="grid gap-2 sm:grid-cols-2">
-              {targets.map((target) => (
-                <FieldLabel key={target.id} className="cursor-pointer">
-                  <Field orientation="horizontal">
-                    <Checkbox
-                      checked={webhook.targetIds.includes(target.id)}
-                      onCheckedChange={(checked) => toggleTarget(target.id, checked === true)}
-                    />
-                    <FieldContent>
-                      <FieldTitle>{target.name}</FieldTitle>
-                      <code className="text-[10px] leading-relaxed text-muted-foreground">{target.detail}</code>
-                    </FieldContent>
-                  </Field>
-                </FieldLabel>
-              ))}
-            </FieldGroup>
-            {webhook.targetIds.length === 0 ? <FieldError>{t('webhooks.target.selectionRequired')}</FieldError> : null}
+            <InputGroup>
+              <InputGroupAddon><Search /></InputGroupAddon>
+              <InputGroupInput value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('webhooks.target.searchPlaceholder')} />
+            </InputGroup>
+            {filteredTargets.length > 0 ? (
+              <FieldGroup data-slot="checkbox-group" className="grid gap-2 sm:grid-cols-2">
+                {filteredTargets.map((target) => {
+                  const id = `target-${webhook.id}-${target.id}`;
+                  return (
+                    <Field key={target.id} orientation="horizontal">
+                      <Checkbox id={id} checked={webhook.targetIds.includes(target.id)} onCheckedChange={(checked) => toggleTarget(target.id, checked === true)} />
+                      <FieldContent>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <FieldLabel htmlFor={id}>{target.name}</FieldLabel>
+                          {target.unavailable ? <Badge variant="outline">{t('webhooks.target.unavailable')}</Badge> : null}
+                        </div>
+                        <FieldDescription>{target.detail}</FieldDescription>
+                      </FieldContent>
+                    </Field>
+                  );
+                })}
+              </FieldGroup>
+            ) : (
+              <Empty className="min-h-28 border border-dashed">
+                <EmptyHeader><EmptyTitle>{t('webhooks.target.noResults')}</EmptyTitle></EmptyHeader>
+              </Empty>
+            )}
+            {targetIssue ? <FieldError>{validationIssueMessage(t, targetIssue)}</FieldError> : null}
           </Field>
-        )}
+        ) : null}
       </FieldGroup>
     </EditorSection>
   );
 }
 
-function EditorSection({
-  title,
-  description,
-  action,
-  children,
-}: {
+function EditorSection({ title, action, children }: {
   title: string;
-  description: string;
   action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-xl border bg-background">
-      <header className="flex items-start justify-between gap-3 border-b bg-muted/15 px-3.5 py-3">
-        <div>
-          <h2 className="text-sm font-medium">{title}</h2>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>
-        </div>
+    <section className="flex flex-col gap-3 border-b pb-5 last:border-b-0 last:pb-0">
+      <header className="flex items-start justify-between gap-3">
+        <h2 className="text-sm font-medium">{title}</h2>
         {action}
       </header>
-      <div className="p-3.5">{children}</div>
+      {children}
     </section>
   );
 }
 
-function TemplatedInput({ value, onChange, targetKind, ...props }: Omit<React.ComponentProps<typeof InputGroupInput>, 'value' | 'onChange'> & {
+function insertAtSelection(value: string, token: string, control: HTMLInputElement | null, onChange: (value: string) => void) {
+  const start = control?.selectionStart ?? value.length;
+  const end = control?.selectionEnd ?? value.length;
+  const nextPosition = start + token.length;
+  onChange(`${value.slice(0, start)}${token}${value.slice(end)}`);
+  window.requestAnimationFrame(() => {
+    control?.focus();
+    control?.setSelectionRange(nextPosition, nextPosition);
+  });
+}
+
+function TemplatedInput({ value, onChange, webhook, events, sampleEvent, surface, ...props }: Omit<React.ComponentProps<typeof InputGroupInput>, 'value' | 'onChange'> & {
   value: string;
   onChange: (value: string) => void;
-  targetKind: WebhookTargetKind;
+  webhook: WebhookPrototype;
+  events: WebhookEventKey[];
+  sampleEvent: WebhookEventKey;
+  surface: Exclude<WebhookTemplateSurface, 'body'>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <InputGroup>
-      <InputGroupInput
-        ref={inputRef}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="font-mono text-xs"
-        {...props}
-      />
+      <InputGroupInput ref={inputRef} value={value} onChange={(event) => onChange(event.target.value)} className="font-mono text-xs" {...props} />
       <VariablePicker
-        targetKind={targetKind}
-        onSelect={(key) => insertAtSelection(value, `{{${key}}}`, inputRef.current, onChange)}
+        events={events}
+        sampleEvent={sampleEvent}
+        webhook={webhook}
+        surface={surface}
+        onSelect={(variable) => insertAtSelection(value, `{{${variable.key}}}`, inputRef.current, onChange)}
       />
     </InputGroup>
   );
 }
 
-function JsonBodyEditor({ value, onChange, invalid, targetKind }: {
+function JsonBodyEditor({ value, onChange, webhook, invalid, events, sampleEvent }: {
   value: string;
   onChange: (value: string) => void;
+  webhook: WebhookPrototype;
   invalid: boolean;
-  targetKind: WebhookTargetKind;
+  events: WebhookEventKey[];
+  sampleEvent: WebhookEventKey;
 }) {
   const { t } = useTranslation();
   const editorRef = useRef<WebhookJsonEditorHandle>(null);
-
   const formatJson = () => {
-    if (!editorRef.current?.format()) toast.error(t('webhooks.toast.invalidJson'));
+    if (!editorRef.current?.format()) toast.error(t('webhooks.validation.invalidJson'));
   };
 
   return (
     <div className="overflow-hidden rounded-lg border bg-muted/10">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-background px-2.5 py-2">
-        <div className={cn(
-          'flex items-center gap-1.5 text-xs',
-          invalid ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400',
-        )}>
-          {invalid ? <CircleOff className="size-3.5" /> : <CheckCircle2 className="size-3.5" />}
-          {t(`webhooks.preview.${invalid ? 'invalidJson' : 'validJson'}`)}
-        </div>
+      <div className={cn('flex flex-wrap items-center gap-2 border-b bg-background px-2.5 py-2', invalid ? 'justify-between' : 'justify-end')}>
+        {invalid ? (
+          <div className="flex items-center gap-1.5 text-xs text-destructive">
+            <CircleOff className="size-3.5" />
+            {t('webhooks.preview.invalidTemplate')}
+          </div>
+        ) : null}
         <div className="flex items-center gap-1.5">
           <VariablePicker
             standalone
-            targetKind={targetKind}
-            onSelect={(key) => editorRef.current?.insert(`{{${key}}}`)}
+            events={events}
+            sampleEvent={sampleEvent}
+            webhook={webhook}
+            surface="body"
+            onSelect={(variable) => editorRef.current?.insert(`"{{${variable.key}}}"`)}
           />
           <Button type="button" variant="outline" size="sm" onClick={formatJson}>
             <AlignLeft data-icon="inline-start" />
@@ -761,28 +1085,36 @@ function JsonBodyEditor({ value, onChange, invalid, targetKind }: {
         value={value}
         onChange={onChange}
         invalid={invalid}
-        targetKind={targetKind}
+        events={events}
+        sampleEvent={sampleEvent}
+        webhook={webhook}
+        label={t('webhooks.request.body')}
         className="rounded-none border-0 bg-transparent focus-within:ring-0"
       />
     </div>
   );
 }
 
-function VariablePicker({ onSelect, targetKind, standalone = false }: {
-  onSelect: (key: string) => void;
-  targetKind: WebhookTargetKind;
+function VariablePicker({ onSelect, webhook, events, sampleEvent, surface, standalone = false }: {
+  onSelect: (variable: WebhookVariable) => void;
+  webhook: WebhookPrototype;
+  events: WebhookEventKey[];
+  sampleEvent: WebhookEventKey;
+  surface: WebhookTemplateSurface;
   standalone?: boolean;
 }) {
   const { t } = useTranslation();
-  const [query, setQuery] = useState('');
-  const groups = ['event', 'client', 'tunnel', 'p2p', 'webhook'] as const;
-  const filtered = WEBHOOK_VARIABLES.filter((variable) => (
-    variable.availableFor.includes(targetKind)
-    && variable.key.toLowerCase().includes(query.trim().toLowerCase())
-  ));
+  const [open, setOpen] = useState(false);
+  const groups = ['delivery', 'event', 'client', 'tunnel', 'subjects', 'match', 'p2p', 'webhook'] as const;
+  const variables = getWebhookVariables(events, surface);
+
+  const selectVariable = (variable: WebhookVariable) => {
+    onSelect(variable);
+    setOpen(false);
+  };
 
   return (
-    <Popover>
+    <Popover modal open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         {standalone ? (
           <Button type="button" variant="outline" size="sm">
@@ -793,115 +1125,105 @@ function VariablePicker({ onSelect, targetKind, standalone = false }: {
           <InputGroupButton type="button" size="icon-xs" aria-label={t('webhooks.variables.title')}><Braces /></InputGroupButton>
         )}
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 p-0">
+      <PopoverContent align="end" collisionPadding={8} className="w-[28rem] max-w-[calc(100vw-1rem)] p-0">
         <PopoverHeader className="border-b p-3">
           <PopoverTitle>{t('webhooks.variables.title')}</PopoverTitle>
-          <PopoverDescription>{t('webhooks.variables.description')}</PopoverDescription>
         </PopoverHeader>
         <div className="p-2">
-          <div className="relative mb-2">
-            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('webhooks.variables.searchPlaceholder')} className="h-7 pl-8 text-xs" />
-          </div>
-          <div className="max-h-72 overflow-y-auto">
+          <div data-slot="webhook-variable-list" className="max-h-80 overflow-y-auto overscroll-contain pr-1">
             {groups.map((group) => {
-              const variables = filtered.filter((variable) => variable.group === group);
-              if (variables.length === 0) return null;
+              const groupVariables = variables.filter((variable) => variable.group === group);
+              if (groupVariables.length === 0) return null;
               return (
                 <section key={group} className="mb-2 last:mb-0">
-                  <h3 className="px-1.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t(`webhooks.variables.group.${group}`)}</h3>
-                  {variables.map((variable) => (
-                    <button
-                      key={variable.key}
-                      type="button"
-                      onClick={() => onSelect(variable.key)}
-                      className="flex w-full items-center justify-between gap-3 rounded-md px-1.5 py-1.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                    >
-                      <code className="text-xs">{`{{${variable.key}}}`}</code>
-                      <span className="max-w-28 truncate text-[10px] text-muted-foreground">{webhookVariableSample(variable, targetKind)}</span>
-                    </button>
-                  ))}
+                  <h3 className="px-2 py-1 text-xs font-medium text-muted-foreground">{t(`webhooks.variables.group.${group}`)}</h3>
+                  {groupVariables.map((variable) => {
+                    const sample = webhookVariableSample(variable, sampleEvent, webhook);
+                    return (
+                      <button
+                        key={variable.key}
+                        type="button"
+                        onClick={() => selectVariable(variable)}
+                        className="grid w-full grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)] items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs font-medium">{t(variableLabelKey(variable))}</span>
+                          <code className="block truncate text-[10px] text-muted-foreground">{`{{${variable.key}}}`}</code>
+                        </span>
+                        <code className="truncate text-right text-[11px]" title={sample}>{sample}</code>
+                      </button>
+                    );
+                  })}
                 </section>
               );
             })}
           </div>
-          <p className="mt-2 border-t pt-2 text-[10px] text-muted-foreground">{t('webhooks.variables.jsonHint')}</p>
         </div>
       </PopoverContent>
     </Popover>
   );
 }
 
-function RequestPreview({
-  webhook,
-  sampleEvent,
-  onSampleEventChange,
-}: {
+function RequestPreview({ webhook, sampleEvent, onSampleEventChange }: {
   webhook: WebhookPrototype;
   sampleEvent: WebhookEventKey;
   onSampleEventChange: (event: WebhookEventKey) => void;
 }) {
   const { t } = useTranslation();
-  const values = useMemo(() => ({
-    ...Object.fromEntries(WEBHOOK_VARIABLES.map((variable) => [variable.key, webhookVariableSample(variable, webhook.targetKind)])),
-    'event.type': sampleEvent,
-    'event.category': eventCategory(sampleEvent),
-    'event.severity': sampleEvent.includes('failed') || sampleEvent.includes('error') ? 'error' : 'info',
-    'webhook.id': webhook.id,
-    'webhook.name': webhook.name || 'Webhook',
-  }), [sampleEvent, webhook.id, webhook.name, webhook.targetKind]);
-  const renderedUrl = renderTemplate(webhook.url, values, true);
-  const renderedHeaders = webhook.headers.filter((header) => header.key.trim()).map((header) => ({
-    key: header.key,
-    value: renderTemplate(header.value, values),
-  }));
-  let renderedBody = '';
-  let bodyError = false;
-  if (webhook.method === 'POST') {
-    try {
-      renderedBody = renderJsonBody(webhook.body, values);
-    } catch {
-      bodyError = true;
-      renderedBody = webhook.body;
-    }
+  const previewEvents = webhook.events;
+  if (previewEvents.length === 0) {
+    return (
+      <aside className="rounded-lg border bg-muted/10 p-3 xl:sticky xl:top-3">
+        <div className="flex items-start gap-2">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><FileJson2 className="size-4" /></span>
+          <div>
+            <h3 className="text-sm font-medium">{t('webhooks.preview.title')}</h3>
+          </div>
+        </div>
+        <Empty className="min-h-40 p-4">
+          <EmptyHeader><EmptyTitle>{t('webhooks.preview.empty')}</EmptyTitle></EmptyHeader>
+        </Empty>
+      </aside>
+    );
   }
+  const effectiveEvent = previewEvents.includes(sampleEvent) ? sampleEvent : previewEvents[0];
+  const request = renderWebhookRequest(webhook, effectiveEvent);
 
   return (
-    <aside className="rounded-xl border bg-muted/10 p-3 xl:sticky xl:top-3">
+    <aside className="rounded-lg border bg-muted/10 p-3 xl:sticky xl:top-3">
       <div className="mb-3 flex items-start gap-2">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><FileJson2 className="size-4" /></span>
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><FileJson2 className="size-4" /></span>
         <div>
           <h3 className="text-sm font-medium">{t('webhooks.preview.title')}</h3>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">{t('webhooks.preview.description')}</p>
         </div>
       </div>
-      <Select value={sampleEvent} onValueChange={(value) => onSampleEventChange(value as WebhookEventKey)}>
+      <Select value={effectiveEvent} onValueChange={(value) => onSampleEventChange(value as WebhookEventKey)} disabled={webhook.events.length === 0}>
         <SelectTrigger className="mb-3 w-full"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectGroup>
-            {WEBHOOK_EVENT_OPTIONS.filter((option) => option.group === webhook.targetKind).map((option) => (
-              <SelectItem key={option.key} value={option.key}>{t(eventLabelKey(option.key))}</SelectItem>
-            ))}
+            {previewEvents.map((event) => <SelectItem key={event} value={event}>{t(eventLabelKey(event))}</SelectItem>)}
           </SelectGroup>
         </SelectContent>
       </Select>
       <div className="flex flex-col gap-3">
         <PreviewBlock title={t('webhooks.preview.url')}>
-          <div className="flex items-start gap-2"><Badge variant={webhook.method === 'POST' ? 'default' : 'outline'}>{webhook.method}</Badge><code className="break-all text-[10px] leading-relaxed">{renderedUrl}</code></div>
+          <div className="flex items-start gap-2"><Badge variant="outline">{webhook.method}</Badge><code className="break-all text-[10px] leading-relaxed">{request.url}</code></div>
         </PreviewBlock>
         <PreviewBlock title={t('webhooks.preview.headers')}>
-          {renderedHeaders.length > 0 ? renderedHeaders.map((header, index) => (
-            <div key={`${header.key}-${index}`} className="grid grid-cols-[auto_1fr] gap-2 font-mono text-[10px]"><span className="text-sky-600 dark:text-sky-400">{header.key}</span><span className="break-all">{maskSecret(header.key, header.value)}</span></div>
+          {request.headers.length > 0 ? request.headers.map((header, index) => (
+            <div key={`${header.key}-${index}`} className="grid grid-cols-[auto_1fr] gap-2 font-mono text-[10px]"><span className="text-muted-foreground">{header.key}</span><span className="break-all">{header.value}</span></div>
           )) : <span className="text-xs text-muted-foreground">{t('webhooks.preview.noHeaders')}</span>}
         </PreviewBlock>
         <PreviewBlock title={t('webhooks.preview.body')}>
           {webhook.method === 'GET' ? <span className="text-xs text-muted-foreground">{t('webhooks.preview.noBody')}</span> : (
             <>
-              <div className={cn('mb-1.5 flex items-center gap-1 text-[11px]', bodyError ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400')}>
-                {bodyError ? <CircleOff className="size-3" /> : <CheckCircle2 className="size-3" />}
-                {t(`webhooks.preview.${bodyError ? 'invalidJson' : 'validJson'}`)}
-              </div>
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed">{renderedBody}</pre>
+              {request.bodyError ? (
+                <div className="mb-1.5 flex items-center gap-1 text-[11px] text-destructive">
+                  <CircleOff className="size-3" />
+                  {t('webhooks.preview.invalidTemplate')}
+                </div>
+              ) : null}
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed">{request.body}</pre>
             </>
           )}
         </PreviewBlock>
@@ -914,71 +1236,204 @@ function PreviewBlock({ title, children }: { title: string; children: React.Reac
   return <section><h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</h4><div className="rounded-lg border bg-background p-2">{children}</div></section>;
 }
 
-function WebhookDeliveryLog({ webhookId }: { webhookId: string }) {
+function TestWebhookDialog({ open, webhook, onOpenChange, onComplete }: {
+  open: boolean;
+  webhook: WebhookPrototype;
+  onOpenChange: (open: boolean) => void;
+  onComplete: (event: WebhookEventKey) => void;
+}) {
+  const { t } = useTranslation();
+  const [event, setEvent] = useState<WebhookEventKey>(webhook.events[0]);
+  const [complete, setComplete] = useState(false);
+  const effectiveEvent = webhook.events.includes(event) ? event : webhook.events[0];
+  const request = renderWebhookRequest(webhook, effectiveEvent);
+
+  const sendTest = () => {
+    onComplete(effectiveEvent);
+    setComplete(true);
+    toast.success(t('webhooks.toast.tested'));
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{t('webhooks.test.title')}</DialogTitle>
+          <DialogDescription>{t('webhooks.test.description')}</DialogDescription>
+        </DialogHeader>
+        <FieldGroup>
+          <Field>
+            <FieldLabel>{t('webhooks.preview.sampleEvent')}</FieldLabel>
+            <Select value={effectiveEvent} onValueChange={(value) => { setEvent(value as WebhookEventKey); setComplete(false); }}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent><SelectGroup>{webhook.events.map((item) => <SelectItem key={item} value={item}>{t(eventLabelKey(item))}</SelectItem>)}</SelectGroup></SelectContent>
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel>{t('webhooks.test.request')}</FieldLabel>
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="flex items-start gap-2"><Badge variant="outline">{webhook.method}</Badge><code className="break-all text-xs">{request.url}</code></div>
+            </div>
+          </Field>
+          {complete ? (
+            <div className="grid grid-cols-3 gap-2">
+              <Metric label={t('webhooks.deliveries.result')} value={t('webhooks.status.success')} />
+              <Metric label={t('webhooks.deliveries.response')} value="200" />
+              <Metric label={t('webhooks.deliveries.duration')} value="126 ms" />
+            </div>
+          ) : null}
+          <FieldDescription>{t('webhooks.test.prototypeHint')}</FieldDescription>
+        </FieldGroup>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{complete ? t('common.close') : t('common.cancel')}</Button>
+          {!complete ? <Button onClick={sendTest}><Send data-icon="inline-start" />{t('webhooks.test.send')}</Button> : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
+  webhookId: string;
+  invocations: WebhookInvocation[];
+  onReplay: (invocation: WebhookInvocation) => void;
+}) {
   const { t, i18n } = useTranslation();
   const [selected, setSelected] = useState<WebhookInvocation | null>(null);
-  const invocations = WEBHOOK_INVOCATIONS.filter((item) => item.webhookId === webhookId);
+  const [status, setStatus] = useState<'all' | WebhookInvocationStatus>('all');
+  const filtered = invocations.filter((item) => item.webhookId === webhookId && (status === 'all' || item.status === status));
 
   return (
     <>
-      <div className="mb-3">
-        <h2 className="text-sm font-medium">{t('webhooks.deliveries.title')}</h2>
-        <p className="mt-0.5 text-xs text-muted-foreground">{t('webhooks.deliveries.description')}</p>
+      <div className="mb-3 flex justify-end">
+        <Select value={status} onValueChange={(value) => setStatus(value as typeof status)}>
+          <SelectTrigger size="sm" className="w-full sm:w-40"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectGroup>
+            {(['all', 'queued', 'retrying', 'success', 'failed', 'canceled'] as const).map((value) => <SelectItem key={value} value={value}>{t(`webhooks.deliveries.filter.${value}`)}</SelectItem>)}
+          </SelectGroup></SelectContent>
+        </Select>
       </div>
-      {invocations.length > 0 ? (
-        <div className="overflow-hidden rounded-xl border">
-          <Table>
-            <TableHeader><TableRow><TableHead>{t('webhooks.deliveries.event')}</TableHead><TableHead>{t('webhooks.deliveries.result')}</TableHead><TableHead>{t('webhooks.deliveries.response')}</TableHead><TableHead>{t('webhooks.deliveries.duration')}</TableHead><TableHead>{t('webhooks.deliveries.time')}</TableHead><TableHead /></TableRow></TableHeader>
-            <TableBody>
-              {invocations.map((invocation) => (
-                <TableRow key={invocation.id}>
-                  <TableCell><div className="font-medium">{t(eventLabelKey(invocation.event))}</div><code className="text-[10px] text-muted-foreground">{invocation.event}</code></TableCell>
-                  <TableCell><Badge variant={invocation.status === 'success' ? 'secondary' : 'destructive'}>{t(`webhooks.status.${invocation.status}`)}</Badge></TableCell>
-                  <TableCell className="font-mono text-xs">{invocation.statusCode ?? '—'}</TableCell>
-                  <TableCell className="font-mono text-xs">{invocation.durationMs} ms</TableCell>
-                  <TableCell className="text-xs">{formatShortTime(invocation.occurredAt, i18n.resolvedLanguage ?? 'zh-CN')}</TableCell>
-                  <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => setSelected(invocation)}>{t('webhooks.deliveries.details')}</Button></TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+      {filtered.length > 0 ? (
+        <>
+          <div className="flex flex-col gap-2 sm:hidden">
+            {filtered.map((invocation) => (
+              <button
+                key={invocation.id}
+                type="button"
+                onClick={() => setSelected(invocation)}
+                className="rounded-lg border bg-background p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                aria-label={`${t(eventLabelKey(invocation.event))} ${t('webhooks.deliveries.details')}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <span className="font-medium">{t(eventLabelKey(invocation.event))}</span>
+                  <Badge variant={statusVariant(invocation.status)}>{t(`webhooks.status.${invocation.status}`)}</Badge>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                  <span>{t(`webhooks.deliveries.originValue.${invocation.origin}`)}</span>
+                  <span aria-hidden>·</span>
+                  <time>{formatShortTime(invocation.occurredAt, i18n.resolvedLanguage ?? 'zh-CN')}</time>
+                </div>
+                <div className="mt-2 flex items-center gap-4 font-mono text-xs">
+                  <span>{t('webhooks.deliveries.response')} {invocation.statusCode ?? '—'}</span>
+                  <span>{invocation.durationMs === null ? '—' : `${invocation.durationMs} ms`}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto rounded-lg border sm:block">
+            <Table>
+              <TableHeader><TableRow><TableHead>{t('webhooks.deliveries.event')}</TableHead><TableHead>{t('webhooks.deliveries.origin')}</TableHead><TableHead>{t('webhooks.deliveries.result')}</TableHead><TableHead>{t('webhooks.deliveries.response')}</TableHead><TableHead>{t('webhooks.deliveries.duration')}</TableHead><TableHead>{t('webhooks.deliveries.time')}</TableHead><TableHead /></TableRow></TableHeader>
+              <TableBody>
+                {filtered.map((invocation) => (
+                  <TableRow key={invocation.id}>
+                    <TableCell><div className="font-medium">{t(eventLabelKey(invocation.event))}</div><code className="text-[10px] text-muted-foreground">{invocation.event}</code></TableCell>
+                    <TableCell><Badge variant="outline">{t(`webhooks.deliveries.originValue.${invocation.origin}`)}</Badge></TableCell>
+                    <TableCell><Badge variant={statusVariant(invocation.status)}>{t(`webhooks.status.${invocation.status}`)}</Badge></TableCell>
+                    <TableCell className="font-mono text-xs">{invocation.statusCode ?? '—'}</TableCell>
+                    <TableCell className="font-mono text-xs">{invocation.durationMs === null ? '—' : `${invocation.durationMs} ms`}</TableCell>
+                    <TableCell className="text-xs">{formatShortTime(invocation.occurredAt, i18n.resolvedLanguage ?? 'zh-CN')}</TableCell>
+                    <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => setSelected(invocation)}>{t('webhooks.deliveries.details')}</Button></TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
       ) : (
-        <div className="flex min-h-56 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground"><Clock3 className="size-6" />{t('webhooks.deliveries.empty')}</div>
+        <Empty className="min-h-56 border border-dashed">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><Clock3 /></EmptyMedia>
+            <EmptyTitle>{t('webhooks.deliveries.empty')}</EmptyTitle>
+            <EmptyDescription>{status === 'all' ? t('webhooks.deliveries.emptyDescription') : t('webhooks.deliveries.emptyFiltered')}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       )}
-      <DeliveryDialog invocation={selected} onOpenChange={(open) => !open && setSelected(null)} />
+      <DeliveryDialog invocation={selected} onOpenChange={(nextOpen) => !nextOpen && setSelected(null)} onReplay={onReplay} />
     </>
   );
 }
 
-function DeliveryDialog({ invocation, onOpenChange }: { invocation: WebhookInvocation | null; onOpenChange: (open: boolean) => void }) {
+function DeliveryDialog({ invocation, onOpenChange, onReplay }: {
+  invocation: WebhookInvocation | null;
+  onOpenChange: (open: boolean) => void;
+  onReplay: (invocation: WebhookInvocation) => void;
+}) {
   const { t } = useTranslation();
+  const [replayOpen, setReplayOpen] = useState(false);
+  const requestHeaders = invocation ? JSON.stringify(invocation.requestHeaders, null, 2) : '';
+  const responseHeaders = invocation ? JSON.stringify(invocation.responseHeaders, null, 2) : '';
   return (
-    <Dialog open={Boolean(invocation)} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader><DialogTitle>{t('webhooks.detail.title')}</DialogTitle><DialogDescription>{t('webhooks.detail.description')}</DialogDescription></DialogHeader>
-        {invocation ? (
-          <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <Metric label={t('webhooks.deliveries.result')} value={t(`webhooks.status.${invocation.status}`)} />
-              <Metric label={t('webhooks.deliveries.response')} value={String(invocation.statusCode ?? '—')} />
-              <Metric label={t('webhooks.deliveries.duration')} value={`${invocation.durationMs} ms`} />
-              <Metric label={t('webhooks.deliveries.attempt')} value={t('webhooks.deliveries.attemptValue', { count: invocation.attempt })} />
+    <>
+      <Dialog open={Boolean(invocation)} onOpenChange={onOpenChange}>
+        <DialogContent className="max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
+          <DialogHeader><DialogTitle>{t('webhooks.detail.title')}</DialogTitle><DialogDescription className="sr-only">{t('webhooks.detail.description')}</DialogDescription></DialogHeader>
+          {invocation ? (
+            <div className="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <Metric label={t('webhooks.deliveries.result')} value={t(`webhooks.status.${invocation.status}`)} />
+                <Metric label={t('webhooks.deliveries.response')} value={String(invocation.statusCode ?? '—')} />
+                <Metric label={t('webhooks.deliveries.duration')} value={invocation.durationMs === null ? '—' : `${invocation.durationMs} ms`} />
+                <Metric label={t('webhooks.deliveries.attempt')} value={String(invocation.attempts.length)} />
+              </div>
+              {invocation.error ? <FieldError>{invocation.error}</FieldError> : null}
+              <div>
+                <div className="mb-2 text-xs font-medium">{t('webhooks.detail.attempts')}</div>
+                <div className="flex flex-col gap-2">
+                  {invocation.attempts.map((attempt) => (
+                    <div key={attempt.number} className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-lg border px-3 py-2 text-xs">
+                      <Badge variant={attempt.status === 'failed' ? 'destructive' : attempt.status === 'success' ? 'secondary' : 'outline'}>#{attempt.number}</Badge>
+                      <span>{t(`webhooks.detail.attemptStatus.${attempt.status}`)}{attempt.error ? ` · ${attempt.error}` : ''}</span>
+                      <code>{attempt.statusCode ?? '—'} · {attempt.durationMs === null ? '—' : `${attempt.durationMs} ms`}</code>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <CodeBlock label={t('webhooks.detail.requestUrl')} value={invocation.requestUrl} />
+              <CodeBlock label={t('webhooks.detail.requestHeaders')} value={requestHeaders} />
+              <CodeBlock label={t('webhooks.detail.requestBody')} value={prettyJson(invocation.requestBody) || '—'} />
+              <CodeBlock label={t('webhooks.detail.responseHeaders')} value={responseHeaders} />
+              <CodeBlock label={t('webhooks.detail.responseBody')} value={prettyJson(invocation.responseBody) || '—'} />
             </div>
-            {invocation.error ? <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-2.5 text-sm text-destructive">{invocation.error}</div> : null}
-            <CodeBlock label={t('webhooks.detail.requestUrl')} value={invocation.requestUrl} />
-            <CodeBlock label={t('webhooks.detail.requestHeaders')} value={JSON.stringify(invocation.requestHeaders, null, 2)} />
-            <CodeBlock label={t('webhooks.detail.requestBody')} value={prettyJson(invocation.requestBody) || '—'} />
-            <CodeBlock label={t('webhooks.detail.responseHeaders')} value={JSON.stringify(invocation.responseHeaders, null, 2)} />
-            <CodeBlock label={t('webhooks.detail.responseBody')} value={prettyJson(invocation.responseBody) || '—'} />
-          </div>
-        ) : null}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => { if (invocation) void navigator.clipboard?.writeText(invocation.id); toast.success(t('webhooks.toast.copied')); }}><Copy data-icon="inline-start" />{t('webhooks.detail.copyId')}</Button>
-          <Button onClick={() => toast.success(t('webhooks.toast.replayed'))}><RotateCw data-icon="inline-start" />{t('webhooks.detail.replay')}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { if (invocation) void navigator.clipboard?.writeText(invocation.id); toast.success(t('webhooks.toast.copied')); }}><Copy data-icon="inline-start" />{t('webhooks.detail.copyId')}</Button>
+            {invocation?.origin !== 'test' ? <Button onClick={() => setReplayOpen(true)}><RotateCw data-icon="inline-start" />{t('webhooks.detail.replay')}</Button> : null}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <AlertDialog open={replayOpen} onOpenChange={setReplayOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('webhooks.replay.title')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('webhooks.replay.description')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { if (invocation) onReplay(invocation); setReplayOpen(false); }}>{t('webhooks.replay.confirm')}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -987,14 +1442,15 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function CodeBlock({ label, value }: { label: string; value: string }) {
-  return <div><div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div><pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/50 p-2.5 font-mono text-[11px] leading-relaxed">{value}</pre></div>;
+  const truncated = value.length > 6000 ? `${value.slice(0, 6000)}\n…` : value;
+  return <div><div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div><pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/50 p-2.5 font-mono text-[11px] leading-relaxed">{truncated}</pre></div>;
 }
 
 function prettyJson(value: string | null) {
   if (!value) return '';
-  try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
-}
-
-function maskSecret(key: string, value: string) {
-  return /authorization|token|secret|api[-_]?key/i.test(key) ? value.replace(/(^\S+\s+)?(.{0,4}).*$/, '$1$2••••••••') : value;
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
 }
