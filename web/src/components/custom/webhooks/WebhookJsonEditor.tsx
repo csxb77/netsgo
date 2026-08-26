@@ -11,11 +11,10 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import {
   getWebhookVariables,
+  getTemplateIssues,
   webhookVariableSample,
-  type WebhookEventKey,
-  type WebhookPrototype,
-} from './webhook-prototype-data';
-import { getTemplateIssues } from './webhook-template';
+} from './webhook-template';
+import type { ActivityWebhookConfig, WebhookCatalog, WebhookEventKey } from '@/types/webhook';
 
 export interface WebhookJsonEditorHandle {
   focus: () => void;
@@ -30,26 +29,28 @@ interface WebhookJsonEditorProps {
   className?: string;
   events: WebhookEventKey[];
   sampleEvent: WebhookEventKey;
-  webhook: Pick<WebhookPrototype, 'id' | 'name'>;
+  webhook: Pick<ActivityWebhookConfig, 'id' | 'name'>;
+  catalog: WebhookCatalog;
   label: string;
 }
 
 function webhookVariableCompletion(
   events: WebhookEventKey[],
   sampleEvent: WebhookEventKey,
-  webhook: Pick<WebhookPrototype, 'id' | 'name'>,
+  webhook: Pick<ActivityWebhookConfig, 'id' | 'name'>,
+  catalog: WebhookCatalog,
 ) {
   return (context: CompletionContext) => {
     const variable = context.matchBefore(/{{[\w.]*$/);
     if (!variable && !context.explicit) return null;
     return {
       from: variable?.from ?? context.pos,
-      options: getWebhookVariables(events, 'body')
+      options: getWebhookVariables(catalog, events, 'body')
         .map((entry) => ({
           label: `{{${entry.key}}}`,
           apply: `{{${entry.key}}}`,
           type: 'variable',
-          detail: webhookVariableSample(entry, sampleEvent, webhook),
+          detail: webhookVariableSample(catalog, entry, sampleEvent, webhook),
           boost: entry.group === 'event' ? 2 : 1,
         })),
     };
@@ -59,18 +60,19 @@ function webhookVariableCompletion(
 function templateExtensions(
   events: WebhookEventKey[],
   sampleEvent: WebhookEventKey,
-  webhook: Pick<WebhookPrototype, 'id' | 'name'>,
+  webhook: Pick<ActivityWebhookConfig, 'id' | 'name'>,
+  catalog: WebhookCatalog,
   label: string,
   t: TFunction,
 ) {
   return [
-    linter((view) => getTemplateIssues(view.state.doc.toString(), events, 'body').map((issue) => ({
+    linter((view) => getTemplateIssues(view.state.doc.toString(), events, 'body', catalog.variables).map((issue) => ({
       from: issue.from,
       to: issue.to,
       severity: 'error',
       message: t(`webhooks.validation.${issue.code}`, { key: issue.key }),
     }))),
-    autocompletion({ override: [webhookVariableCompletion(events, sampleEvent, webhook)] }),
+    autocompletion({ override: [webhookVariableCompletion(events, sampleEvent, webhook, catalog)] }),
     EditorView.contentAttributes.of({ 'aria-label': label }),
   ];
 }
@@ -125,7 +127,7 @@ const webhookEditorTheme = EditorView.theme({
 }, { dark: false });
 
 export const WebhookJsonEditor = forwardRef<WebhookJsonEditorHandle, WebhookJsonEditorProps>(
-  function WebhookJsonEditor({ value, onChange, invalid = false, className, events, sampleEvent, webhook, label }, forwardedRef) {
+  function WebhookJsonEditor({ value, onChange, invalid = false, className, events, sampleEvent, webhook, catalog, label }, forwardedRef) {
     const { t } = useTranslation();
     const hostRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
@@ -165,8 +167,8 @@ export const WebhookJsonEditor = forwardRef<WebhookJsonEditorHandle, WebhookJson
     useEffect(() => {
       const view = viewRef.current;
       if (!view) return;
-      view.dispatch({ effects: templateCompartment.reconfigure(templateExtensions(events, sampleEvent, webhook, label, t)) });
-    }, [events, label, sampleEvent, t, templateCompartment, webhook]);
+      view.dispatch({ effects: templateCompartment.reconfigure(templateExtensions(events, sampleEvent, webhook, catalog, label, t)) });
+    }, [catalog, events, label, sampleEvent, t, templateCompartment, webhook]);
 
     useEffect(() => {
       const view = viewRef.current;

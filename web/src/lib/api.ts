@@ -25,6 +25,20 @@ import type {
   UserDeletionImpact,
   UserListResponse,
 } from '@/types';
+import {
+  activityWebhookFromAPI,
+  activityWebhookToAPI,
+  webhookInvocationFromAPI,
+  type ActivityWebhookAPI,
+  type ActivityWebhookConfig,
+  type WebhookCatalog,
+  type WebhookDeliveryPageAPI,
+  type WebhookEventKey,
+  type WebhookInvocation,
+  type WebhookInvocationAPI,
+  type WebhookInvocationStatus,
+  type WebhookPreviewAPI,
+} from '@/types/webhook';
 
 class ApiError extends Error {
   status: number;
@@ -433,6 +447,57 @@ export const activityApi = {
       scope: 'global', after, limit,
       severities: ['debug', 'info', 'warning', 'error'],
     }, readScope));
+  },
+};
+
+export const webhookApi = {
+  catalog() {
+    return api.get<WebhookCatalog>('/api/webhooks/catalog');
+  },
+
+  async list() {
+    const items = await api.get<ActivityWebhookAPI[]>('/api/webhooks');
+    return items.map(activityWebhookFromAPI);
+  },
+
+  async create(config: ActivityWebhookConfig) {
+    const item = await api.post<ActivityWebhookAPI>('/api/webhooks', activityWebhookToAPI(config));
+    return activityWebhookFromAPI(item);
+  },
+
+  async update(config: ActivityWebhookConfig) {
+    const item = await api.put<ActivityWebhookAPI>(`/api/webhooks/${encodePath(config.id)}`, activityWebhookToAPI(config));
+    return activityWebhookFromAPI(item);
+  },
+
+  delete(webhookId: string) {
+    return api.delete<void>(`/api/webhooks/${encodePath(webhookId)}`);
+  },
+
+  preview(config: ActivityWebhookConfig, event: WebhookEventKey) {
+    return api.post<WebhookPreviewAPI>('/api/webhooks/preview', { config: activityWebhookToAPI(config), event });
+  },
+
+  async test(config: ActivityWebhookConfig, event: WebhookEventKey) {
+    const delivery = await api.post<WebhookInvocationAPI>('/api/webhooks/test', { config: activityWebhookToAPI(config), event });
+    return webhookInvocationFromAPI(delivery);
+  },
+
+  async deliveries(webhookId: string, status?: WebhookInvocationStatus) {
+    const params = new URLSearchParams({ limit: '100' });
+    if (status) params.set('status', status);
+    const page = await api.get<WebhookDeliveryPageAPI>(`/api/webhooks/${encodePath(webhookId)}/deliveries?${params.toString()}`);
+    return { ...page, items: page.items.map(webhookInvocationFromAPI) };
+  },
+
+  async delivery(deliveryId: string) {
+    const delivery = await api.get<WebhookInvocationAPI>(`/api/webhook-deliveries/${encodePath(deliveryId)}`);
+    return webhookInvocationFromAPI(delivery);
+  },
+
+  async replay(deliveryId: string): Promise<WebhookInvocation> {
+    const delivery = await api.post<WebhookInvocationAPI>(`/api/webhook-deliveries/${encodePath(deliveryId)}/replay`);
+    return webhookInvocationFromAPI(delivery);
   },
 };
 export { ApiError };

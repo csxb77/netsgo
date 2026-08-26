@@ -30,6 +30,8 @@ type Server struct {
 	trafficAccumulator                  *trafficAccumulator // batched traffic observations waiting to be applied to trafficStore
 	serverDB                            *sql.DB             // owned shared SQLite handle for borrowed server stores; close only via closeServerDB
 	activityStore                       *ActivityStore      // durable activity timeline over serverDB
+	webhookStore                        *WebhookStore       // user-owned activity Webhooks and durable delivery queue
+	webhookDispatcher                   *webhookDispatcher  // single-instance outbound request scheduler
 	activityBootID                      string              // random per complete server start; scopes lifecycle dedupe keys
 	serverDBCloseOnce                   sync.Once
 	serverDBCloseErr                    error

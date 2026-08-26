@@ -468,7 +468,6 @@ export const enUS = {
     deliveries: {
       title: "Delivery log",
       description: "Inspect every attempt, request, response, and execution time.",
-      prototypeHint: "Showing realistic prototype data from this space.",
       event: "Event",
       origin: "Origin",
       result: "Result",
@@ -520,7 +519,6 @@ export const enUS = {
       description: "Use the current unsaved configuration and a selected sample event for one test call. Test calls do not retry or count toward the 24-hour total.",
       request: "Test request",
       send: "Send test request",
-      prototypeHint: "This test only generates a request snapshot and test record; it does not send a network request to the destination URL.",
     },
     unsaved: {
       title: "Discard unsaved changes?",
@@ -560,12 +558,13 @@ export const enUS = {
       unsupportedSurface: "Variable {{key}} cannot be used here.",
     },
     toast: {
-      saved: "Prototype configuration saved locally.",
-      created: "Webhook prototype created and left disabled by default.",
-      deleted: "Webhook prototype deleted.",
-      tested: "Test request snapshot generated.",
+      saved: "Webhook saved.",
+      created: "Webhook created.",
+      deleted: "Webhook deleted.",
+      testQueued: "Test request queued for delivery.",
       replayed: "A replay delivery was created from the current saved configuration.",
       replayUnavailable: "The saved configuration for this delivery no longer exists.",
+      operationFailed: "Webhook operation failed.",
       copied: "Delivery ID copied.",
       validation: "Add a name, destination URL, and at least one event.",
       invalidJson: "The POST body must be valid JSON.",

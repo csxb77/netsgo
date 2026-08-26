@@ -519,6 +519,9 @@ func (s *ActivityStore) appendTx(tx *sql.Tx, spec ActivityEventSpec) (int64, err
 			return 0, fmt.Errorf("insert activity tunnel subject: %w", err)
 		}
 	}
+	if err := enqueueActivityWebhookDeliveriesTx(tx, id, prepared); err != nil {
+		return 0, fmt.Errorf("enqueue activity Webhook deliveries: %w", err)
+	}
 	return id, nil
 }
 

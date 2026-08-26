@@ -1,17 +1,25 @@
-import {
-  WEBHOOK_EVENT_FIXTURES,
-  WEBHOOK_VARIABLES,
-  webhookVariableSupportsEvents,
-  type WebhookEventKey,
-  type WebhookPrototype,
-  type WebhookTemplateSurface,
-  type WebhookTemplateValue,
-} from './webhook-prototype-data';
+import type {
+  ActivityWebhookConfig,
+  WebhookCatalog,
+  WebhookEventKey,
+  WebhookTemplateSurface,
+  WebhookTemplateValue,
+  WebhookVariable,
+} from '@/types/webhook';
 
 const TOKEN_PATTERN = /{{\s*([^}]+?)\s*}}/g;
 const EXACT_TOKEN_PATTERN = /^{{\s*([^}]+?)\s*}}$/;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-const RESTRICTED_HEADERS = new Set(['connection', 'content-length', 'host', 'transfer-encoding']);
+const RESTRICTED_HEADERS = new Set([
+  'connection',
+  'content-length',
+  'host',
+  'transfer-encoding',
+  'user-agent',
+  'x-netsgo-attempt',
+  'x-netsgo-delivery',
+  'x-netsgo-event',
+]);
 
 export interface WebhookTemplateIssue {
   code: 'unknownVariable' | 'unavailableVariable' | 'unsupportedSurface';
@@ -43,15 +51,43 @@ export interface RenderedWebhookRequest {
   values: Record<string, WebhookTemplateValue>;
 }
 
+export function webhookVariableSupportsEvents(variable: WebhookVariable, events: WebhookEventKey[]) {
+  if (variable.available_for_events === 'all') return true;
+  return events.length > 0 && events.every((event) => variable.available_for_events.includes(event));
+}
+
+export function getWebhookVariables(
+  catalog: WebhookCatalog,
+  events: WebhookEventKey[],
+  surface: WebhookTemplateSurface,
+) {
+  return catalog.variables.filter((variable) => (
+    variable.surfaces.includes(surface) && webhookVariableSupportsEvents(variable, events)
+  ));
+}
+
+export function webhookVariableSample(
+  catalog: WebhookCatalog,
+  variable: WebhookVariable,
+  event: WebhookEventKey,
+  webhook?: Pick<ActivityWebhookConfig, 'id' | 'name'>,
+) {
+  if (variable.key === 'webhook.id' && webhook) return webhook.id;
+  if (variable.key === 'webhook.name' && webhook) return webhook.name || 'Webhook';
+  const value = catalog.fixtures[event]?.[variable.key];
+  return typeof value === 'string' ? value : JSON.stringify(value ?? null);
+}
+
 export function getTemplateIssues(
   value: string,
   events: WebhookEventKey[],
   surface: WebhookTemplateSurface,
+  variables: WebhookVariable[],
 ) {
   const issues: WebhookTemplateIssue[] = [];
   for (const match of value.matchAll(TOKEN_PATTERN)) {
     const key = match[1].trim();
-    const variable = WEBHOOK_VARIABLES.find((entry) => entry.key === key);
+    const variable = variables.find((entry) => entry.key === key);
     const from = match.index ?? 0;
     const to = from + match[0].length;
     if (!variable) {
@@ -104,10 +140,14 @@ export function renderJsonBody(body: string, values: Record<string, WebhookTempl
   return JSON.stringify(visit(parsed), null, 2);
 }
 
-export function renderWebhookRequest(webhook: WebhookPrototype, event: WebhookEventKey): RenderedWebhookRequest {
-  const fixture = WEBHOOK_EVENT_FIXTURES[event];
+export function renderWebhookRequest(
+  webhook: ActivityWebhookConfig,
+  event: WebhookEventKey,
+  catalog: WebhookCatalog,
+): RenderedWebhookRequest {
+  const fixture = catalog.fixtures[event] ?? {};
   const values = {
-    ...fixture.values,
+    ...fixture,
     'webhook.id': webhook.id,
     'webhook.name': webhook.name || 'Webhook',
   };
@@ -135,7 +175,7 @@ export function renderWebhookRequest(webhook: WebhookPrototype, event: WebhookEv
   };
 }
 
-export function validateWebhook(webhook: WebhookPrototype): WebhookValidationIssue[] {
+export function validateWebhook(webhook: ActivityWebhookConfig, catalog: WebhookCatalog): WebhookValidationIssue[] {
   const issues: WebhookValidationIssue[] = [];
   if (!webhook.name.trim()) issues.push({ field: 'name', code: 'required' });
   if (webhook.events.length === 0) issues.push({ field: 'events', code: 'required' });
@@ -146,12 +186,12 @@ export function validateWebhook(webhook: WebhookPrototype): WebhookValidationIss
   if (!webhook.url.trim()) {
     issues.push({ field: 'url', code: 'required' });
   } else {
-    for (const issue of getTemplateIssues(webhook.url, webhook.events, 'url')) {
+    for (const issue of getTemplateIssues(webhook.url, webhook.events, 'url', catalog.variables)) {
       issues.push({ field: 'url', code: issue.code, key: issue.key });
     }
     try {
       const event = webhook.events[0] ?? (webhook.targetKind === 'client' ? 'client.online' : 'tunnel.runtime_changed');
-      const rendered = renderWebhookRequest(webhook, event).url;
+      const rendered = renderWebhookRequest(webhook, event, catalog).url;
       const parsed = new URL(rendered);
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         issues.push({ field: 'url', code: 'invalidUrlScheme' });
@@ -172,7 +212,7 @@ export function validateWebhook(webhook: WebhookPrototype): WebhookValidationIss
     if (seenHeaders.has(normalizedKey)) issues.push({ field: 'headers', code: 'duplicateHeader', key: header.key });
     seenHeaders.add(normalizedKey);
     if (RESTRICTED_HEADERS.has(normalizedKey)) issues.push({ field: 'headers', code: 'restrictedHeader', key: header.key });
-    for (const issue of getTemplateIssues(header.value, webhook.events, 'header')) {
+    for (const issue of getTemplateIssues(header.value, webhook.events, 'header', catalog.variables)) {
       issues.push({ field: 'headers', code: issue.code, key: issue.key });
     }
   }
@@ -186,7 +226,7 @@ export function validateWebhook(webhook: WebhookPrototype): WebhookValidationIss
     } catch {
       issues.push({ field: 'body', code: 'invalidJson' });
     }
-    for (const issue of getTemplateIssues(webhook.body, webhook.events, 'body')) {
+    for (const issue of getTemplateIssues(webhook.body, webhook.events, 'body', catalog.variables)) {
       issues.push({ field: 'body', code: issue.code, key: issue.key });
     }
   }

@@ -466,7 +466,6 @@ export const zhCN = {
     deliveries: {
       title: "投递记录",
       description: "查看每次投递的结果、耗时和重试情况。",
-      prototypeHint: "当前展示的是本空间内的真实感原型数据。",
       event: "事件",
       origin: "来源",
       result: "结果",
@@ -518,7 +517,6 @@ export const zhCN = {
       description: "使用当前未保存配置和所选示例事件执行一次测试；测试调用不重试，也不计入 24 小时统计。",
       request: "测试请求",
       send: "发送测试请求",
-      prototypeHint: "测试操作只会生成请求快照和测试记录，不会向目标 URL 发起网络请求。",
     },
     unsaved: {
       title: "放弃未保存的修改？",
@@ -558,12 +556,13 @@ export const zhCN = {
       unsupportedSurface: "变量 {{key}} 不能用于这个位置。",
     },
     toast: {
-      saved: "原型配置已在当前页面保存。",
-      created: "Webhook 原型已创建，默认保持停用。",
-      deleted: "Webhook 原型已删除。",
-      tested: "测试请求快照已生成。",
+      saved: "Webhook 已保存。",
+      created: "Webhook 已创建。",
+      deleted: "Webhook 已删除。",
+      testQueued: "测试请求已进入投递队列。",
       replayed: "已使用当前保存配置创建一条重放投递。",
       replayUnavailable: "找不到这次投递对应的已保存配置。",
+      operationFailed: "Webhook 操作失败。",
       copied: "投递 ID 已复制。",
       validation: "请填写名称、目标 URL，并至少选择一个事件。",
       invalidJson: "POST Body 必须是合法 JSON。",

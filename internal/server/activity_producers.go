@@ -123,6 +123,9 @@ func (s *Server) publishActivityID(id int64) {
 	if id <= 0 || s.activityStore == nil || s.events == nil {
 		return
 	}
+	if s.webhookDispatcher != nil {
+		s.webhookDispatcher.Wake()
+	}
 	item, err := s.activityStore.GetByID(id)
 	if err != nil {
 		log.Printf("⚠️ Failed to load committed activity event %d: %v", id, err)

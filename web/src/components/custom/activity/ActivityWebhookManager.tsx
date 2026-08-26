@@ -108,33 +108,41 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { cn } from '@/lib/utils';
 import { WebhookJsonEditor, type WebhookJsonEditorHandle } from '@/components/custom/webhooks/WebhookJsonEditor';
 import {
-  DEFAULT_CLIENT_WEBHOOK_BODY,
-  DEFAULT_TUNNEL_WEBHOOK_BODY,
-  EMPTY_WEBHOOK,
-  WEBHOOK_CLIENT_OPTIONS,
-  WEBHOOK_EVENT_FIXTURES,
-  WEBHOOK_EVENT_OPTIONS,
-  WEBHOOK_INVOCATIONS,
-  WEBHOOK_PROTOTYPES,
-  WEBHOOK_TUNNEL_OPTIONS,
   getWebhookVariables,
+  getTemplateIssues,
+  renderWebhookRequest,
+  validateWebhook,
   webhookVariableSample,
+  type WebhookValidationIssue,
+} from '@/components/custom/webhooks/webhook-template';
+import { useClients } from '@/hooks/use-clients';
+import {
+  useDeleteWebhook,
+  useReplayWebhookDelivery,
+  useSaveWebhook,
+  useWebhookCatalog,
+  useWebhookDelivery,
+  useWebhookDeliveries,
+  useWebhooks,
+  useTestWebhook,
+} from '@/hooks/use-webhooks';
+import { SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
+import {
+  createEmptyWebhook,
+  type ActivityWebhookConfig,
+  type WebhookCatalog,
   type WebhookEventFamily,
   type WebhookEventKey,
   type WebhookInvocation,
   type WebhookInvocationStatus,
   type WebhookMethod,
-  type WebhookPrototype,
   type WebhookTargetKind,
+  type WebhookTargetOption,
   type WebhookTemplateSurface,
   type WebhookVariable,
-} from '@/components/custom/webhooks/webhook-prototype-data';
-import {
-  getTemplateIssues,
-  renderWebhookRequest,
-  validateWebhook,
-  type WebhookValidationIssue,
-} from '@/components/custom/webhooks/webhook-template';
+} from '@/types/webhook';
+
+type WebhookPrototype = ActivityWebhookConfig;
 
 type PendingAction =
   | { type: 'select'; id: string }
@@ -155,7 +163,30 @@ function cloneWebhook(webhook: WebhookPrototype) {
 }
 
 function sameWebhook(left: WebhookPrototype | null, right: WebhookPrototype | null) {
-  return JSON.stringify(left) === JSON.stringify(right);
+  if (!left || !right) return left === right;
+  return JSON.stringify({
+    name: left.name,
+    enabled: left.enabled,
+    targetKind: left.targetKind,
+    targetMode: left.targetMode,
+    targetIds: left.targetIds,
+    method: left.method,
+    url: left.url,
+    headers: left.headers,
+    body: left.body,
+    events: left.events,
+  }) === JSON.stringify({
+    name: right.name,
+    enabled: right.enabled,
+    targetKind: right.targetKind,
+    targetMode: right.targetMode,
+    targetIds: right.targetIds,
+    method: right.method,
+    url: right.url,
+    headers: right.headers,
+    body: right.body,
+    events: right.events,
+  });
 }
 
 function formatShortTime(value: string | null, locale: string) {
@@ -182,9 +213,13 @@ function statusVariant(status: WebhookInvocationStatus | WebhookPrototype['lastS
 export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdminScopeNote?: boolean }) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
-  const [webhooks, setWebhooks] = useState<WebhookPrototype[]>(() => structuredClone(WEBHOOK_PROTOTYPES));
-  const [draft, setDraft] = useState<WebhookPrototype | null>(() => cloneWebhook(WEBHOOK_PROTOTYPES[0]));
-  const [invocations, setInvocations] = useState<WebhookInvocation[]>(() => structuredClone(WEBHOOK_INVOCATIONS));
+  const { data: catalog } = useWebhookCatalog();
+  const { data: webhooks = [] } = useWebhooks();
+  const { data: clients = [] } = useClients(SELF_RESOURCE_SCOPE);
+  const saveWebhook = useSaveWebhook();
+  const removeWebhook = useDeleteWebhook();
+  const replayDelivery = useReplayWebhookDelivery();
+  const [draftOverride, setDraft] = useState<WebhookPrototype | null>(null);
   const [activeTab, setActiveTab] = useState<'configuration' | 'deliveries'>('configuration');
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -192,16 +227,46 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
   const [validationIssues, setValidationIssues] = useState<WebhookValidationIssue[]>([]);
   const configurationScrollRef = useRef<HTMLDivElement>(null);
 
+  const draft = draftOverride ?? webhooks[0] ?? null;
   const saved = draft ? webhooks.find((item) => item.id === draft.id) ?? null : null;
   const isNew = Boolean(draft && !saved);
   const dirty = !sameWebhook(draft, saved);
+  const { data: deliveryPage } = useWebhookDeliveries(saved?.id ?? null);
+  const invocations = deliveryPage?.items ?? [];
+  const clientTargets = useMemo<WebhookTargetOption[]>(() => clients.map((client) => {
+    const name = client.display_name?.trim() || client.info.hostname || client.id;
+    return {
+      id: client.id,
+      name,
+      detail: `${client.info.hostname || client.id} · ${client.online ? 'online' : 'offline'}`,
+    };
+  }), [clients]);
+  const tunnelTargets = useMemo<WebhookTargetOption[]>(() => {
+    const targets = new Map<string, WebhookTargetOption>();
+    for (const client of clients) {
+      const clientName = client.display_name?.trim() || client.info.hostname || client.id;
+      for (const tunnel of client.proxies ?? []) {
+        if (!targets.has(tunnel.id)) {
+          targets.set(tunnel.id, {
+            id: tunnel.id,
+            name: tunnel.name,
+            detail: `${tunnel.type.toUpperCase()} · ${clientName}`,
+          });
+        }
+      }
+    }
+    return [...targets.values()];
+  }, [clients]);
   const listItems = useMemo(
     () => draft && isNew ? [...webhooks, draft] : webhooks,
     [draft, isNew, webhooks],
   );
 
   const updateDraft = <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => {
-    setDraft((current) => current ? { ...current, [key]: value } : current);
+    setDraft((current) => {
+      const base = current ?? draft;
+      return base ? { ...base, [key]: value } : base;
+    });
     setValidationIssues([]);
   };
 
@@ -228,7 +293,8 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
   };
 
   const startNewWebhook = () => {
-    setDraft({ ...cloneWebhook(EMPTY_WEBHOOK), id: `wh_draft_${Date.now()}` });
+    if (!catalog) return;
+    setDraft(createEmptyWebhook(catalog));
     setValidationIssues([]);
     setActiveTab('configuration');
     resetConfigurationScroll();
@@ -253,22 +319,25 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
     if (action.type === 'close') setOpen(false);
   };
 
-  const persistDraft = (enable = false) => {
-    if (!draft) return false;
+  const persistDraft = async (enable = false) => {
+    if (!draft || !catalog) return false;
     const candidate = enable ? { ...draft, enabled: true } : draft;
-    const issues = validateWebhook(candidate);
+    const issues = validateWebhook(candidate, catalog);
     setValidationIssues(issues);
     if (issues.length > 0) {
       toast.error(validationIssueMessage(t, issues[0]));
       revealValidationIssue(issues[0]);
       return false;
     }
-    setWebhooks((current) => current.some((item) => item.id === candidate.id)
-      ? current.map((item) => item.id === candidate.id ? cloneWebhook(candidate) : item)
-      : [...current, cloneWebhook(candidate)]);
-    setDraft(cloneWebhook(candidate));
-    toast.success(isNew ? t('webhooks.toast.created') : t('webhooks.toast.saved'));
-    return true;
+    try {
+      const stored = await saveWebhook.mutateAsync(candidate);
+      setDraft(cloneWebhook(stored));
+      toast.success(isNew ? t('webhooks.toast.created') : t('webhooks.toast.saved'));
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('webhooks.toast.operationFailed'));
+      return false;
+    }
   };
 
   const cancelChanges = () => {
@@ -283,8 +352,8 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
   };
 
   const requestTest = () => {
-    if (!draft) return;
-    const issues = validateWebhook(draft);
+    if (!draft || !catalog) return;
+    const issues = validateWebhook(draft, catalog);
     setValidationIssues(issues);
     if (issues.length > 0) {
       toast.error(validationIssueMessage(t, issues[0]));
@@ -294,71 +363,37 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
     setTestOpen(true);
   };
 
-  const addTestInvocation = (event: WebhookEventKey) => {
-    if (!draft) return;
-    const request = renderWebhookRequest(draft, event);
-    const now = new Date().toISOString();
-    const id = `dlv_test_${Date.now()}`;
-    setInvocations((current) => [{
-      id,
-      webhookId: draft.id,
-      eventId: String(WEBHOOK_EVENT_FIXTURES[event].values['event.id']),
-      event,
-      occurredAt: now,
-      status: 'success',
-      origin: 'test',
-      statusCode: 200,
-      durationMs: 126,
-      attempts: [{ number: 1, occurredAt: now, status: 'success', statusCode: 200, durationMs: 126 }],
-      requestUrl: request.url,
-      requestHeaders: Object.fromEntries(request.headers.map((header) => [header.key, header.value])),
-      requestBody: draft.method === 'POST' ? request.body : null,
-      responseHeaders: { 'Content-Type': 'application/json' },
-      responseBody: '{"accepted":true,"prototype":true}',
-    }, ...current]);
-  };
-
-  const deleteWebhook = () => {
+  const deleteWebhook = async () => {
     if (!draft) return;
     if (isNew) {
       cancelChanges();
       setDeleteOpen(false);
       return;
     }
-    const remaining = webhooks.filter((item) => item.id !== draft.id);
-    setWebhooks(remaining);
-    setDraft(remaining[0] ? cloneWebhook(remaining[0]) : null);
-    setValidationIssues([]);
-    setDeleteOpen(false);
-    toast.success(t('webhooks.toast.deleted'));
+    try {
+      await removeWebhook.mutateAsync(draft.id);
+      const remaining = webhooks.filter((item) => item.id !== draft.id);
+      setDraft(remaining[0] ? cloneWebhook(remaining[0]) : null);
+      setValidationIssues([]);
+      setDeleteOpen(false);
+      toast.success(t('webhooks.toast.deleted'));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('webhooks.toast.operationFailed'));
+    }
   };
 
-  const replayInvocation = (invocation: WebhookInvocation) => {
+  const replayInvocation = async (invocation: WebhookInvocation) => {
     const configuration = webhooks.find((item) => item.id === invocation.webhookId);
     if (!configuration) {
       toast.error(t('webhooks.toast.replayUnavailable'));
       return;
     }
-    const request = renderWebhookRequest(configuration, invocation.event);
-    const now = new Date().toISOString();
-    const id = `dlv_replay_${Date.now()}`;
-    setInvocations((current) => [{
-      ...invocation,
-      id,
-      occurredAt: now,
-      status: 'queued',
-      origin: 'replay',
-      statusCode: null,
-      durationMs: null,
-      attempts: [{ number: 1, occurredAt: now, status: 'pending', statusCode: null, durationMs: null }],
-      requestUrl: request.url,
-      requestHeaders: Object.fromEntries(request.headers.map((header) => [header.key, header.value])),
-      requestBody: configuration.method === 'POST' ? request.body : null,
-      responseHeaders: {},
-      responseBody: '',
-      error: undefined,
-    }, ...current]);
-    toast.success(t('webhooks.toast.replayed'));
+    try {
+      await replayDelivery.mutateAsync(invocation.id);
+      toast.success(t('webhooks.toast.replayed'));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('webhooks.toast.replayUnavailable'));
+    }
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -389,7 +424,7 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
 
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <div className="flex shrink-0 items-center gap-2 border-b bg-background p-2 md:hidden">
-              {draft ? (
+              {draft && catalog ? (
                 <Select value={draft.id} onValueChange={(id) => id !== draft.id && requestAction({ type: 'select', id })}>
                   <SelectTrigger className="min-w-0 flex-1" aria-label={t('webhooks.manager.selectWebhook')}>
                     <SelectValue />
@@ -410,7 +445,7 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
               <Button variant="outline" size="icon" onClick={() => requestAction({ type: 'new' })} aria-label={t('webhooks.manager.newWebhook')} title={t('webhooks.manager.newWebhook')}>
                 <Plus />
               </Button>
-              {draft ? (
+              {draft && catalog ? (
                 <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} aria-label={t('webhooks.editor.delete')} title={t('webhooks.editor.delete')}>
                   <Trash2 />
                 </Button>
@@ -465,7 +500,7 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
               </aside>
 
               <main className="min-h-0 min-w-0 overflow-hidden">
-              {draft ? (
+              {draft && catalog ? (
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="hidden shrink-0 border-b bg-background px-4 py-2.5 md:block">
                     <div className="flex items-center justify-between gap-3">
@@ -496,6 +531,9 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
                       <WebhookConfiguration
                         key={draft.id}
                         webhook={draft}
+                        catalog={catalog}
+                        clientTargets={clientTargets}
+                        tunnelTargets={tunnelTargets}
                         isNew={isNew}
                         validationIssues={validationIssues}
                         onUpdate={updateDraft}
@@ -522,14 +560,14 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
                         <Button
                           variant={isNew && !draft.enabled ? 'outline' : 'default'}
                           size="sm"
-                          onClick={() => persistDraft(false)}
-                          disabled={!dirty}
+                          onClick={() => void persistDraft(false)}
+                          disabled={!dirty || saveWebhook.isPending}
                         >
                           <Check data-icon="inline-start" />
                           {isNew && !draft.enabled ? t('webhooks.editor.saveDraft') : t('webhooks.editor.save')}
                         </Button>
                         {isNew && !draft.enabled ? (
-                          <Button size="sm" onClick={() => persistDraft(true)}>
+                          <Button size="sm" onClick={() => void persistDraft(true)} disabled={saveWebhook.isPending}>
                             <Check data-icon="inline-start" />
                             {t('webhooks.editor.saveAndEnable')}
                           </Button>
@@ -542,8 +580,8 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
                 <Empty className="min-h-80">
                   <EmptyHeader>
                     <EmptyMedia variant="icon"><Webhook /></EmptyMedia>
-                    <EmptyTitle>{t('webhooks.manager.emptySelection')}</EmptyTitle>
-                    <EmptyDescription>{t('webhooks.manager.emptyDescription')}</EmptyDescription>
+                    <EmptyTitle>{catalog ? t('webhooks.manager.emptySelection') : t('common.loading')}</EmptyTitle>
+                    <EmptyDescription>{catalog ? t('webhooks.manager.emptyDescription') : null}</EmptyDescription>
                   </EmptyHeader>
                   <EmptyContent><Button onClick={startNewWebhook}>{t('webhooks.manager.newWebhook')}</Button></EmptyContent>
                 </Empty>
@@ -575,18 +613,18 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={deleteWebhook}>{isNew ? t('webhooks.delete.discard') : t('webhooks.delete.confirm')}</AlertDialogAction>
+            <AlertDialogAction onClick={() => void deleteWebhook()} disabled={removeWebhook.isPending}>{isNew ? t('webhooks.delete.discard') : t('webhooks.delete.confirm')}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      {draft && testOpen ? (
+      {draft && catalog && testOpen ? (
         <TestWebhookDialog
           key={`${draft.id}-open`}
           open={testOpen}
           webhook={draft}
+          catalog={catalog}
           onOpenChange={setTestOpen}
-          onComplete={addTestInvocation}
         />
       ) : null}
     </>
@@ -595,12 +633,18 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
 
 function WebhookConfiguration({
   webhook,
+  catalog,
+  clientTargets,
+  tunnelTargets,
   isNew,
   validationIssues,
   onUpdate,
   onTest,
 }: {
   webhook: WebhookPrototype;
+  catalog: WebhookCatalog;
+  clientTargets: WebhookTargetOption[];
+  tunnelTargets: WebhookTargetOption[];
   isNew: boolean;
   validationIssues: WebhookValidationIssue[];
   onUpdate: <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => void;
@@ -612,7 +656,7 @@ function WebhookConfiguration({
   const [pendingTargetKind, setPendingTargetKind] = useState<WebhookTargetKind | null>(null);
   const [disableOpen, setDisableOpen] = useState(false);
   const effectiveSampleEvent = webhook.events.includes(sampleEvent) ? sampleEvent : webhook.events[0] ?? fallbackEvent;
-  const liveBodyIssue = validateWebhook(webhook).find((issue) => issue.field === 'body');
+  const liveBodyIssue = validateWebhook(webhook, catalog).find((issue) => issue.field === 'body');
   const nameIssue = validationIssues.find((issue) => issue.field === 'name');
   const eventIssue = validationIssues.find((issue) => issue.field === 'events');
   const urlIssue = validationIssues.find((issue) => issue.field === 'url');
@@ -635,12 +679,12 @@ function WebhookConfiguration({
     onUpdate('targetMode', 'all');
     onUpdate('targetIds', []);
     onUpdate('events', events);
-    onUpdate('body', targetKind === 'client' ? DEFAULT_CLIENT_WEBHOOK_BODY : DEFAULT_TUNNEL_WEBHOOK_BODY);
+    onUpdate('body', catalog.default_body);
     setSampleEvent(events[0]);
     setPendingTargetKind(null);
     const retainedTemplates = [
-      ...getTemplateIssues(webhook.url, events, 'url'),
-      ...webhook.headers.flatMap((header) => getTemplateIssues(header.value, events, 'header')),
+      ...getTemplateIssues(webhook.url, events, 'url', catalog.variables),
+      ...webhook.headers.flatMap((header) => getTemplateIssues(header.value, events, 'header', catalog.variables)),
     ];
     if (retainedTemplates.length > 0) toast.error(t('webhooks.target.retainedTemplateWarning'));
   };
@@ -679,12 +723,19 @@ function WebhookConfiguration({
         </FieldGroup>
       </EditorSection>
 
-      <ListeningTargetSection webhook={webhook} validationIssues={validationIssues} onUpdate={onUpdate} onTargetKindChange={setPendingTargetKind} />
+      <ListeningTargetSection
+        webhook={webhook}
+        clientTargets={clientTargets}
+        tunnelTargets={tunnelTargets}
+        validationIssues={validationIssues}
+        onUpdate={onUpdate}
+        onTargetKindChange={setPendingTargetKind}
+      />
 
       <EditorSection title={t('webhooks.events.title')}>
         <div data-webhook-field="events" className="flex flex-col gap-3">
           {eventFamilies.map((family) => {
-            const options = WEBHOOK_EVENT_OPTIONS.filter((option) => option.targetKind === webhook.targetKind && option.family === family);
+            const options = catalog.events.filter((option) => option.target_kind === webhook.targetKind && option.family === family);
             return (
               <FieldSet key={family}>
                 <FieldLegend variant="label" className={cn(eventFamilies.length === 1 && 'sr-only')}>
@@ -749,6 +800,7 @@ function WebhookConfiguration({
               <TemplatedInput
                 value={webhook.url}
                 webhook={webhook}
+                catalog={catalog}
                 events={webhook.events}
                 sampleEvent={effectiveSampleEvent}
                 surface="url"
@@ -784,6 +836,7 @@ function WebhookConfiguration({
                     <TemplatedInput
                       value={header.value}
                       webhook={webhook}
+                      catalog={catalog}
                       events={webhook.events}
                       sampleEvent={effectiveSampleEvent}
                       surface="header"
@@ -807,6 +860,7 @@ function WebhookConfiguration({
                 <JsonBodyEditor
                   value={webhook.body}
                   webhook={webhook}
+                  catalog={catalog}
                   events={webhook.events}
                   sampleEvent={effectiveSampleEvent}
                   invalid={Boolean(liveBodyIssue)}
@@ -817,7 +871,7 @@ function WebhookConfiguration({
             ) : null}
           </FieldGroup>
 
-          <RequestPreview webhook={webhook} sampleEvent={effectiveSampleEvent} onSampleEventChange={setSampleEvent} />
+          <RequestPreview webhook={webhook} catalog={catalog} sampleEvent={effectiveSampleEvent} onSampleEventChange={setSampleEvent} />
         </div>
       </EditorSection>
 
@@ -893,11 +947,15 @@ function EventFamilyHelp({ family }: { family: Extract<WebhookEventFamily, 'tunn
 
 function ListeningTargetSection({
   webhook,
+  clientTargets,
+  tunnelTargets,
   validationIssues,
   onUpdate,
   onTargetKindChange,
 }: {
   webhook: WebhookPrototype;
+  clientTargets: WebhookTargetOption[];
+  tunnelTargets: WebhookTargetOption[];
   validationIssues: WebhookValidationIssue[];
   onUpdate: <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => void;
   onTargetKindChange: (targetKind: WebhookTargetKind) => void;
@@ -905,7 +963,13 @@ function ListeningTargetSection({
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const targetIssue = validationIssues.find((issue) => issue.field === 'targets');
-  const targets = webhook.targetKind === 'client' ? WEBHOOK_CLIENT_OPTIONS : WEBHOOK_TUNNEL_OPTIONS;
+  const availableTargets = webhook.targetKind === 'client' ? clientTargets : tunnelTargets;
+  const targets = [
+    ...availableTargets,
+    ...webhook.targetIds
+      .filter((id) => !availableTargets.some((target) => target.id === id))
+      .map((id) => ({ id, name: id, detail: t('webhooks.target.unavailable'), unavailable: true })),
+  ];
   const filteredTargets = targets.filter((target) => (
     (!target.unavailable || webhook.targetIds.includes(target.id))
     && `${target.name} ${target.detail} ${target.id}`.toLowerCase().includes(query.trim().toLowerCase())
@@ -1019,10 +1083,11 @@ function insertAtSelection(value: string, token: string, control: HTMLInputEleme
   });
 }
 
-function TemplatedInput({ value, onChange, webhook, events, sampleEvent, surface, ...props }: Omit<React.ComponentProps<typeof InputGroupInput>, 'value' | 'onChange'> & {
+function TemplatedInput({ value, onChange, webhook, catalog, events, sampleEvent, surface, ...props }: Omit<React.ComponentProps<typeof InputGroupInput>, 'value' | 'onChange'> & {
   value: string;
   onChange: (value: string) => void;
   webhook: WebhookPrototype;
+  catalog: WebhookCatalog;
   events: WebhookEventKey[];
   sampleEvent: WebhookEventKey;
   surface: Exclude<WebhookTemplateSurface, 'body'>;
@@ -1035,6 +1100,7 @@ function TemplatedInput({ value, onChange, webhook, events, sampleEvent, surface
         events={events}
         sampleEvent={sampleEvent}
         webhook={webhook}
+        catalog={catalog}
         surface={surface}
         onSelect={(variable) => insertAtSelection(value, `{{${variable.key}}}`, inputRef.current, onChange)}
       />
@@ -1042,10 +1108,11 @@ function TemplatedInput({ value, onChange, webhook, events, sampleEvent, surface
   );
 }
 
-function JsonBodyEditor({ value, onChange, webhook, invalid, events, sampleEvent }: {
+function JsonBodyEditor({ value, onChange, webhook, catalog, invalid, events, sampleEvent }: {
   value: string;
   onChange: (value: string) => void;
   webhook: WebhookPrototype;
+  catalog: WebhookCatalog;
   invalid: boolean;
   events: WebhookEventKey[];
   sampleEvent: WebhookEventKey;
@@ -1071,6 +1138,7 @@ function JsonBodyEditor({ value, onChange, webhook, invalid, events, sampleEvent
             events={events}
             sampleEvent={sampleEvent}
             webhook={webhook}
+            catalog={catalog}
             surface="body"
             onSelect={(variable) => editorRef.current?.insert(`"{{${variable.key}}}"`)}
           />
@@ -1088,6 +1156,7 @@ function JsonBodyEditor({ value, onChange, webhook, invalid, events, sampleEvent
         events={events}
         sampleEvent={sampleEvent}
         webhook={webhook}
+        catalog={catalog}
         label={t('webhooks.request.body')}
         className="rounded-none border-0 bg-transparent focus-within:ring-0"
       />
@@ -1095,9 +1164,10 @@ function JsonBodyEditor({ value, onChange, webhook, invalid, events, sampleEvent
   );
 }
 
-function VariablePicker({ onSelect, webhook, events, sampleEvent, surface, standalone = false }: {
+function VariablePicker({ onSelect, webhook, catalog, events, sampleEvent, surface, standalone = false }: {
   onSelect: (variable: WebhookVariable) => void;
   webhook: WebhookPrototype;
+  catalog: WebhookCatalog;
   events: WebhookEventKey[];
   sampleEvent: WebhookEventKey;
   surface: WebhookTemplateSurface;
@@ -1106,7 +1176,7 @@ function VariablePicker({ onSelect, webhook, events, sampleEvent, surface, stand
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const groups = ['delivery', 'event', 'client', 'tunnel', 'subjects', 'match', 'p2p', 'webhook'] as const;
-  const variables = getWebhookVariables(events, surface);
+  const variables = getWebhookVariables(catalog, events, surface);
 
   const selectVariable = (variable: WebhookVariable) => {
     onSelect(variable);
@@ -1138,7 +1208,7 @@ function VariablePicker({ onSelect, webhook, events, sampleEvent, surface, stand
                 <section key={group} className="mb-2 last:mb-0">
                   <h3 className="px-2 py-1 text-xs font-medium text-muted-foreground">{t(`webhooks.variables.group.${group}`)}</h3>
                   {groupVariables.map((variable) => {
-                    const sample = webhookVariableSample(variable, sampleEvent, webhook);
+                    const sample = webhookVariableSample(catalog, variable, sampleEvent, webhook);
                     return (
                       <button
                         key={variable.key}
@@ -1164,8 +1234,9 @@ function VariablePicker({ onSelect, webhook, events, sampleEvent, surface, stand
   );
 }
 
-function RequestPreview({ webhook, sampleEvent, onSampleEventChange }: {
+function RequestPreview({ webhook, catalog, sampleEvent, onSampleEventChange }: {
   webhook: WebhookPrototype;
+  catalog: WebhookCatalog;
   sampleEvent: WebhookEventKey;
   onSampleEventChange: (event: WebhookEventKey) => void;
 }) {
@@ -1187,7 +1258,7 @@ function RequestPreview({ webhook, sampleEvent, onSampleEventChange }: {
     );
   }
   const effectiveEvent = previewEvents.includes(sampleEvent) ? sampleEvent : previewEvents[0];
-  const request = renderWebhookRequest(webhook, effectiveEvent);
+  const request = renderWebhookRequest(webhook, effectiveEvent, catalog);
 
   return (
     <aside className="rounded-lg border bg-muted/10 p-3 xl:sticky xl:top-3">
@@ -1236,22 +1307,30 @@ function PreviewBlock({ title, children }: { title: string; children: React.Reac
   return <section><h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</h4><div className="rounded-lg border bg-background p-2">{children}</div></section>;
 }
 
-function TestWebhookDialog({ open, webhook, onOpenChange, onComplete }: {
+function TestWebhookDialog({ open, webhook, catalog, onOpenChange }: {
   open: boolean;
   webhook: WebhookPrototype;
+  catalog: WebhookCatalog;
   onOpenChange: (open: boolean) => void;
-  onComplete: (event: WebhookEventKey) => void;
 }) {
   const { t } = useTranslation();
   const [event, setEvent] = useState<WebhookEventKey>(webhook.events[0]);
-  const [complete, setComplete] = useState(false);
+  const [deliveryId, setDeliveryId] = useState<string | null>(null);
+  const testWebhook = useTestWebhook();
+  const deliveryQuery = useWebhookDelivery(deliveryId);
   const effectiveEvent = webhook.events.includes(event) ? event : webhook.events[0];
-  const request = renderWebhookRequest(webhook, effectiveEvent);
+  const request = renderWebhookRequest(webhook, effectiveEvent, catalog);
+  const delivery = deliveryQuery.data ?? testWebhook.data;
+  const complete = delivery?.status === 'success' || delivery?.status === 'failed' || delivery?.status === 'canceled';
 
-  const sendTest = () => {
-    onComplete(effectiveEvent);
-    setComplete(true);
-    toast.success(t('webhooks.toast.tested'));
+  const sendTest = async () => {
+    try {
+      const queued = await testWebhook.mutateAsync({ config: webhook, event: effectiveEvent });
+      setDeliveryId(queued.id);
+      toast.success(t('webhooks.toast.testQueued'));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('webhooks.toast.operationFailed'));
+    }
   };
 
   return (
@@ -1264,7 +1343,11 @@ function TestWebhookDialog({ open, webhook, onOpenChange, onComplete }: {
         <FieldGroup>
           <Field>
             <FieldLabel>{t('webhooks.preview.sampleEvent')}</FieldLabel>
-            <Select value={effectiveEvent} onValueChange={(value) => { setEvent(value as WebhookEventKey); setComplete(false); }}>
+            <Select value={effectiveEvent} onValueChange={(value) => {
+              setEvent(value as WebhookEventKey);
+              setDeliveryId(null);
+              testWebhook.reset();
+            }} disabled={testWebhook.isPending || Boolean(delivery && !complete)}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent><SelectGroup>{webhook.events.map((item) => <SelectItem key={item} value={item}>{t(eventLabelKey(item))}</SelectItem>)}</SelectGroup></SelectContent>
             </Select>
@@ -1275,18 +1358,18 @@ function TestWebhookDialog({ open, webhook, onOpenChange, onComplete }: {
               <div className="flex items-start gap-2"><Badge variant="outline">{webhook.method}</Badge><code className="break-all text-xs">{request.url}</code></div>
             </div>
           </Field>
-          {complete ? (
+          {delivery ? (
             <div className="grid grid-cols-3 gap-2">
-              <Metric label={t('webhooks.deliveries.result')} value={t('webhooks.status.success')} />
-              <Metric label={t('webhooks.deliveries.response')} value="200" />
-              <Metric label={t('webhooks.deliveries.duration')} value="126 ms" />
+              <Metric label={t('webhooks.deliveries.result')} value={t(`webhooks.status.${delivery.status}`)} />
+              <Metric label={t('webhooks.deliveries.response')} value={String(delivery.statusCode ?? '—')} />
+              <Metric label={t('webhooks.deliveries.duration')} value={delivery.durationMs === null ? '—' : `${delivery.durationMs} ms`} />
             </div>
           ) : null}
-          <FieldDescription>{t('webhooks.test.prototypeHint')}</FieldDescription>
+          {delivery?.error ? <FieldError>{delivery.error}</FieldError> : null}
         </FieldGroup>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>{complete ? t('common.close') : t('common.cancel')}</Button>
-          {!complete ? <Button onClick={sendTest}><Send data-icon="inline-start" />{t('webhooks.test.send')}</Button> : null}
+          {!delivery ? <Button onClick={() => void sendTest()} disabled={testWebhook.isPending}><Send data-icon="inline-start" />{t('webhooks.test.send')}</Button> : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -29,6 +29,7 @@ func (s *Server) initStore() error {
 	}
 	s.serverDB = db
 	s.activityStore = newActivityStoreWithDB(path, db, false)
+	s.webhookStore = newWebhookStoreWithDB(db)
 
 	store, err := newTunnelStoreWithDB(path, db, false)
 	if err != nil {
@@ -183,6 +184,9 @@ func (s *Server) Start() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	s.webhookDispatcher = newWebhookDispatcher(s.webhookStore, s.events)
+	s.webhookDispatcher.Start()
+	s.webhookDispatcher.Wake()
 
 	if s.auth.adminStore != nil {
 		go s.tokenCleanupLoop()
@@ -226,6 +230,11 @@ func logServerEndpoints(port int, tlsEnabled bool, hasWebUI bool, cfg *ServerCon
 }
 
 func (s *Server) cleanupFailedStartup() {
+	if s.webhookDispatcher != nil {
+		stopContext, cancel := context.WithTimeout(context.Background(), webhookRequestTimeout+time.Second)
+		_ = s.webhookDispatcher.Stop(stopContext)
+		cancel()
+	}
 	if s.auth != nil {
 		s.auth.stopRateLimiters()
 	}
@@ -271,6 +280,11 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 	log.Printf("🛑 Starting graceful shutdown...")
 	s.closeDone()
 	s.stopLongLivedAdmission()
+	if s.webhookDispatcher != nil {
+		if stopErr := s.webhookDispatcher.Stop(ctx); stopErr != nil && err == nil {
+			err = stopErr
+		}
+	}
 	defer func() {
 		if s.auth != nil && s.auth.adminStore != nil {
 			if closeErr := s.auth.adminStore.Close(); closeErr != nil {
