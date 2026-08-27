@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
-import type { ActivityWebhookConfig, WebhookInvocation } from '@/types/webhook';
 import {
   cacheDeliveryRefresh,
+  deleteWebhookMutationOptions,
   removeWebhookFromCache,
+  replayWebhookDeliveryMutationOptions,
+  saveWebhookMutationOptions,
+  testWebhookMutationOptions,
   upsertWebhookInCache,
   webhookDeliveriesQueryKey,
   webhookDeliveryQueryKey,
@@ -132,6 +135,114 @@ describe('cacheDeliveryRefresh', () => {
     expect(queryClient.getQueryData(webhookDeliveryQueryKey('dlv_1'))).toEqual(delivery);
     expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(otherListKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+});
+
+describe('webhook mutation options', () => {
+  test('saveWebhookMutationOptions routes create vs update by revision', async () => {
+    const queryClient = new QueryClient();
+    const originalFetch = globalThis.fetch;
+    const calls: { method: string; url: string }[] = [];
+    const apiItem = (id: string, revision: number) => JSON.stringify({
+      id,
+      revision,
+      name: `webhook ${id}`,
+      enabled: true,
+      target_kind: 'client',
+      target_mode: 'all',
+      target_ids: [],
+      method: 'POST',
+      url: `https://example.com/${id}`,
+      headers: [],
+      body: '',
+      events: ['client.online'],
+      calls_24h: 0,
+      last_status: 'idle',
+      consecutive_failures: 0,
+      last_called_at: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      const id = method === 'PUT' ? 'wh_1' : 'wh_new';
+      calls.push({ method, url: String(input) });
+      return new Response(apiItem(id, method === 'PUT' ? 3 : 1), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const options = saveWebhookMutationOptions(queryClient);
+      const created = await options.mutationFn?.(webhook('wh_1', { revision: 0 }));
+      const updated = await options.mutationFn?.(webhook('wh_1', { revision: 2 }));
+      expect(calls).toEqual([
+        { method: 'POST', url: '/api/webhooks' },
+        { method: 'PUT', url: '/api/webhooks/wh_1' },
+      ]);
+      expect(created).toMatchObject({ id: 'wh_new', revision: 1 });
+      expect(updated).toMatchObject({ id: 'wh_1', revision: 3 });
+    } finally {
+      globalThis.fetch = originalFetch;
+      queryClient.clear();
+    }
+  });
+
+  test('saveWebhookMutationOptions onSuccess upserts the saved webhook into the cache', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(webhooksQueryKey, [webhook('wh_1')]);
+    const options = saveWebhookMutationOptions(queryClient);
+
+    options.onSuccess?.(webhook('wh_1', { name: 'renamed', revision: 2 }), webhook('wh_1'), undefined);
+
+    const cached = queryClient.getQueryData<ActivityWebhookConfig[]>(webhooksQueryKey);
+    expect(cached?.map((item) => item.id)).toEqual(['wh_1']);
+    expect(cached?.[0]?.name).toBe('renamed');
+    queryClient.clear();
+  });
+
+  test('deleteWebhookMutationOptions onSuccess removes the webhook and its delivery queries', async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(webhooksQueryKey, [webhook('wh_1'), webhook('wh_2')]);
+    const removedKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    queryClient.setQueryData(removedKey, { items: [] });
+    const options = deleteWebhookMutationOptions(queryClient);
+
+    options.onSuccess?.(undefined, 'wh_1', undefined);
+    await Promise.resolve();
+
+    expect(queryClient.getQueryData<ActivityWebhookConfig[]>(webhooksQueryKey)?.map((item) => item.id)).toEqual(['wh_2']);
+    expect(queryClient.getQueryState(removedKey)).toBeUndefined();
+    queryClient.clear();
+  });
+
+  test('testWebhookMutationOptions onSuccess writes the delivery and invalidates its list', async () => {
+    const queryClient = new QueryClient();
+    const listKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    queryClient.setQueryData(listKey, { items: [] });
+    const options = testWebhookMutationOptions(queryClient);
+
+    options.onSuccess?.(invocation('dlv_1', 'wh_1'), { config: webhook('wh_1'), event: 'client.online' }, undefined);
+    await Promise.resolve();
+
+    expect(queryClient.getQueryData(webhookDeliveryQueryKey('dlv_1'))).toEqual(invocation('dlv_1', 'wh_1'));
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).not.toBe(true);
+    queryClient.clear();
+  });
+
+  test('replayWebhookDeliveryMutationOptions onSuccess also invalidates the webhook list', async () => {
+    const queryClient = new QueryClient();
+    const listKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    queryClient.setQueryData(listKey, { items: [] });
+    queryClient.setQueryData(webhooksQueryKey, []);
+    const options = replayWebhookDeliveryMutationOptions(queryClient);
+
+    options.onSuccess?.(invocation('dlv_1', 'wh_1'), 'dlv_1', undefined);
+    await Promise.resolve();
+
+    expect(queryClient.getQueryData(webhookDeliveryQueryKey('dlv_1'))).toEqual(invocation('dlv_1', 'wh_1'));
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(true);
     queryClient.clear();
   });
 });

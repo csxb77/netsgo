@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { QueryClient } from '@tanstack/react-query';
+import type { QueryClient, UseMutationOptions } from '@tanstack/react-query';
 
 import { webhookApi } from '@/lib/api';
 import type { ActivityWebhookConfig, WebhookEventKey, WebhookInvocation, WebhookInvocationStatus } from '@/types/webhook';
@@ -35,6 +35,43 @@ export function cacheDeliveryRefresh(queryClient: QueryClient, delivery: Webhook
   void queryClient.invalidateQueries({ queryKey: ['webhook-deliveries', delivery.webhookId] });
 }
 
+export function saveWebhookMutationOptions(queryClient: QueryClient): UseMutationOptions<ActivityWebhookConfig, Error, ActivityWebhookConfig> {
+  return {
+    mutationFn: (config) => (config.revision === 0 ? webhookApi.create(config) : webhookApi.update(config)),
+    onSuccess: (saved) => {
+      upsertWebhookInCache(queryClient, saved);
+    },
+  };
+}
+
+export function deleteWebhookMutationOptions(queryClient: QueryClient): UseMutationOptions<void, Error, string> {
+  return {
+    mutationFn: (webhookId) => webhookApi.delete(webhookId),
+    onSuccess: (_, webhookId) => {
+      removeWebhookFromCache(queryClient, webhookId);
+    },
+  };
+}
+
+export function testWebhookMutationOptions(queryClient: QueryClient): UseMutationOptions<WebhookInvocation, Error, { config: ActivityWebhookConfig; event: WebhookEventKey }> {
+  return {
+    mutationFn: ({ config, event }) => webhookApi.test(config, event),
+    onSuccess: (delivery) => {
+      cacheDeliveryRefresh(queryClient, delivery);
+    },
+  };
+}
+
+export function replayWebhookDeliveryMutationOptions(queryClient: QueryClient): UseMutationOptions<WebhookInvocation, Error, string> {
+  return {
+    mutationFn: (deliveryId) => webhookApi.replay(deliveryId),
+    onSuccess: (delivery) => {
+      cacheDeliveryRefresh(queryClient, delivery);
+      void queryClient.invalidateQueries({ queryKey: webhooksQueryKey });
+    },
+  };
+}
+
 export function useWebhookCatalog() {
   return useQuery({
     queryKey: webhookCatalogQueryKey,
@@ -52,24 +89,12 @@ export function useWebhooks() {
 
 export function useSaveWebhook() {
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (config: ActivityWebhookConfig) => (
-      config.revision === 0 ? webhookApi.create(config) : webhookApi.update(config)
-    ),
-    onSuccess: (saved) => {
-      upsertWebhookInCache(queryClient, saved);
-    },
-  });
+  return useMutation(saveWebhookMutationOptions(queryClient));
 }
 
 export function useDeleteWebhook() {
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (webhookId: string) => webhookApi.delete(webhookId),
-    onSuccess: (_, webhookId) => {
-      removeWebhookFromCache(queryClient, webhookId);
-    },
-  });
+  return useMutation(deleteWebhookMutationOptions(queryClient));
 }
 
 export function useWebhookDeliveries(webhookId: string | null, status?: WebhookInvocationStatus) {
@@ -103,23 +128,10 @@ export function useWebhookDelivery(deliveryId: string | null) {
 
 export function useTestWebhook() {
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ config, event }: { config: ActivityWebhookConfig; event: WebhookEventKey }) => (
-      webhookApi.test(config, event)
-    ),
-    onSuccess: (delivery) => {
-      cacheDeliveryRefresh(queryClient, delivery);
-    },
-  });
+  return useMutation(testWebhookMutationOptions(queryClient));
 }
 
 export function useReplayWebhookDelivery() {
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (deliveryId: string) => webhookApi.replay(deliveryId),
-    onSuccess: (delivery) => {
-      cacheDeliveryRefresh(queryClient, delivery);
-      void queryClient.invalidateQueries({ queryKey: webhooksQueryKey });
-    },
-  });
+  return useMutation(replayWebhookDeliveryMutationOptions(queryClient));
 }
