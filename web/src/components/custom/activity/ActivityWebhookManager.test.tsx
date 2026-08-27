@@ -68,7 +68,7 @@ describe('WebhookDeliveryLog', () => {
     expect(markup).toContain('350 ms');
   });
 
-  test('renders every localized delivery status badge', async () => {
+  test('renders every localized delivery status badge with its severity variant', async () => {
     await i18n.changeLanguage('en-US');
     const statuses = ['queued', 'retrying', 'success', 'failed', 'canceled'] as const;
     const markup = renderLog('wh_1', statuses.map((status, index) => invocation({ id: `dlv_${index}`, status })));
@@ -78,5 +78,8 @@ describe('WebhookDeliveryLog', () => {
     expect(markup).toContain('Delivered');
     expect(markup).toContain('Failed');
     expect(markup).toContain('Canceled');
+    expect(markup).toContain('data-variant="destructive"');
+    expect(markup).toContain('data-variant="secondary"');
+    expect(markup.match(/data-variant="outline"/g)?.length).toBeGreaterThanOrEqual(6);
   });
 });

@@ -12,6 +12,7 @@ import {
   resolveEventStreamScope,
   resolveEventStreamScopes,
 } from './use-event-stream';
+import { webhookDeliveriesQueryKey, webhookDeliveryQueryKey, webhooksQueryKey } from './use-webhooks';
 
 const selfScope = SELF_RESOURCE_SCOPE;
 const clientsKey = scopedQueryKey(selfScope, 'clients');
@@ -744,14 +745,11 @@ describe('use-event-stream diagnostics', () => {
 });
 
 describe('use-event-stream webhook events', () => {
-  const webhooksKey = ['webhooks'] as const;
-  const deliveriesKey = (webhookId: string) => ['webhook-deliveries', webhookId] as const;
-  const deliveryKey = (deliveryId: string) => ['webhook-delivery', deliveryId] as const;
   const unrelatedKey = scopedQueryKey(selfScope, 'clients');
 
-  test('invalidates the webhook list on webhook_changed', () => {
+  test('invalidates the webhook list that useWebhooks subscribes to on webhook_changed', () => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData(webhooksKey, []);
+    queryClient.setQueryData(webhooksQueryKey, []);
     queryClient.setQueryData(unrelatedKey, []);
 
     applyEventForDiagnostics(
@@ -762,20 +760,22 @@ describe('use-event-stream webhook events', () => {
       JSON.stringify({ webhook_id: 'wh_1' }),
     );
 
-    expect(queryClient.getQueryState(webhooksKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(unrelatedKey)?.isInvalidated).toBe(false);
     queryClient.clear();
   });
 
-  test('invalidates delivery list, delivery detail, and webhook list on webhook_delivery_changed', () => {
+  test('invalidates every delivery-list filter, the delivery detail, and the webhook list on webhook_delivery_changed', () => {
     const queryClient = new QueryClient();
-    const listKey = deliveriesKey('wh_1');
-    const detailKey = deliveryKey('dlv_1');
-    const otherListKey = deliveriesKey('wh_2');
-    queryClient.setQueryData(listKey, []);
+    const listKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    const failedListKey = webhookDeliveriesQueryKey('wh_1', 'failed');
+    const detailKey = webhookDeliveryQueryKey('dlv_1');
+    const otherListKey = webhookDeliveriesQueryKey('wh_2', 'all');
+    queryClient.setQueryData(listKey, { items: [] });
+    queryClient.setQueryData(failedListKey, { items: [] });
     queryClient.setQueryData(detailKey, { id: 'dlv_1' });
-    queryClient.setQueryData(otherListKey, []);
-    queryClient.setQueryData(webhooksKey, []);
+    queryClient.setQueryData(otherListKey, { items: [] });
+    queryClient.setQueryData(webhooksQueryKey, []);
 
     applyEventForDiagnostics(
       queryClient,
@@ -786,18 +786,19 @@ describe('use-event-stream webhook events', () => {
     );
 
     expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(failedListKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(true);
-    expect(queryClient.getQueryState(webhooksKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(otherListKey)?.isInvalidated).toBe(false);
     queryClient.clear();
   });
 
   test('ignores malformed webhook event payloads', () => {
     const queryClient = new QueryClient();
-    const listKey = deliveriesKey('wh_1');
-    const detailKey = deliveryKey('dlv_1');
-    queryClient.setQueryData(webhooksKey, []);
-    queryClient.setQueryData(listKey, []);
+    const listKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    const detailKey = webhookDeliveryQueryKey('dlv_1');
+    queryClient.setQueryData(webhooksQueryKey, []);
+    queryClient.setQueryData(listKey, { items: [] });
     queryClient.setQueryData(detailKey, { id: 'dlv_1' });
 
     applyEventForDiagnostics(
@@ -829,7 +830,7 @@ describe('use-event-stream webhook events', () => {
       JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1' }),
     );
 
-    expect(queryClient.getQueryState(webhooksKey)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
     queryClient.clear();
