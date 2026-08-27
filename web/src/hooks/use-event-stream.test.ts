@@ -742,3 +742,119 @@ describe('use-event-stream diagnostics', () => {
   });
 
 });
+
+describe('use-event-stream webhook events', () => {
+  const webhooksKey = ['webhooks'] as const;
+  const deliveriesKey = (webhookId: string) => ['webhook-deliveries', webhookId] as const;
+  const deliveryKey = (deliveryId: string) => ['webhook-delivery', deliveryId] as const;
+  const unrelatedKey = scopedQueryKey(selfScope, 'clients');
+
+  test('invalidates the webhook list on webhook_changed', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(webhooksKey, []);
+    queryClient.setQueryData(unrelatedKey, []);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_changed',
+      JSON.stringify({ webhook_id: 'wh_1' }),
+    );
+
+    expect(queryClient.getQueryState(webhooksKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(unrelatedKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('invalidates delivery list, delivery detail, and webhook list on webhook_delivery_changed', () => {
+    const queryClient = new QueryClient();
+    const listKey = deliveriesKey('wh_1');
+    const detailKey = deliveryKey('dlv_1');
+    const otherListKey = deliveriesKey('wh_2');
+    queryClient.setQueryData(listKey, []);
+    queryClient.setQueryData(detailKey, { id: 'dlv_1' });
+    queryClient.setQueryData(otherListKey, []);
+    queryClient.setQueryData(webhooksKey, []);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1', status: 'success' }),
+    );
+
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(webhooksKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherListKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('ignores malformed webhook event payloads', () => {
+    const queryClient = new QueryClient();
+    const listKey = deliveriesKey('wh_1');
+    const detailKey = deliveryKey('dlv_1');
+    queryClient.setQueryData(webhooksKey, []);
+    queryClient.setQueryData(listKey, []);
+    queryClient.setQueryData(detailKey, { id: 'dlv_1' });
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_changed',
+      JSON.stringify({ foo: 1 }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1' }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ delivery_id: 'dlv_1' }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1' }),
+    );
+
+    expect(queryClient.getQueryState(webhooksKey)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('leaves unrelated queries untouched by webhook events', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(unrelatedKey, []);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_changed',
+      JSON.stringify({ webhook_id: 'wh_1' }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1', status: 'failed' }),
+    );
+
+    expect(queryClient.getQueryState(unrelatedKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+});

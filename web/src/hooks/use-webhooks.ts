@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 
 import { webhookApi } from '@/lib/api';
 import type { ActivityWebhookConfig, WebhookEventKey, WebhookInvocation, WebhookInvocationStatus } from '@/types/webhook';
@@ -12,6 +13,26 @@ export function webhookDeliveriesQueryKey(webhookId: string, status?: WebhookInv
 
 export function webhookDeliveryQueryKey(deliveryId: string) {
   return ['webhook-delivery', deliveryId] as const;
+}
+
+export function upsertWebhookInCache(queryClient: QueryClient, saved: ActivityWebhookConfig): void {
+  queryClient.setQueryData<ActivityWebhookConfig[]>(webhooksQueryKey, (current = []) => (
+    current.some((item) => item.id === saved.id)
+      ? current.map((item) => item.id === saved.id ? saved : item)
+      : [...current, saved]
+  ));
+}
+
+export function removeWebhookFromCache(queryClient: QueryClient, webhookId: string): void {
+  queryClient.setQueryData<ActivityWebhookConfig[]>(webhooksQueryKey, (current = []) => (
+    current.filter((item) => item.id !== webhookId)
+  ));
+  queryClient.removeQueries({ queryKey: ['webhook-deliveries', webhookId] });
+}
+
+export function cacheDeliveryRefresh(queryClient: QueryClient, delivery: WebhookInvocation): void {
+  queryClient.setQueryData<WebhookInvocation>(webhookDeliveryQueryKey(delivery.id), delivery);
+  void queryClient.invalidateQueries({ queryKey: ['webhook-deliveries', delivery.webhookId] });
 }
 
 export function useWebhookCatalog() {
@@ -36,11 +57,7 @@ export function useSaveWebhook() {
       config.revision === 0 ? webhookApi.create(config) : webhookApi.update(config)
     ),
     onSuccess: (saved) => {
-      queryClient.setQueryData<ActivityWebhookConfig[]>(webhooksQueryKey, (current = []) => (
-        current.some((item) => item.id === saved.id)
-          ? current.map((item) => item.id === saved.id ? saved : item)
-          : [...current, saved]
-      ));
+      upsertWebhookInCache(queryClient, saved);
     },
   });
 }
@@ -50,10 +67,7 @@ export function useDeleteWebhook() {
   return useMutation({
     mutationFn: (webhookId: string) => webhookApi.delete(webhookId),
     onSuccess: (_, webhookId) => {
-      queryClient.setQueryData<ActivityWebhookConfig[]>(webhooksQueryKey, (current = []) => (
-        current.filter((item) => item.id !== webhookId)
-      ));
-      queryClient.removeQueries({ queryKey: ['webhook-deliveries', webhookId] });
+      removeWebhookFromCache(queryClient, webhookId);
     },
   });
 }
@@ -94,8 +108,7 @@ export function useTestWebhook() {
       webhookApi.test(config, event)
     ),
     onSuccess: (delivery) => {
-      queryClient.setQueryData<WebhookInvocation>(webhookDeliveryQueryKey(delivery.id), delivery);
-      void queryClient.invalidateQueries({ queryKey: ['webhook-deliveries', delivery.webhookId] });
+      cacheDeliveryRefresh(queryClient, delivery);
     },
   });
 }
@@ -105,8 +118,7 @@ export function useReplayWebhookDelivery() {
   return useMutation({
     mutationFn: (deliveryId: string) => webhookApi.replay(deliveryId),
     onSuccess: (delivery) => {
-      queryClient.setQueryData<WebhookInvocation>(webhookDeliveryQueryKey(delivery.id), delivery);
-      void queryClient.invalidateQueries({ queryKey: ['webhook-deliveries', delivery.webhookId] });
+      cacheDeliveryRefresh(queryClient, delivery);
       void queryClient.invalidateQueries({ queryKey: webhooksQueryKey });
     },
   });
