@@ -1376,7 +1376,7 @@ function TestWebhookDialog({ open, webhook, catalog, onOpenChange }: {
   );
 }
 
-function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
+export function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
   webhookId: string;
   invocations: WebhookInvocation[];
   onReplay: (invocation: WebhookInvocation) => void;
