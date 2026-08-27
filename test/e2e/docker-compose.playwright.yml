@@ -84,6 +84,13 @@ services:
       - -c
       - while true; do socat -T30 UDP4-RECVFROM:18084,fork,reuseaddr SYSTEM:'printf playwright-udp-c2c-response'; done
 
+  webhook-receiver:
+    image: hashicorp/http-echo:1.0.0
+    hostname: playwright-webhook-receiver
+    command:
+      - -listen=:18085
+      - -text=playwright webhook response
+
   source-client:
     <<: *netsgo-image
     hostname: ${NETSGO_SOURCE_CLIENT_HOSTNAME:-playwright-source-client}
