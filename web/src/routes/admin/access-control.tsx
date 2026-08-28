@@ -8,6 +8,7 @@ import {
   useClientAuthRateLimitMutations,
   useClientAuthRateLimits,
 } from "@/hooks/use-admin-rate-limits";
+import { useWebhookSettings, useWebhookSettingsMutations, type WebhookDeliverySettings } from "@/hooks/use-webhook-settings";
 import { formatTimestamp, formatUptime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -103,6 +104,7 @@ function AdminAccessControlPage() {
 
   return (
     <div className="flex flex-col gap-6 pb-10">
+      <WebhookDeliverySettingsCard />
       <ClientAuthRateLimitSettingsCard
         settings={displayedSettings}
         isLoading={isLoading}
@@ -119,6 +121,116 @@ function AdminAccessControlPage() {
         onReset={resetClientAuthRateLimit}
       />
     </div>
+  );
+}
+
+function WebhookDeliverySettingsCard() {
+  const { t } = useTranslation();
+  const { data, isLoading } = useWebhookSettings();
+  const mutations = useWebhookSettingsMutations();
+  const [draft, setDraft] = useState<WebhookDeliverySettings | null>(null);
+  const settings = draft ?? {
+    allow_private_targets: data?.allow_private_targets ?? false,
+    daily_delivery_cap: data?.daily_delivery_cap ?? 50,
+  };
+  const isDirty =
+    data != null &&
+    (settings.allow_private_targets !== data.allow_private_targets ||
+      settings.daily_delivery_cap !== data.daily_delivery_cap);
+  const isValid =
+    Number.isInteger(settings.daily_delivery_cap) &&
+    settings.daily_delivery_cap >= 1 &&
+    settings.daily_delivery_cap <= 10000;
+
+  if (isLoading) {
+    return <Skeleton className="h-44 w-full rounded-xl" />;
+  }
+
+  const save = async () => {
+    if (!isValid) {
+      toast.error(t("admin.webhookDailyCapInvalid"));
+      return;
+    }
+    try {
+      await mutations.updateSettings.mutateAsync(settings);
+      setDraft(null);
+      toast.success(t("admin.webhookSettingsSaved"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("errors.generic"));
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("admin.webhookDeliverySettings")}</CardTitle>
+        <CardDescription>
+          {t("admin.webhookDeliverySettingsDescription")}
+        </CardDescription>
+        <CardAction>
+          <Badge variant={settings.allow_private_targets ? "destructive" : "outline"}>
+            {settings.allow_private_targets ? t("admin.webhookPrivateTargetsAllowed") : t("common.disabled")}
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <FieldGroup className="md:grid md:grid-cols-2">
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel htmlFor="webhook-allow-private-targets">
+                {t("admin.webhookAllowPrivateTargets")}
+              </FieldLabel>
+              <FieldDescription>
+                {t("admin.webhookAllowPrivateTargetsHelp")}
+              </FieldDescription>
+            </FieldContent>
+            <Switch
+              id="webhook-allow-private-targets"
+              checked={settings.allow_private_targets}
+              onCheckedChange={(allow) => setDraft({ ...settings, allow_private_targets: allow })}
+            />
+          </Field>
+
+          <Field data-invalid={!isValid}>
+            <FieldLabel htmlFor="webhook-daily-cap">
+              {t("admin.webhookDailyCap")}
+            </FieldLabel>
+            <Input
+              id="webhook-daily-cap"
+              type="number"
+              min={1}
+              max={10000}
+              step={1}
+              value={settings.daily_delivery_cap}
+              onChange={(event) =>
+                setDraft({ ...settings, daily_delivery_cap: Number(event.target.value) })
+              }
+              aria-invalid={!isValid}
+            />
+            <FieldDescription>
+              {isValid
+                ? t("admin.webhookDailyCapHelp")
+                : t("admin.webhookDailyCapInvalid")}
+            </FieldDescription>
+          </Field>
+        </FieldGroup>
+      </CardContent>
+      <CardFooter className="justify-end">
+        <Button
+          type="button"
+          size="sm"
+          disabled={!isDirty || !isValid || mutations.updateSettings.isPending}
+          onClick={() => void save()}
+        >
+          {mutations.updateSettings.isPending ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <Save data-icon="inline-start" />
+          )}
+          {mutations.updateSettings.isPending ? t("common.saving") : t("common.save")}
+        </Button>
+      </CardFooter>
+    </Card>
   );
 }
 

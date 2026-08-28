@@ -183,6 +183,58 @@ func (s *AdminStore) UpdateClientAuthRateLimitSettingsWithActivity(settings Clie
 	return activityID, nil
 }
 
+func (s *AdminStore) UpdateWebhookSettingsWithActivity(settings WebhookSettings, actor ActivityActor) (int64, error) {
+	if err := validateWebhookSettings(settings); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	var currentAllow int
+	var currentCap int
+	if err := tx.QueryRow(`SELECT webhook_allow_private_targets, webhook_daily_delivery_cap FROM server_config WHERE id = 1`).Scan(&currentAllow, &currentCap); err != nil {
+		return 0, err
+	}
+	if intToBool(currentAllow) == settings.AllowPrivateTargets && currentCap == settings.DailyDeliveryCap {
+		if err := commitTx(tx, &committed); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	result, err := tx.Exec(`UPDATE server_config
+		SET webhook_allow_private_targets = ?, webhook_daily_delivery_cap = ?
+		WHERE id = 1`, boolToInt(settings.AllowPrivateTargets), settings.DailyDeliveryCap)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, fmt.Errorf("server config not initialized")
+	}
+	if err := s.maybeFailSave(); err != nil {
+		return 0, err
+	}
+	activityID, err := s.appendActivityTx(tx, adminActivitySpec("webhook_policy_changed", actor, ActivitySummaryArgs{
+		Value: int64(settings.DailyDeliveryCap),
+	}))
+	if err != nil {
+		return 0, err
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return 0, err
+	}
+	return activityID, nil
+}
+
 func (s *AdminStore) UpdateClientDisplayNameWithActivity(clientID, displayName string, actor ActivityActor) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

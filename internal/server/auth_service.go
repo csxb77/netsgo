@@ -1,6 +1,9 @@
 package server
 
 import (
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,11 +34,30 @@ func newAuthService() *AuthService {
 	}
 }
 
+// defaultLoginRateLimitMaxRequests is the per-IP login request cap per minute.
+const defaultLoginRateLimitMaxRequests = 10
+
+// loginRateLimitMaxRequests returns the per-IP login request cap. The default
+// preserves the production brute-force protection; NETSGO_LOGIN_RATE_LIMIT_MAX
+// lets shared-IP test environments (E2E suites whose browser traffic arrives
+// from one gateway IP) raise the cap without weakening the default.
+func loginRateLimitMaxRequests() int {
+	raw := strings.TrimSpace(os.Getenv("NETSGO_LOGIN_RATE_LIMIT_MAX"))
+	if raw == "" {
+		return defaultLoginRateLimitMaxRequests
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 1 {
+		return defaultLoginRateLimitMaxRequests
+	}
+	return parsed
+}
+
 // initRateLimiters initializes the server's rate limiters.
 func (a *AuthService) initRateLimiters(clientSettings ClientAuthRateLimitSettings) {
 	a.loginLimiter = NewRateLimiter(RateLimiterConfig{
 		WindowSize:      time.Minute,
-		MaxRequests:     10,
+		MaxRequests:     loginRateLimitMaxRequests(),
 		MaxFailures:     5,
 		LockoutPeriod:   15 * time.Minute,
 		CleanupInterval: 10 * time.Minute,

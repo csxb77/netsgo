@@ -37,6 +37,12 @@ func TestOpenServerDBCreatesExpectedTables(t *testing.T) {
 		"user_sessions",
 		"tunnels",
 		"traffic_buckets",
+		"activity_webhooks",
+		"activity_webhook_events",
+		"activity_webhook_targets",
+		"activity_webhook_deliveries",
+		"activity_webhook_delivery_attempts",
+		"activity_webhook_dispatch_slots",
 	}
 	for _, table := range wantTables {
 		if !sqliteTableExists(t, db, table) {
@@ -44,7 +50,7 @@ func TestOpenServerDBCreatesExpectedTables(t *testing.T) {
 		}
 	}
 
-	for _, column := range []string{"initialized", "jwt_secret", "client_auth_rate_limit_enabled", "client_auth_rate_limit_per_minute"} {
+	for _, column := range []string{"initialized", "jwt_secret", "client_auth_rate_limit_enabled", "client_auth_rate_limit_per_minute", "webhook_allow_private_targets", "webhook_daily_delivery_cap"} {
 		if !sqliteTableColumnExists(t, db, "server_config", column) {
 			t.Fatalf("expected server_config.%s to exist", column)
 		}
@@ -86,6 +92,8 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 			{name: "activity_warning_min_count", typ: "INTEGER", notNull: true, defaultValue: "100"},
 			{name: "activity_error_retention_days", typ: "INTEGER", notNull: true, defaultValue: "180"},
 			{name: "activity_error_min_count", typ: "INTEGER", notNull: true, defaultValue: "100"},
+			{name: "webhook_allow_private_targets", typ: "INTEGER", notNull: true, defaultValue: "0"},
+			{name: "webhook_daily_delivery_cap", typ: "INTEGER", notNull: true, defaultValue: "50"},
 		},
 		"allowed_ports": {
 			{name: "id", typ: "INTEGER", primaryKey: true},
@@ -297,6 +305,82 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 			{name: "topology", typ: "TEXT", notNull: true, defaultValue: "''"},
 			{name: "is_truncated", typ: "INTEGER", notNull: true, defaultValue: "0"},
 		},
+		"activity_webhooks": {
+			{name: "owner_user_id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "revision", typ: "INTEGER", notNull: true, defaultValue: "1"},
+			{name: "name", typ: "TEXT", notNull: true},
+			{name: "enabled", typ: "INTEGER", notNull: true, defaultValue: "0"},
+			{name: "target_kind", typ: "TEXT", notNull: true},
+			{name: "target_mode", typ: "TEXT", notNull: true},
+			{name: "method", typ: "TEXT", notNull: true},
+			{name: "url_template", typ: "TEXT", notNull: true},
+			{name: "headers_json", typ: "TEXT", notNull: true, defaultValue: "'[]'"},
+			{name: "body_template", typ: "TEXT", notNull: true, defaultValue: "''"},
+			{name: "last_status", typ: "TEXT", notNull: true, defaultValue: "'idle'"},
+			{name: "consecutive_failures", typ: "INTEGER", notNull: true, defaultValue: "0"},
+			{name: "last_called_at_ns", typ: "INTEGER"},
+			{name: "created_at_ns", typ: "INTEGER", notNull: true},
+			{name: "updated_at_ns", typ: "INTEGER", notNull: true},
+		},
+		"activity_webhook_events": {
+			{name: "owner_user_id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "webhook_id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "event_type", typ: "TEXT", notNull: true, primaryKey: true},
+		},
+		"activity_webhook_targets": {
+			{name: "owner_user_id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "webhook_id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "target_id", typ: "TEXT", notNull: true, primaryKey: true},
+		},
+		"activity_webhook_deliveries": {
+			{name: "id", typ: "TEXT", primaryKey: true},
+			{name: "owner_user_id", typ: "TEXT", notNull: true},
+			{name: "webhook_id", typ: "TEXT", notNull: true},
+			{name: "webhook_name", typ: "TEXT", notNull: true},
+			{name: "origin", typ: "TEXT", notNull: true},
+			{name: "source_event_id", typ: "INTEGER"},
+			{name: "event_type", typ: "TEXT", notNull: true},
+			{name: "event_occurred_at_ns", typ: "INTEGER", notNull: true},
+			{name: "status", typ: "TEXT", notNull: true},
+			{name: "attempt_count", typ: "INTEGER", notNull: true, defaultValue: "0"},
+			{name: "max_attempts", typ: "INTEGER", notNull: true},
+			{name: "next_attempt_at_ns", typ: "INTEGER", notNull: true},
+			{name: "lease_until_ns", typ: "INTEGER"},
+			{name: "config_revision", typ: "INTEGER", notNull: true},
+			{name: "config_snapshot_json", typ: "TEXT", notNull: true},
+			{name: "event_snapshot_json", typ: "TEXT", notNull: true},
+			{name: "values_snapshot_json", typ: "TEXT", notNull: true},
+			{name: "request_method", typ: "TEXT", notNull: true},
+			{name: "request_url", typ: "TEXT", notNull: true},
+			{name: "request_headers_json", typ: "TEXT", notNull: true, defaultValue: "'{}'"},
+			{name: "request_body", typ: "TEXT"},
+			{name: "response_status", typ: "INTEGER"},
+			{name: "response_headers_json", typ: "TEXT", notNull: true, defaultValue: "'{}'"},
+			{name: "response_body", typ: "TEXT", notNull: true, defaultValue: "''"},
+			{name: "error", typ: "TEXT", notNull: true, defaultValue: "''"},
+			{name: "duration_ms", typ: "INTEGER"},
+			{name: "created_at_ns", typ: "INTEGER", notNull: true},
+			{name: "started_at_ns", typ: "INTEGER"},
+			{name: "completed_at_ns", typ: "INTEGER"},
+			{name: "updated_at_ns", typ: "INTEGER", notNull: true},
+		},
+		"activity_webhook_delivery_attempts": {
+			{name: "delivery_id", typ: "TEXT", notNull: true, primaryKey: true},
+			{name: "attempt_number", typ: "INTEGER", notNull: true, primaryKey: true},
+			{name: "status", typ: "TEXT", notNull: true},
+			{name: "started_at_ns", typ: "INTEGER", notNull: true},
+			{name: "completed_at_ns", typ: "INTEGER"},
+			{name: "duration_ms", typ: "INTEGER"},
+			{name: "response_status", typ: "INTEGER"},
+			{name: "response_headers_json", typ: "TEXT", notNull: true, defaultValue: "'{}'"},
+			{name: "response_body", typ: "TEXT", notNull: true, defaultValue: "''"},
+			{name: "error", typ: "TEXT", notNull: true, defaultValue: "''"},
+		},
+		"activity_webhook_dispatch_slots": {
+			{name: "owner_user_id", typ: "TEXT", primaryKey: true},
+			{name: "next_allowed_at_ns", typ: "INTEGER", notNull: true, defaultValue: "0"},
+		},
 		"traffic_buckets": {
 			{name: "tunnel_id", typ: "TEXT", notNull: true, primaryKey: true},
 			{name: "owner_client_id", typ: "TEXT", notNull: true},
@@ -390,6 +474,30 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 			{name: "idx_activity_event_tunnels_tunnel", unique: false, columns: []string{"tunnel_id", "event_id"}},
 			{name: "sqlite_autoindex_activity_event_tunnels_1", unique: true, columns: []string{"event_id", "tunnel_id", "relation"}},
 		},
+		"activity_webhooks": {
+			{name: "idx_activity_webhooks_owner_updated", unique: false, columns: []string{"owner_user_id", "updated_at_ns", "id"}},
+			{name: "sqlite_autoindex_activity_webhooks_1", unique: true, columns: []string{"owner_user_id", "id"}},
+		},
+		"activity_webhook_events": {
+			{name: "idx_activity_webhook_events_match", unique: false, columns: []string{"owner_user_id", "event_type", "webhook_id"}},
+			{name: "sqlite_autoindex_activity_webhook_events_1", unique: true, columns: []string{"owner_user_id", "webhook_id", "event_type"}},
+		},
+		"activity_webhook_targets": {
+			{name: "sqlite_autoindex_activity_webhook_targets_1", unique: true, columns: []string{"owner_user_id", "webhook_id", "target_id"}},
+		},
+		"activity_webhook_deliveries": {
+			{name: "idx_activity_webhook_deliveries_due", unique: false, columns: []string{"status", "next_attempt_at_ns", "created_at_ns", "id"}},
+			{name: "idx_activity_webhook_deliveries_event_dedupe", unique: true, columns: []string{"owner_user_id", "webhook_id", "source_event_id"}},
+			{name: "idx_activity_webhook_deliveries_owner_webhook_page", unique: false, columns: []string{"owner_user_id", "webhook_id", "created_at_ns", "id"}},
+			{name: "idx_activity_webhook_deliveries_terminal_cleanup", unique: false, columns: []string{"owner_user_id", "webhook_id", "completed_at_ns", "id"}},
+			{name: "sqlite_autoindex_activity_webhook_deliveries_1", unique: true, columns: []string{"id"}},
+		},
+		"activity_webhook_delivery_attempts": {
+			{name: "sqlite_autoindex_activity_webhook_delivery_attempts_1", unique: true, columns: []string{"delivery_id", "attempt_number"}},
+		},
+		"activity_webhook_dispatch_slots": {
+			{name: "sqlite_autoindex_activity_webhook_dispatch_slots_1", unique: true, columns: []string{"owner_user_id"}},
+		},
 		"tunnels": {
 			{name: "idx_tunnels_hostname", unique: false, columns: []string{"hostname"}},
 			{name: "idx_tunnels_ingress_client", unique: false, columns: []string{"ingress_client_id"}},
@@ -433,6 +541,8 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 		"009_tunnel_total_bandwidth",
 		"012_multi_user_ownership",
 		"013_global_passkey_challenges",
+		"014_activity_webhooks",
+		"015_webhook_delivery_policy",
 	}
 	if got := appliedMigrationNames(t, db, "schema_migrations"); !reflect.DeepEqual(got, wantStrictMigrationNames) {
 		t.Fatalf("strict applied migrations = %#v, want %#v", got, wantStrictMigrationNames)
@@ -478,6 +588,8 @@ func TestServerMigrationsLoadsEmbeddedFiles(t *testing.T) {
 		"011_activity_events",
 		"012_multi_user_ownership",
 		"013_global_passkey_challenges",
+		"014_activity_webhooks",
+		"015_webhook_delivery_policy",
 	}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("migration names = %#v, want %#v", gotNames, wantNames)
@@ -637,8 +749,8 @@ func TestOpenServerDBSkipsAppliedEmbeddedMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ` + serverCompatibleMigrationTable).Scan(&compatibleCount); err != nil {
 		t.Fatalf("count compatible migrations failed: %v", err)
 	}
-	if strictCount != 11 || compatibleCount != 2 {
-		t.Fatalf("migration counts = strict %d, compatible %d; want 11 and 2", strictCount, compatibleCount)
+	if strictCount != 13 || compatibleCount != 2 {
+		t.Fatalf("migration counts = strict %d, compatible %d; want 13 and 2", strictCount, compatibleCount)
 	}
 }
 
@@ -1339,7 +1451,7 @@ func strictServerMigrationsBeforeMultiUser(t *testing.T) []storage.Migration {
 	_, strict := partitionServerMigrations(migrations)
 	legacyStrict := make([]storage.Migration, 0, len(strict))
 	for _, migration := range strict {
-		if migration.Name != "012_multi_user_ownership" && migration.Name != "013_global_passkey_challenges" {
+		if migration.Name != "012_multi_user_ownership" && migration.Name != "013_global_passkey_challenges" && migration.Name != "014_activity_webhooks" {
 			legacyStrict = append(legacyStrict, migration)
 		}
 	}
@@ -1354,7 +1466,7 @@ func openServerDBThroughMigration011(t *testing.T, path string) *sql.DB {
 	}
 	legacyMigrations := make([]storage.Migration, 0, len(migrations)-1)
 	for _, migration := range migrations {
-		if migration.Name == "012_multi_user_ownership" || migration.Name == "013_global_passkey_challenges" {
+		if migration.Name == "012_multi_user_ownership" || migration.Name == "013_global_passkey_challenges" || migration.Name == "014_activity_webhooks" {
 			continue
 		}
 		legacyMigrations = append(legacyMigrations, migration)

@@ -164,6 +164,7 @@ var activityCatalog = map[ActivityCategory]map[string]activityCatalogEntry{
 		"server_config_changed":                {ActivitySeverityInfo, "activity.admin.server_config_changed"},
 		"activity_retention_changed":           {ActivitySeverityInfo, "activity.admin.activity_retention_changed"},
 		"client_auth_rate_limit_changed":       {ActivitySeverityInfo, "activity.admin.client_auth_rate_limit_changed"},
+		"webhook_policy_changed":               {ActivitySeverityInfo, "activity.admin.webhook_policy_changed"},
 		"client_auth_rate_limit_entry_cleared": {ActivitySeverityInfo, "activity.admin.client_auth_rate_limit_entry_cleared"},
 		"user_created":                         {ActivitySeverityInfo, "activity.admin.user_created"},
 		"user_username_changed":                {ActivitySeverityInfo, "activity.admin.user_username_changed"},
@@ -518,6 +519,9 @@ func (s *ActivityStore) appendTx(tx *sql.Tx, spec ActivityEventSpec) (int64, err
 			subject.Name, subject.Type, subject.Topology, boolToInt(subject.Truncated)); err != nil {
 			return 0, fmt.Errorf("insert activity tunnel subject: %w", err)
 		}
+	}
+	if err := enqueueActivityWebhookDeliveriesTx(tx, id, prepared); err != nil {
+		return 0, fmt.Errorf("enqueue activity Webhook deliveries: %w", err)
 	}
 	return id, nil
 }

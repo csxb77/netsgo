@@ -12,6 +12,7 @@ import {
   resolveEventStreamScope,
   resolveEventStreamScopes,
 } from './use-event-stream';
+import { webhookDeliveriesQueryKey, webhookDeliveryQueryKey, webhooksQueryKey } from './use-webhooks';
 
 const selfScope = SELF_RESOURCE_SCOPE;
 const clientsKey = scopedQueryKey(selfScope, 'clients');
@@ -741,4 +742,120 @@ describe('use-event-stream diagnostics', () => {
     queryClient.clear();
   });
 
+});
+
+describe('use-event-stream webhook events', () => {
+  const unrelatedKey = scopedQueryKey(selfScope, 'clients');
+
+  test('invalidates the webhook list that useWebhooks subscribes to on webhook_changed', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(webhooksQueryKey, []);
+    queryClient.setQueryData(unrelatedKey, []);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_changed',
+      JSON.stringify({ webhook_id: 'wh_1' }),
+    );
+
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(unrelatedKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('invalidates every delivery-list filter, the delivery detail, and the webhook list on webhook_delivery_changed', () => {
+    const queryClient = new QueryClient();
+    const listKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    const failedListKey = webhookDeliveriesQueryKey('wh_1', 'failed');
+    const detailKey = webhookDeliveryQueryKey('dlv_1');
+    const otherListKey = webhookDeliveriesQueryKey('wh_2', 'all');
+    queryClient.setQueryData(listKey, { items: [] });
+    queryClient.setQueryData(failedListKey, { items: [] });
+    queryClient.setQueryData(detailKey, { id: 'dlv_1' });
+    queryClient.setQueryData(otherListKey, { items: [] });
+    queryClient.setQueryData(webhooksQueryKey, []);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1', status: 'success' }),
+    );
+
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(failedListKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherListKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('ignores malformed webhook event payloads', () => {
+    const queryClient = new QueryClient();
+    const listKey = webhookDeliveriesQueryKey('wh_1', 'all');
+    const detailKey = webhookDeliveryQueryKey('dlv_1');
+    queryClient.setQueryData(webhooksQueryKey, []);
+    queryClient.setQueryData(listKey, { items: [] });
+    queryClient.setQueryData(detailKey, { id: 'dlv_1' });
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_changed',
+      JSON.stringify({ foo: 1 }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1' }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ delivery_id: 'dlv_1' }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1' }),
+    );
+
+    expect(queryClient.getQueryState(webhooksQueryKey)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
+
+  test('leaves unrelated queries untouched by webhook events', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(unrelatedKey, []);
+
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_changed',
+      JSON.stringify({ webhook_id: 'wh_1' }),
+    );
+    applyEventForDiagnostics(
+      queryClient,
+      () => undefined,
+      createEventStreamSnapshotState(),
+      'webhook_delivery_changed',
+      JSON.stringify({ webhook_id: 'wh_1', delivery_id: 'dlv_1', status: 'failed' }),
+    );
+
+    expect(queryClient.getQueryState(unrelatedKey)?.isInvalidated).toBe(false);
+    queryClient.clear();
+  });
 });

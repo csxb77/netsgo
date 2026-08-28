@@ -598,6 +598,57 @@ func (s *AdminStore) UpdateClientAuthRateLimitSettings(settings ClientAuthRateLi
 	return commitTx(tx, &committed)
 }
 
+func (s *AdminStore) GetWebhookSettings() (WebhookSettings, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	settings := defaultWebhookSettings()
+	var allowPrivate int
+	err := s.db.QueryRow(`SELECT webhook_allow_private_targets, webhook_daily_delivery_cap FROM server_config WHERE id = 1`).Scan(
+		&allowPrivate,
+		&settings.DailyDeliveryCap,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return settings, nil
+	}
+	if err != nil {
+		return WebhookSettings{}, err
+	}
+	settings.AllowPrivateTargets = intToBool(allowPrivate)
+	return settings, nil
+}
+
+func (s *AdminStore) UpdateWebhookSettings(settings WebhookSettings) error {
+	if err := validateWebhookSettings(settings); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+
+	result, err := tx.Exec(`UPDATE server_config
+		SET webhook_allow_private_targets = ?, webhook_daily_delivery_cap = ?
+		WHERE id = 1`, boolToInt(settings.AllowPrivateTargets), settings.DailyDeliveryCap)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("server config not initialized")
+	}
+	return commitTx(tx, &committed)
+}
+
 // ========== Port Whitelist ==========
 
 func loadAllowedPorts(q dbQuerier) (ports []PortRange, err error) {

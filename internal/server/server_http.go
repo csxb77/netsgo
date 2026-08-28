@@ -50,6 +50,17 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/keys/{id}/{action}", s.requireSelfResourceScope(s.handleAPIAdminKeyItem))
 	mux.HandleFunc("DELETE /api/keys/{id}", s.requireSelfResourceScope(s.handleAPIAdminKeyItem))
 	mux.HandleFunc("GET /api/activity", s.requireSelfResourceScope(s.handleAPIActivity))
+	mux.HandleFunc("GET /api/webhooks/catalog", s.requireSelfResourceScope(s.handleAPIWebhookCatalog))
+	mux.HandleFunc("GET /api/webhooks", s.requireSelfResourceScope(s.handleAPIWebhooks))
+	mux.HandleFunc("POST /api/webhooks", s.requireSelfResourceScope(s.handleAPIWebhooks))
+	mux.HandleFunc("GET /api/webhooks/{id}", s.requireSelfResourceScope(s.handleAPIWebhookItem))
+	mux.HandleFunc("PUT /api/webhooks/{id}", s.requireSelfResourceScope(s.handleAPIWebhookItem))
+	mux.HandleFunc("DELETE /api/webhooks/{id}", s.requireSelfResourceScope(s.handleAPIWebhookItem))
+	mux.HandleFunc("POST /api/webhooks/preview", s.requireSelfResourceScope(s.handleAPIWebhookPreview))
+	mux.HandleFunc("POST /api/webhooks/test", s.requireSelfResourceScope(s.handleAPIWebhookTest))
+	mux.HandleFunc("GET /api/webhooks/{id}/deliveries", s.requireSelfResourceScope(s.handleAPIWebhookDeliveries))
+	mux.HandleFunc("GET /api/webhook-deliveries/{id}", s.requireSelfResourceScope(s.handleAPIWebhookDelivery))
+	mux.HandleFunc("POST /api/webhook-deliveries/{id}/replay", s.requireSelfResourceScope(s.handleAPIWebhookReplay))
 	mux.HandleFunc("GET /api/events", s.requireSelfResourceScope(s.handleSSE))
 
 	mux.HandleFunc("POST /api/auth/login", s.handleAPILogin)
@@ -61,6 +72,8 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/rate-limits/client-auth", s.RequireAdmin(s.handleAPIAdminClientAuthRateLimits))
 	mux.HandleFunc("PUT /api/admin/rate-limits/client-auth", s.RequireAdmin(s.handleAPIAdminClientAuthRateLimits))
 	mux.HandleFunc("DELETE /api/admin/rate-limits/client-auth", s.RequireAdmin(s.handleAPIAdminClientAuthRateLimits))
+	mux.HandleFunc("GET /api/admin/settings/webhooks", s.RequireAdmin(s.handleAPIAdminWebhookSettings))
+	mux.HandleFunc("PUT /api/admin/settings/webhooks", s.RequireAdmin(s.handleAPIAdminWebhookSettings))
 	// Backward-compatible administrator key routes retain an explicit self
 	// scope. New UI calls the /api/keys form above.
 	mux.HandleFunc("GET /api/admin/keys", s.requireAdminSelfResourceScope(s.handleAPIAdminKeys))

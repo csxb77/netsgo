@@ -16,6 +16,25 @@ import (
 	"netsgo/pkg/protocol"
 )
 
+func TestLoginRateLimitMaxRequestsEnvOverride(t *testing.T) {
+	t.Setenv("NETSGO_LOGIN_RATE_LIMIT_MAX", "")
+	if got := loginRateLimitMaxRequests(); got != defaultLoginRateLimitMaxRequests {
+		t.Fatalf("unset env: want default %d, got %d", defaultLoginRateLimitMaxRequests, got)
+	}
+
+	t.Setenv("NETSGO_LOGIN_RATE_LIMIT_MAX", "120")
+	if got := loginRateLimitMaxRequests(); got != 120 {
+		t.Fatalf("valid override: want 120, got %d", got)
+	}
+
+	for _, invalid := range []string{"0", "-5", "abc", "  "} {
+		t.Setenv("NETSGO_LOGIN_RATE_LIMIT_MAX", invalid)
+		if got := loginRateLimitMaxRequests(); got != defaultLoginRateLimitMaxRequests {
+			t.Fatalf("invalid override %q: want default %d, got %d", invalid, defaultLoginRateLimitMaxRequests, got)
+		}
+	}
+}
+
 // setupRateLimitedServer creates a test server with a custom rate limiter
 func setupRateLimitedServer(t *testing.T, loginCfg, setupCfg RateLimiterConfig) (*Server, func()) {
 	t.Helper()

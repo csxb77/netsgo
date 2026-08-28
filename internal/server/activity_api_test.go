@@ -30,6 +30,11 @@ func setupActivityAPIAuthTest(t *testing.T) (*Server, http.Handler, func()) {
 	if err := store.Initialize("admin", "password123", "https://example.com", []PortRange{}); err != nil {
 		t.Fatal(err)
 	}
+	// Webhook API tests deliver to loopback httptest servers, which the
+	// default private-target policy rejects.
+	if err := store.UpdateWebhookSettings(WebhookSettings{AllowPrivateTargets: true, DailyDeliveryCap: defaultWebhookDailyDeliveryCap}); err != nil {
+		t.Fatal(err)
+	}
 	return s, s.newHTTPHandler(), func() { _ = db.Close() }
 }
 

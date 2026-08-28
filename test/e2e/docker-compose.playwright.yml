@@ -24,6 +24,8 @@ services:
       - ${NETSGO_SERVER_ADDR:-http://panel.playwright.local}
       - --tls-mode
       - off
+    environment:
+      NETSGO_LOGIN_RATE_LIMIT_MAX: ${NETSGO_LOGIN_RATE_LIMIT_MAX:-1000}
     ports:
       - "${PLAYWRIGHT_SERVER_PORT:-19180}:8080"
     volumes:
@@ -83,6 +85,13 @@ services:
       - /bin/sh
       - -c
       - while true; do socat -T30 UDP4-RECVFROM:18084,fork,reuseaddr SYSTEM:'printf playwright-udp-c2c-response'; done
+
+  webhook-receiver:
+    image: hashicorp/http-echo:1.0.0
+    hostname: playwright-webhook-receiver
+    command:
+      - -listen=:18085
+      - -text=playwright webhook response
 
   source-client:
     <<: *netsgo-image

@@ -1,4 +1,4 @@
-.PHONY: build build-web build-go build-desktop-sidecar build-desktop build-desktop-macos-local sign-desktop-macos-app package-desktop-macos-local clean docs dev-server dev-client dev-bench dev-web test test-race lint lint-go test-tdd-red test-tdd-red-client test-tdd-red-server test-system-e2e test-system-e2e-nginx test-system-e2e-caddy test-system-e2e-capability-loss test-p2p-double-nat-e2e test-playwright-e2e test-playwright-e2e-smoke test-playwright-e2e-full test-playwright-e2e-cdp test-playwright-e2e-cdp-smoke test-playwright-e2e-cdp-full test-playwright-e2e-cdp-run test-playwright-e2e-cdp-check test-playwright-e2e-run bench-data system-e2e-up system-e2e-logs system-e2e-down system-e2e-clean docker-build-e2e-current docker-build-e2e-capability-loss docker-build-e2e-prebuilt docker-build-e2e-stable test-baseline-e2e test-compat-e2e test-upgrade-e2e
+.PHONY: build build-web build-go build-desktop-sidecar build-desktop build-desktop-macos-local sign-desktop-macos-app package-desktop-macos-local clean docs dev-server dev-client dev-bench dev-web test test-race lint lint-go test-tdd-red test-tdd-red-client test-tdd-red-server test-system-e2e test-system-e2e-nginx test-system-e2e-caddy test-system-e2e-capability-loss test-p2p-double-nat-e2e test-playwright-e2e test-playwright-e2e-smoke test-playwright-e2e-full test-playwright-e2e-webhook test-playwright-e2e-cdp test-playwright-e2e-cdp-smoke test-playwright-e2e-cdp-full test-playwright-e2e-cdp-run test-playwright-e2e-cdp-check test-playwright-e2e-run bench-data system-e2e-up system-e2e-logs system-e2e-down system-e2e-clean docker-build-e2e-current docker-build-e2e-capability-loss docker-build-e2e-prebuilt docker-build-e2e-stable test-baseline-e2e test-compat-e2e test-upgrade-e2e
 
 # 编译输出目录
 BIN_DIR=bin
@@ -272,6 +272,9 @@ test-playwright-e2e-smoke: test-playwright-e2e-run
 
 test-playwright-e2e-full: test-playwright-e2e-run
 
+test-playwright-e2e-webhook: PLAYWRIGHT_ARGS=--grep @webhook
+test-playwright-e2e-webhook: test-playwright-e2e-run
+
 test-playwright-e2e-cdp: test-playwright-e2e-cdp-smoke
 
 test-playwright-e2e-cdp-smoke: PLAYWRIGHT_ARGS=--grep @smoke
@@ -295,10 +298,6 @@ test-playwright-e2e-run: build-web
 	@set -e; \
 	admin_pass="$${NETSGO_ADMIN_PASS:-NetsGo1-$$(openssl rand -hex 12 2>/dev/null || uuidgen)}"; \
 	playwright_cdp_endpoint="$${PLAYWRIGHT_CDP_ENDPOINT:-}"; \
-	if [ -z "$${playwright_cdp_endpoint}" ] && curl -fsS "$(LOCAL_CHROME_CDP_ENDPOINT)/json/version" >/dev/null 2>&1; then \
-		playwright_cdp_endpoint="$(LOCAL_CHROME_CDP_ENDPOINT)"; \
-		echo "Using local Chrome CDP endpoint: $${playwright_cdp_endpoint}"; \
-	fi; \
 	cleanup() { \
 		PLAYWRIGHT_SERVER_PORT=$(PLAYWRIGHT_SERVER_PORT) \
 		PLAYWRIGHT_TCP_INGRESS_PORT=$(PLAYWRIGHT_TCP_INGRESS_PORT) \

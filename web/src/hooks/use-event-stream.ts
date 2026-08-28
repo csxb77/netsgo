@@ -35,6 +35,15 @@ interface UserListChangedEvent {
   user_id: string;
 }
 
+interface WebhookChangedEvent {
+  webhook_id: string;
+}
+
+interface WebhookDeliveryChangedEvent extends WebhookChangedEvent {
+  delivery_id: string;
+  status: string;
+}
+
 export interface EventStreamDiagnostics {
   eventType: string;
   action?: string;
@@ -96,6 +105,17 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isUserListChangedEvent(value: unknown): value is UserListChangedEvent {
   return isRecord(value) && isNonEmptyString(value.user_id);
+}
+
+function isWebhookChangedEvent(value: unknown): value is WebhookChangedEvent {
+  return isRecord(value) && isNonEmptyString(value.webhook_id);
+}
+
+function isWebhookDeliveryChangedEvent(value: unknown): value is WebhookDeliveryChangedEvent {
+  return isRecord(value)
+    && isNonEmptyString(value.webhook_id)
+    && isNonEmptyString(value.delivery_id)
+    && isNonEmptyString(value.status);
 }
 
 function isConsoleSummary(value: unknown): value is ConsoleSummary {
@@ -527,6 +547,19 @@ export function applyEventForDiagnostics(
       void queryClient.invalidateQueries({
         queryKey: parsed ? ['admin-user', parsed.user_id] : ['admin-user'],
       });
+      return;
+    }
+    case 'webhook_changed': {
+      if (!parseEventPayload(data, isWebhookChangedEvent)) return;
+      void queryClient.invalidateQueries({ queryKey: ['webhooks'] });
+      return;
+    }
+    case 'webhook_delivery_changed': {
+      const parsed = parseEventPayload(data, isWebhookDeliveryChangedEvent);
+      if (!parsed) return;
+      void queryClient.invalidateQueries({ queryKey: ['webhook-deliveries', parsed.webhook_id] });
+      void queryClient.invalidateQueries({ queryKey: ['webhook-delivery', parsed.delivery_id] });
+      void queryClient.invalidateQueries({ queryKey: ['webhooks'] });
       return;
     }
     case 'snapshot': {

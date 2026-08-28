@@ -13,9 +13,9 @@ export default defineConfig({
   outputDir: '../../test-results/playwright',
   use: {
     baseURL: process.env.NETSGO_E2E_BASE_URL ?? 'http://127.0.0.1:19180',
-    // CI supplies xvfb for the default headed mode. Local runners without a
-    // display can opt into equivalent Chromium coverage explicitly.
-    headless: process.env.PLAYWRIGHT_HEADLESS === '1' || process.env.PLAYWRIGHT_HEADLESS === 'true',
+    // Browser tests run headless by default; set PLAYWRIGHT_HEADLESS=0 to
+    // watch them locally.
+    headless: process.env.PLAYWRIGHT_HEADLESS !== '0',
     locale: 'en-US',
     trace: 'retain-on-failure',
   },
