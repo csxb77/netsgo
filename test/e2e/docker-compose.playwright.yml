@@ -24,6 +24,8 @@ services:
       - ${NETSGO_SERVER_ADDR:-http://panel.playwright.local}
       - --tls-mode
       - off
+    environment:
+      NETSGO_LOGIN_RATE_LIMIT_MAX: ${NETSGO_LOGIN_RATE_LIMIT_MAX:-1000}
     ports:
       - "${PLAYWRIGHT_SERVER_PORT:-19180}:8080"
     volumes:
