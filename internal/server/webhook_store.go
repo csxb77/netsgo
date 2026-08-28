@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// webhookMaxPendingPerUser caps queued+retrying deliveries per user across all
+// origins. Event traffic beyond this budget is dropped (activity events are
+// still recorded); test/replay calls surface an API error.
+const webhookMaxPendingPerUser = 1000
+
 var (
 	ErrWebhookNotFound          = errors.New("webhook not found")
 	ErrWebhookRevisionConflict  = errors.New("webhook revision conflict")
@@ -19,6 +24,7 @@ var (
 	ErrWebhookDeliveryNotFound  = errors.New("webhook delivery not found")
 	ErrWebhookReplayUnavailable = errors.New("webhook delivery cannot be replayed")
 	ErrWebhookDailyCapReached   = errors.New("webhook daily delivery cap reached")
+	ErrWebhookPendingFull       = errors.New("webhook pending delivery limit reached")
 )
 
 type WebhookStore struct {
@@ -58,6 +64,22 @@ func ensureDailyCapTx(tx *sql.Tx, ownerUserID string, now time.Time, cap int) er
 	return nil
 }
 
+// ensurePendingCapTx bounds how many queued/retrying deliveries a single user
+// may accumulate across ALL origins (events included). Without it a user
+// flapping their own tunnels could enqueue durable rows faster than the
+// dispatcher drains them (one in-flight request per user every 2s) and grow
+// the SQLite file without limit.
+func ensurePendingCapTx(tx *sql.Tx, ownerUserID string) error {
+	var pending int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM activity_webhook_deliveries
+		WHERE owner_user_id = ? AND status IN ('queued', 'retrying')`, ownerUserID).Scan(&pending); err != nil {
+		return err
+	}
+	if pending >= webhookMaxPendingPerUser {
+		return fmt.Errorf("%w: limit is %d", ErrWebhookPendingFull, webhookMaxPendingPerUser)
+	}
+	return nil
+}
 func newWebhookStoreWithDB(db *sql.DB) *WebhookStore {
 	return &WebhookStore{db: db, now: time.Now}
 }
@@ -555,6 +577,9 @@ func (s *WebhookStore) Replay(ownerUserID, deliveryID string) (WebhookDelivery, 
 }
 
 func insertWebhookDeliveryTx(tx *sql.Tx, ownerUserID string, config webhookConfigSnapshot, event webhookEventSnapshot, values map[string]any, origin WebhookDeliveryOrigin, sourceEventID sql.NullInt64, maxAttempts int, now time.Time) error {
+	if err := ensurePendingCapTx(tx, ownerUserID); err != nil {
+		return err
+	}
 	deliveryID := webhookValueText(values["delivery.id"])
 	rendered, err := renderWebhookRequest(config, values, 1)
 	if err != nil {

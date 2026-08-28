@@ -538,12 +538,12 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 		"006_admin_security",
 		"007_api_key_lookup_digest",
 		"008_socks5_endpoint_types",
-	"009_tunnel_total_bandwidth",
-	"012_multi_user_ownership",
-	"013_global_passkey_challenges",
-	"014_activity_webhooks",
-	"015_webhook_delivery_policy",
-}
+		"009_tunnel_total_bandwidth",
+		"012_multi_user_ownership",
+		"013_global_passkey_challenges",
+		"014_activity_webhooks",
+		"015_webhook_delivery_policy",
+	}
 	if got := appliedMigrationNames(t, db, "schema_migrations"); !reflect.DeepEqual(got, wantStrictMigrationNames) {
 		t.Fatalf("strict applied migrations = %#v, want %#v", got, wantStrictMigrationNames)
 	}
@@ -583,14 +583,14 @@ func TestServerMigrationsLoadsEmbeddedFiles(t *testing.T) {
 		"006_admin_security",
 		"007_api_key_lookup_digest",
 		"008_socks5_endpoint_types",
-	"009_tunnel_total_bandwidth",
-	"010_client_auth_control",
-	"011_activity_events",
-	"012_multi_user_ownership",
-	"013_global_passkey_challenges",
-	"014_activity_webhooks",
-	"015_webhook_delivery_policy",
-}
+		"009_tunnel_total_bandwidth",
+		"010_client_auth_control",
+		"011_activity_events",
+		"012_multi_user_ownership",
+		"013_global_passkey_challenges",
+		"014_activity_webhooks",
+		"015_webhook_delivery_policy",
+	}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("migration names = %#v, want %#v", gotNames, wantNames)
 	}

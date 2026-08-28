@@ -52,11 +52,30 @@ func newWebhookDispatcher(store *WebhookStore, events *EventBus) *webhookDispatc
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
-			Transport: &http.Transport{DialContext: guardedWebhookDialContext(store)},
+			Transport: &webhookPolicyRoundTripper{
+				inner: &http.Transport{DialContext: guardedWebhookDialContext(store)},
+				store: store,
+			},
 		},
 		now: time.Now, wake: make(chan struct{}, 1), stop: make(chan struct{}),
 		requestCtx: ctx, cancel: cancel,
 	}
+}
+
+// webhookPolicyRoundTripper closes pooled keep-alive connections whenever the
+// private-target policy is (re-)disabled. Idle connection reuse bypasses
+// DialContext, so without this a toggle from allow to block would keep serving
+// already-established private connections.
+type webhookPolicyRoundTripper struct {
+	inner *http.Transport
+	store *WebhookStore
+}
+
+func (r *webhookPolicyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if r.store != nil && !r.store.currentSettings().AllowPrivateTargets {
+		r.inner.CloseIdleConnections()
+	}
+	return r.inner.RoundTrip(request)
 }
 
 // guardedWebhookDialContext resolves the target before connecting and refuses

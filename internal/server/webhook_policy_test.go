@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,13 @@ func TestValidateWebhookInputPrivateTargetPolicy(t *testing.T) {
 		"http://[::1]/hook",
 		"http://[fe80::1]/hook",
 		"http://100.64.0.7/hook",
+		"http://198.18.0.1/hook",
+		"http://192.0.2.1/hook",
+		"http://203.0.113.9/hook",
+		"http://240.0.0.1/hook",
+		"http://[2001:db8::1]/hook",
+		"http://[100::1]/hook",
+		"http://0.0.0.0/hook",
 	}
 	for _, url := range blockedURLs {
 		input := normalizeWebhookInput(testWebhookInput("wh_private_policy"))
@@ -36,6 +44,72 @@ func TestValidateWebhookInputPrivateTargetPolicy(t *testing.T) {
 		if err := validateWebhookInput(loopback, catalog.Fixtures, catalog.Variables, true); err != nil {
 			t.Fatalf("allow private: %q should pass, got %v", url, err)
 		}
+	}
+}
+
+func TestWebhookDispatcherPolicyBlocksPooledPrivateConnections(t *testing.T) {
+	_, webhookStore, owner := newWebhookStoreFixture(t)
+	allowed := policySettings(true, defaultWebhookDailyDeliveryCap)
+	blocked := policySettings(false, defaultWebhookDailyDeliveryCap)
+	current := &allowed
+	webhookStore.settings = func() WebhookSettings { return *current }
+
+	var hits int
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer receiver.Close()
+
+	input := testWebhookInput("wh_keepalive_guard")
+	input.URL = receiver.URL + "/hook"
+	input.Events = []string{"client.online"}
+
+	enqueue := func(id string) WebhookDelivery {
+		t.Helper()
+		delivery, err := webhookStore.EnqueueTest(owner.ID, input, "client.online")
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+		return delivery
+	}
+	execute := func(id string, delivery WebhookDelivery, claimTime time.Time) WebhookDelivery {
+		t.Helper()
+		claimed, ok, err := webhookStore.ClaimDue(owner.ID, claimTime)
+		if err != nil || !ok {
+			t.Fatalf("claim %s = %v, %v", id, ok, err)
+		}
+		dispatcher := newWebhookDispatcher(webhookStore, nil)
+		dispatcher.execute(claimed)
+		dispatcher.cancel()
+		result, err := webhookStore.GetDelivery(owner.ID, delivery.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	base := time.Now().UTC().Add(time.Minute)
+	// Enqueue both while the policy still allows the private target; the
+	// policy flips only for the second execution so the first request has
+	// pooled a keep-alive connection by then.
+	firstDelivery := enqueue("allowed")
+	secondDelivery := enqueue("blocked-second")
+	first := execute("allowed", firstDelivery, base)
+	if first.Status != WebhookDeliverySuccess {
+		t.Fatalf("allowed delivery status = %q (%s)", first.Status, first.Error)
+	}
+
+	current = &blocked
+	second := execute("blocked", secondDelivery, base.Add(3*time.Second))
+	if second.Status != WebhookDeliveryFailed {
+		t.Fatalf("blocked pooled delivery status = %q, want failed", second.Status)
+	}
+	if !strings.Contains(second.Error, "private") {
+		t.Fatalf("blocked pooled delivery error = %q, want private-address rejection", second.Error)
+	}
+	if hits != 1 {
+		t.Fatalf("receiver hits = %d, want 1 (pooled connection must not be reused)", hits)
 	}
 }
 
@@ -78,6 +152,103 @@ func TestWebhookDispatcherDialGuardBlocksPrivateWhenDisabled(t *testing.T) {
 	}
 	if !strings.Contains(blockedResult.Error, "private") {
 		t.Fatalf("blocked dial error = %q, want private-address rejection", blockedResult.Error)
+	}
+}
+
+func TestWebhookPendingCapDropsEventsAndRejectsManual(t *testing.T) {
+	adminStore, webhookStore, owner := newWebhookStoreFixture(t)
+	client := registerWebhookClient(t, adminStore, owner.ID, "pending-client", "pending-host")
+
+	input := testWebhookInput("wh_pending_cap")
+	input.Events = []string{"client.online"}
+	if _, err := webhookStore.Create(owner.ID, input); err != nil {
+		t.Fatalf("create webhook: %v", err)
+	}
+
+	// Saturate the per-user pending budget directly; going through the API
+	// would be drained by nothing here anyway (no dispatcher running).
+	now := webhookStore.now().UTC()
+	for i := 0; i < webhookMaxPendingPerUser; i++ {
+		if _, err := adminStore.db.Exec(`INSERT INTO activity_webhook_deliveries (
+			id, owner_user_id, webhook_id, webhook_name, origin, event_type,
+			event_occurred_at_ns, status, attempt_count, max_attempts, next_attempt_at_ns, config_revision,
+			config_snapshot_json, event_snapshot_json, values_snapshot_json,
+			request_method, request_url, request_headers_json, created_at_ns, updated_at_ns
+		) VALUES (?, ?, 'wh_other', 'other', 'event', 'client.online', ?, 'queued', 0, 3, ?, 1,
+			'{}', '{}', '{}', 'POST', 'http://example.com/hook', '{}', ?, ?)`,
+			fmt.Sprintf("dlv_pending_%d", i), owner.ID, now.UnixNano(), now.UnixNano(), now.UnixNano(), now.UnixNano()); err != nil {
+			t.Fatalf("seed pending delivery %d: %v", i, err)
+		}
+	}
+
+	appendWebhookClientEvent(t, adminStore, owner, client.ID, "online", "pending-cap-event", now)
+	page, err := webhookStore.ListDeliveries(owner.ID, "wh_pending_cap", "", 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("event delivery beyond pending cap should be dropped: %+v", page.Items)
+	}
+
+	if _, err := webhookStore.EnqueueTest(owner.ID, input, "client.online"); !errors.Is(err, ErrWebhookPendingFull) {
+		t.Fatalf("manual enqueue error = %v, want pending cap", err)
+	}
+}
+
+func TestWebhookDeliveriesRemainReadableAfterWebhookDeletion(t *testing.T) {
+	server, handler, cleanup := setupActivityAPIAuthTest(t)
+	defer cleanup()
+	_, token := issueRoleToken(t, server, "webhook-deliveries-retention")
+
+	input := testWebhookInput("")
+	input.Events = []string{"client.online"}
+	createResponse := serveWebhookAPIRequest(t, handler, http.MethodPost, "/api/webhooks", token, input)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("create webhook status=%d body=%s", createResponse.Code, createResponse.Body.String())
+	}
+	created := decodeWebhookAPIResponse[ActivityWebhook](t, createResponse)
+	input.ID = created.ID
+	input.ExpectedRevision = created.Revision
+
+	testResponse := serveWebhookAPIRequest(t, handler, http.MethodPost, "/api/webhooks/test", token, webhookPreviewRequest{Config: input, Event: "client.online"})
+	if testResponse.Code != http.StatusAccepted {
+		t.Fatalf("test delivery status=%d body=%s", testResponse.Code, testResponse.Body.String())
+	}
+
+	deleteResponse := serveWebhookAPIRequest(t, handler, http.MethodDelete, "/api/webhooks/"+created.ID, token, nil)
+	if deleteResponse.Code != http.StatusOK && deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("delete webhook status=%d body=%s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+
+	listResponse := serveWebhookAPIRequest(t, handler, http.MethodGet, "/api/webhooks/"+created.ID+"/deliveries", token, nil)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("deliveries after deletion status=%d body=%s", listResponse.Code, listResponse.Body.String())
+	}
+	page := decodeWebhookAPIResponse[WebhookDeliveryPage](t, listResponse)
+	if len(page.Items) != 1 || page.Items[0].Origin != WebhookOriginTest {
+		t.Fatalf("retained deliveries = %+v, want the test delivery", page.Items)
+	}
+}
+
+func TestWebhookSettingsUpdateWritesAdminActivity(t *testing.T) {
+	adminStore, _, _ := newWebhookStoreFixture(t)
+	actor := ActivityActor{Type: "admin", ID: "admin-id", Name: "admin"}
+
+	idle, err := adminStore.UpdateWebhookSettingsWithActivity(WebhookSettings{AllowPrivateTargets: false, DailyDeliveryCap: defaultWebhookDailyDeliveryCap}, actor)
+	if err != nil || idle != 0 {
+		t.Fatalf("no-op update = (%d, %v), want no activity", idle, err)
+	}
+	activityID, err := adminStore.UpdateWebhookSettingsWithActivity(WebhookSettings{AllowPrivateTargets: true, DailyDeliveryCap: 120}, actor)
+	if err != nil || activityID == 0 {
+		t.Fatalf("policy update = (%d, %v), want activity", activityID, err)
+	}
+	var action string
+	if err := adminStore.db.QueryRow(`SELECT action FROM activity_events WHERE id = ?`, activityID).Scan(&action); err != nil || action != "webhook_policy_changed" {
+		t.Fatalf("activity action = %q, %v, want webhook_policy_changed", action, err)
+	}
+	got, err := adminStore.GetWebhookSettings()
+	if err != nil || !got.AllowPrivateTargets || got.DailyDeliveryCap != 120 {
+		t.Fatalf("settings after update = %+v, %v", got, err)
 	}
 }
 

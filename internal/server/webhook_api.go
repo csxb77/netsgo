@@ -31,10 +31,12 @@ func (s *Server) handleAPIAdminWebhookSettings(w http.ResponseWriter, r *http.Re
 			writeAPIError(w, http.StatusBadRequest, "invalid_webhook_settings", err.Error())
 			return
 		}
-		if err := s.auth.adminStore.UpdateWebhookSettings(settings); err != nil {
+		activityID, err := s.auth.adminStore.UpdateWebhookSettingsWithActivity(settings, s.activityActorForRequest(r))
+		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "webhook_settings_update_failed", "Failed to update Webhook settings")
 			return
 		}
+		s.publishActivityID(activityID)
 		encodeJSON(w, http.StatusOK, settings)
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method is not allowed")
@@ -228,10 +230,9 @@ func (s *Server) handleAPIWebhookDeliveries(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	webhookID := strings.TrimSpace(r.PathValue("id"))
-	if _, err := s.webhookStore.Get(scope.OwnerUserID, webhookID); err != nil {
-		writeWebhookAPIError(w, err)
-		return
-	}
+	// Deliveries of a deleted Webhook stay readable for their retention
+	// window, so no live-config prerequisite here: ListDeliveries already
+	// scopes strictly to the requesting owner.
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		value, err := strconv.Atoi(raw)
@@ -315,7 +316,6 @@ func (s *Server) publishWebhookDeliveryChanged(ownerUserID string, delivery Webh
 		"webhook_id": delivery.WebhookID, "delivery_id": delivery.ID, "status": delivery.Status,
 	})
 }
-
 func writeWebhookAPIError(w http.ResponseWriter, err error) {
 	var validation *webhookValidationError
 	switch {
@@ -329,6 +329,8 @@ func writeWebhookAPIError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "webhook_limit_reached", err.Error())
 	case errors.Is(err, ErrWebhookDailyCapReached):
 		writeAPIError(w, http.StatusTooManyRequests, "webhook_daily_cap_reached", err.Error())
+	case errors.Is(err, ErrWebhookPendingFull):
+		writeAPIError(w, http.StatusTooManyRequests, "webhook_pending_full", err.Error())
 	case errors.Is(err, ErrWebhookReplayUnavailable):
 		writeAPIError(w, http.StatusConflict, "webhook_replay_unavailable", err.Error())
 	default:

@@ -1205,6 +1205,7 @@ export const zhCN = {
       activity_retention_changed: "活动保留策略已修改",
       client_auth_rate_limit_changed: "客户端认证限流已修改",
       client_auth_rate_limit_entry_cleared: "一条客户端认证限流记录已清除",
+      webhook_policy_changed: "Webhook 投递策略已修改（每日上限 {{value}}）",
       api_key_created: "API Key {{resource_name}} 已创建",
       api_key_enabled: "API Key {{resource_name}} 已启用",
       api_key_disabled: "API Key {{resource_name}} 已停用",

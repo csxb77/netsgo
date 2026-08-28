@@ -1,3 +1,5 @@
+import { createLocalId } from '@/lib/utils';
+
 export type WebhookMethod = 'GET' | 'POST';
 
 export type WebhookEventKey =
@@ -153,7 +155,7 @@ export function activityWebhookToAPI(value: ActivityWebhookConfig): WebhookConfi
 export function createEmptyWebhook(catalog: WebhookCatalog): ActivityWebhookConfig {
   const now = new Date().toISOString();
   return {
-    id: `wh_${crypto.randomUUID()}`,
+    id: `wh_${createLocalId('webhook')}`,
     revision: 0,
     name: '',
     enabled: false,
@@ -162,7 +164,7 @@ export function createEmptyWebhook(catalog: WebhookCatalog): ActivityWebhookConf
     targetIds: [],
     method: 'POST',
     url: '',
-    headers: [{ id: `header_${crypto.randomUUID()}`, key: 'Content-Type', value: 'application/json' }],
+    headers: [{ id: `header_${createLocalId('header')}`, key: 'Content-Type', value: 'application/json' }],
     body: catalog.default_body,
     events: [],
     calls24h: 0,

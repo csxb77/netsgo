@@ -81,10 +81,11 @@ func enqueueActivityWebhookDeliveriesTx(tx *sql.Tx, activityID int64, prepared p
 		if err := insertWebhookDeliveryTx(tx, prepared.scopeUserID, item.config, baseSnapshot, values,
 			WebhookOriginEvent, sql.NullInt64{Int64: activityID, Valid: true}, 3, prepared.recordedAt); err != nil {
 			var validation *webhookValidationError
-			if errors.As(err, &validation) {
+			if errors.As(err, &validation) || errors.Is(err, ErrWebhookPendingFull) {
 				// Runtime variables (for example a client display name) can
-				// render an otherwise valid template invalid. The activity
-				// event itself must still be recorded; skip only this Webhook.
+				// render an otherwise valid template invalid, and a saturated
+				// per-user pending budget must not drop the activity itself.
+				// Skip only this Webhook delivery and keep recording the event.
 				log.Printf("⚠️ Skipping Webhook delivery [webhook_id=%s activity_id=%d]: %v", item.config.ID, activityID, err)
 				continue
 			}

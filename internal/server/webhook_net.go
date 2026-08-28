@@ -38,24 +38,84 @@ func validateWebhookSettings(settings WebhookSettings) error {
 }
 
 // webhookAddressAllowed reports whether an IP may receive Webhook traffic when
-// private targets are disabled. Loopback, RFC1918, unique-local, link-local,
-// multicast, unspecified, and CGNAT (100.64.0.0/10) addresses are rejected.
+// private targets are disabled. Anything outside the routable public internet
+// — loopback, RFC1918, shared/CGNAT, link-local, multicast, unspecified,
+// benchmarking, documentation, and other IANA special-purpose ranges — is
+// rejected.
 func webhookAddressAllowed(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() || ip.IsUnspecified() {
+	if ip == nil || ip.IsUnspecified() {
 		return false
 	}
-	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+	if v4 := ip.To4(); v4 != nil {
+		for _, network := range webhookBlockedIPv4Ranges {
+			if network.Contains(v4) {
+				return false
+			}
+		}
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
 		return false
+	}
+	for _, network := range webhookBlockedIPv6Ranges {
+		if network.Contains(ip) {
+			return false
+		}
 	}
 	return true
 }
 
-// webhookHostBlocked reports whether a URL hostname resolves (or literals
-// point) exclusively or partially to non-public addresses. Hosts that cannot
-// be resolved at validation time are allowed through; the dispatcher's dial
-// guard re-checks the resolved address before connecting, which also closes
-// the DNS-rebinding window.
+var (
+	webhookBlockedIPv4Ranges = mustWebhookCIDRs(
+		"0.0.0.0/8",       // "this network"
+		"10.0.0.0/8",      // RFC1918 private
+		"100.64.0.0/10",   // CGNAT shared address space
+		"127.0.0.0/8",     // loopback
+		"169.254.0.0/16",  // link-local (incl. cloud metadata)
+		"172.16.0.0/12",   // RFC1918 private
+		"192.0.0.0/24",    // IETF protocol assignments
+		"192.0.2.0/24",    // TEST-NET-1 (documentation)
+		"192.88.99.0/24",  // 6to4 relay anycast (deprecated)
+		"192.168.0.0/16",  // RFC1918 private
+		"198.18.0.0/15",   // benchmarking
+		"198.51.100.0/24", // TEST-NET-2 (documentation)
+		"203.0.113.0/24",  // TEST-NET-3 (documentation)
+		"240.0.0.0/4",     // reserved (incl. 255.255.255.255 broadcast)
+	)
+	webhookBlockedIPv6Ranges = mustWebhookCIDRs(
+		"::/128",         // unspecified
+		"::1/128",        // loopback
+		"64:ff9b::/96",   // well-known NAT64 prefix
+		"64:ff9b:1::/48", // local-use NAT64
+		"100::/64",       // discard-only
+		"2001:db8::/32",  // documentation
+		"2002::/16",      // 6to4, teredo-adjacent
+		"fc00::/7",       // unique-local
+		"fe80::/10",      // link-local
+		"ff00::/8",       // multicast
+	)
+)
+
+func mustWebhookCIDRs(values ...string) []*net.IPNet {
+	result := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			panic("webhook policy: invalid blocked CIDR " + value)
+		}
+		result = append(result, network)
+	}
+	return result
+}
+
+func urlHostname(host string) string {
+	parsed, err := url.Parse("://" + host)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
 func webhookHostBlocked(host string) bool {
 	host = urlHostname(host)
 	if host == "" {
@@ -74,14 +134,6 @@ func webhookHostBlocked(host string) bool {
 		}
 	}
 	return false
-}
-
-func urlHostname(host string) string {
-	parsed, err := url.Parse("://" + host)
-	if err != nil {
-		return ""
-	}
-	return parsed.Hostname()
 }
 
 // validWebhookHeaderValue mirrors net/http's header-value rules closely enough

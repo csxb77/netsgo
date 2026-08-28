@@ -1270,6 +1270,8 @@ export const enUS = {
         "Client authentication rate limit changed",
       client_auth_rate_limit_entry_cleared:
         "A client authentication rate-limit entry was cleared",
+      webhook_policy_changed:
+        "Webhook delivery policy changed (daily cap {{value}})",
       api_key_created: "API key {{resource_name}} was created",
       api_key_enabled: "API key {{resource_name}} was enabled",
       api_key_disabled: "API key {{resource_name}} was disabled",
