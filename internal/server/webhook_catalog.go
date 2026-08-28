@@ -246,9 +246,10 @@ func webhookEventSnapshotFromPrepared(activityID int64, prepared preparedActivit
 			name = subject.ClientID
 		}
 		status := ""
-		if eventType == "client.online" {
+		switch eventType {
+		case "client.online":
 			status = "online"
-		} else if eventType == "client.offline" {
+		case "client.offline":
 			status = "offline"
 		}
 		snapshot.Clients = append(snapshot.Clients, webhookClientSnapshot{ID: subject.ClientID, Name: name, Hostname: subject.Hostname, Relation: subject.Relation, Status: status})

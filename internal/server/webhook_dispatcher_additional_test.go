@@ -116,9 +116,10 @@ func TestWebhookRetryExhaustionPersistsThreeAttemptsAndFinalFailure(t *testing.T
 		if err != nil || status != wantStatus {
 			t.Fatalf("complete attempt %d = %q, %v, want %q", index+1, status, err, wantStatus)
 		}
-		if index == 0 {
+		switch index {
+		case 0:
 			clock = completedAt.Add(5 * time.Second)
-		} else if index == 1 {
+		case 1:
 			clock = completedAt.Add(30 * time.Second)
 		}
 	}

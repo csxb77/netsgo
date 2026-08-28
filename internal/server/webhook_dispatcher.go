@@ -308,7 +308,7 @@ func (s *WebhookStore) DueOwners(now time.Time, limit int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	owners := []string{}
 	for rows.Next() {
 		var owner string
@@ -450,7 +450,7 @@ func (s *WebhookStore) CompleteAttempt(delivery webhookStoredDelivery, result we
 	}
 	changed, _ := update.RowsAffected()
 	if changed != 1 {
-		return "", errors.New("Webhook delivery attempt is no longer pending")
+		return "", errors.New("webhook delivery attempt is no longer pending")
 	}
 	finalStatus := WebhookDeliveryFailed
 	nextAttemptAt := now

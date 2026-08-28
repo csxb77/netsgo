@@ -13,11 +13,11 @@ import (
 )
 
 var (
-	ErrWebhookNotFound          = errors.New("Webhook not found")
-	ErrWebhookRevisionConflict  = errors.New("Webhook revision conflict")
-	ErrWebhookLimitReached      = errors.New("Webhook limit reached")
-	ErrWebhookDeliveryNotFound  = errors.New("Webhook delivery not found")
-	ErrWebhookReplayUnavailable = errors.New("Webhook delivery cannot be replayed")
+	ErrWebhookNotFound          = errors.New("webhook not found")
+	ErrWebhookRevisionConflict  = errors.New("webhook revision conflict")
+	ErrWebhookLimitReached      = errors.New("webhook limit reached")
+	ErrWebhookDeliveryNotFound  = errors.New("webhook delivery not found")
+	ErrWebhookReplayUnavailable = errors.New("webhook delivery cannot be replayed")
 )
 
 type WebhookStore struct {
@@ -101,7 +101,7 @@ type webhookStoredDelivery struct {
 
 func (s *WebhookStore) List(ownerUserID string) ([]ActivityWebhook, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("Webhook store is not initialized")
+		return nil, errors.New("webhook store is not initialized")
 	}
 	rows, err := s.db.Query(webhookListQuery+` WHERE w.owner_user_id = ? ORDER BY w.updated_at_ns DESC, w.id DESC`, s.listQueryCutoff(), ownerUserID)
 	if err != nil {
@@ -121,7 +121,7 @@ func (s *WebhookStore) List(ownerUserID string) ([]ActivityWebhook, error) {
 
 func (s *WebhookStore) Get(ownerUserID, id string) (ActivityWebhook, error) {
 	if s == nil || s.db == nil {
-		return ActivityWebhook{}, errors.New("Webhook store is not initialized")
+		return ActivityWebhook{}, errors.New("webhook store is not initialized")
 	}
 	item, err := scanActivityWebhook(s.listRow(ownerUserID, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -359,7 +359,7 @@ func queryStringColumn(queryer dbQuerier, query string, args ...any) ([]string, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	values := []string{}
 	for rows.Next() {
 		var value string
@@ -399,7 +399,7 @@ func scanActivityWebhook(scanner dbScanner) (ActivityWebhook, error) {
 }
 
 func scanActivityWebhookRows(rows *sql.Rows) ([]ActivityWebhook, error) {
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := []ActivityWebhook{}
 	for rows.Next() {
 		item, err := scanActivityWebhook(rows)
@@ -730,7 +730,7 @@ func scanWebhookDelivery(scanner dbScanner) (webhookStoredDelivery, error) {
 }
 
 func scanWebhookDeliveryRows(rows *sql.Rows) ([]webhookStoredDelivery, error) {
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := []webhookStoredDelivery{}
 	for rows.Next() {
 		item, err := scanWebhookDelivery(rows)
@@ -748,7 +748,7 @@ func (s *WebhookStore) loadDeliveryAttempts(stored *webhookStoredDelivery) error
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	stored.Attempts = []WebhookDeliveryAttempt{}
 	for rows.Next() {
 		var attempt WebhookDeliveryAttempt
