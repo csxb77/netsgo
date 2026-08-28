@@ -18,11 +18,44 @@ var (
 	ErrWebhookLimitReached      = errors.New("webhook limit reached")
 	ErrWebhookDeliveryNotFound  = errors.New("webhook delivery not found")
 	ErrWebhookReplayUnavailable = errors.New("webhook delivery cannot be replayed")
+	ErrWebhookDailyCapReached   = errors.New("webhook daily delivery cap reached")
 )
 
 type WebhookStore struct {
-	db  *sql.DB
-	now func() time.Time
+	db       *sql.DB
+	now      func() time.Time
+	settings func() WebhookSettings
+}
+
+// currentSettings resolves the effective outbound policy. A nil or
+// non-positive loader falls back to the safe defaults.
+func (s *WebhookStore) currentSettings() WebhookSettings {
+	if s.settings != nil {
+		if settings := s.settings(); settings.DailyDeliveryCap > 0 {
+			return settings
+		}
+	}
+	return defaultWebhookSettings()
+}
+
+// ensureDailyCapTx rejects user-initiated (test/replay) deliveries once the
+// owner has enqueued cap deliveries within the last 24 hours. The cap must be
+// resolved before the transaction opens: the store shares a single pooled
+// connection, so reading settings inside the transaction would self-deadlock.
+func ensureDailyCapTx(tx *sql.Tx, ownerUserID string, now time.Time, cap int) error {
+	if cap <= 0 {
+		return nil
+	}
+	var recent int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM activity_webhook_deliveries
+		WHERE owner_user_id = ? AND origin IN ('test', 'replay') AND created_at_ns >= ?`,
+		ownerUserID, now.Add(-24*time.Hour).UnixNano()).Scan(&recent); err != nil {
+		return err
+	}
+	if recent >= cap {
+		return fmt.Errorf("%w: limit is %d per day", ErrWebhookDailyCapReached, cap)
+	}
+	return nil
 }
 
 func newWebhookStoreWithDB(db *sql.DB) *WebhookStore {
@@ -157,7 +190,7 @@ func (s *WebhookStore) listRow(ownerUserID, id string) *sql.Row {
 func (s *WebhookStore) Create(ownerUserID string, raw WebhookConfigInput) (ActivityWebhook, error) {
 	input := normalizeWebhookInput(raw)
 	catalog := activityWebhookCatalog()
-	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables); err != nil {
+	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables, s.currentSettings().AllowPrivateTargets); err != nil {
 		return ActivityWebhook{}, err
 	}
 	now := s.now().UTC()
@@ -209,7 +242,7 @@ func (s *WebhookStore) Update(ownerUserID, id string, raw WebhookConfigInput) (A
 		return ActivityWebhook{}, ErrWebhookRevisionConflict
 	}
 	catalog := activityWebhookCatalog()
-	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables); err != nil {
+	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables, s.currentSettings().AllowPrivateTargets); err != nil {
 		return ActivityWebhook{}, err
 	}
 	now := s.now().UTC()
@@ -426,7 +459,7 @@ func nullableFormattedUnixNano(value sql.NullInt64) *string {
 func (s *WebhookStore) Preview(raw WebhookConfigInput, event string) (WebhookPreview, error) {
 	input := normalizeWebhookInput(raw)
 	catalog := activityWebhookCatalog()
-	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables); err != nil {
+	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables, s.currentSettings().AllowPrivateTargets); err != nil {
 		return WebhookPreview{}, err
 	}
 	if !slices.Contains(input.Events, event) {
@@ -444,12 +477,14 @@ func (s *WebhookStore) Preview(raw WebhookConfigInput, event string) (WebhookPre
 func (s *WebhookStore) EnqueueTest(ownerUserID string, raw WebhookConfigInput, event string) (WebhookDelivery, error) {
 	input := normalizeWebhookInput(raw)
 	catalog := activityWebhookCatalog()
-	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables); err != nil {
+	if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables, s.currentSettings().AllowPrivateTargets); err != nil {
 		return WebhookDelivery{}, err
 	}
 	if !slices.Contains(input.Events, event) {
 		return WebhookDelivery{}, invalidWebhook("event", "event_not_selected", "test event is not selected")
 	}
+	createdAt := s.now().UTC()
+	settings := s.currentSettings()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return WebhookDelivery{}, err
@@ -459,13 +494,15 @@ func (s *WebhookStore) EnqueueTest(ownerUserID string, raw WebhookConfigInput, e
 	if err := validateWebhookTargetsTx(tx, ownerUserID, input.TargetKind, input.TargetMode, input.TargetIDs); err != nil {
 		return WebhookDelivery{}, err
 	}
+	if err := ensureDailyCapTx(tx, ownerUserID, createdAt, settings.DailyDeliveryCap); err != nil {
+		return WebhookDelivery{}, err
+	}
 	snapshot := sampleWebhookEvent(event)
 	if input.TargetMode == WebhookTargetSelected {
 		snapshot.MatchedTargetIDs = slices.Clone(input.TargetIDs)
 	}
 	deliveryID := "dlv_" + generateUUID()
 	values := snapshot.values(deliveryID, input.ID, input.Name)
-	createdAt := s.now().UTC()
 	if err := insertWebhookDeliveryTx(tx, ownerUserID, input.snapshot(max(input.ExpectedRevision, 0)), snapshot, values, WebhookOriginTest, sql.NullInt64{}, 1, createdAt); err != nil {
 		return WebhookDelivery{}, err
 	}
@@ -492,15 +529,22 @@ func (s *WebhookStore) Replay(ownerUserID, deliveryID string) (WebhookDelivery, 
 	}
 	snapshot := original.EventSnapshot
 	snapshot.MatchedTargetIDs = matchedWebhookTargetIDs(current.TargetKind, current.TargetMode, current.TargetIDs, snapshot)
+	if len(snapshot.MatchedTargetIDs) == 0 {
+		return WebhookDelivery{}, ErrWebhookReplayUnavailable
+	}
 	newID := "dlv_" + generateUUID()
 	values := snapshot.values(newID, current.ID, current.Name)
 	now := s.now().UTC()
+	settings := s.currentSettings()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return WebhookDelivery{}, err
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
+	if err := ensureDailyCapTx(tx, ownerUserID, now, settings.DailyDeliveryCap); err != nil {
+		return WebhookDelivery{}, err
+	}
 	if err := insertWebhookDeliveryTx(tx, ownerUserID, current.snapshot(), snapshot, values, WebhookOriginReplay, original.SourceEventID, 3, now); err != nil {
 		return WebhookDelivery{}, err
 	}
@@ -515,6 +559,11 @@ func insertWebhookDeliveryTx(tx *sql.Tx, ownerUserID string, config webhookConfi
 	rendered, err := renderWebhookRequest(config, values, 1)
 	if err != nil {
 		return err
+	}
+	for key, value := range rendered.Headers {
+		if !validWebhookHeaderValue(value) {
+			return invalidWebhook("headers", "invalid_header_value", "Webhook header "+key+" renders to an invalid value")
+		}
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {

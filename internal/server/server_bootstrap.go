@@ -30,6 +30,7 @@ func (s *Server) initStore() error {
 	s.serverDB = db
 	s.activityStore = newActivityStoreWithDB(path, db, false)
 	s.webhookStore = newWebhookStoreWithDB(db)
+	s.webhookStore.settings = s.webhookSettingsLoader()
 
 	store, err := newTunnelStoreWithDB(path, db, false)
 	if err != nil {

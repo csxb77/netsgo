@@ -21,6 +21,7 @@ func (s *Server) ensureSharedStoreReferences() {
 	}
 	if s.webhookStore == nil && s.serverDB != nil {
 		s.webhookStore = newWebhookStoreWithDB(s.serverDB)
+		s.webhookStore.settings = s.webhookSettingsLoader()
 	}
 	if s.store != nil && s.store.activityStore == nil {
 		s.store.activityStore = s.activityStore

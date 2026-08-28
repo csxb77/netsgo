@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,9 +52,49 @@ func newWebhookDispatcher(store *WebhookStore, events *EventBus) *webhookDispatc
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
+			Transport: &http.Transport{DialContext: guardedWebhookDialContext(store)},
 		},
 		now: time.Now, wake: make(chan struct{}, 1), stop: make(chan struct{}),
 		requestCtx: ctx, cancel: cancel,
+	}
+}
+
+// guardedWebhookDialContext resolves the target before connecting and refuses
+// non-public addresses while private targets are disallowed. Dialing the
+// validated IP directly (instead of the hostname) closes the DNS-rebinding
+// window between validation and connection.
+func guardedWebhookDialContext(store *WebhookStore) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	resolver := &net.Resolver{}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if store == nil || store.currentSettings().AllowPrivateTargets {
+			return dialer.DialContext(ctx, network, addr)
+		}
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		dialIPs := []net.IP{}
+		if ip := net.ParseIP(host); ip != nil {
+			dialIPs = append(dialIPs, ip)
+		} else {
+			resolved, err := resolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range resolved {
+				dialIPs = append(dialIPs, item.IP)
+			}
+		}
+		if len(dialIPs) == 0 {
+			return nil, fmt.Errorf("webhook target %q did not resolve to any address", host)
+		}
+		for _, ip := range dialIPs {
+			if !webhookAddressAllowed(ip) {
+				return nil, fmt.Errorf("webhook target %q resolves to a private address", host)
+			}
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(dialIPs[0].String(), port))
 	}
 }
 
@@ -191,14 +232,23 @@ func (d *webhookDispatcher) execute(delivery webhookStoredDelivery) {
 	if err == nil {
 		response, err = d.client.Do(request)
 	}
-	completedAt := d.now().UTC()
-	result := webhookAttemptResult{CompletedAt: completedAt, Duration: completedAt.Sub(startedAt), Err: err}
+	result := webhookAttemptResult{Err: err}
 	if response != nil {
 		result.StatusCode = response.StatusCode
 		result.Headers = captureWebhookHeaders(response.Header, webhookResponseBodyMaxBytes)
-		result.RetryAfter, result.RetryAfterSet = parseWebhookRetryAfter(response.Header.Get("Retry-After"), completedAt)
-		result.Body, result.BodyTruncated = readWebhookResponseBody(response.Body)
+		body, truncated, readErr := readWebhookResponseBody(response.Body)
 		_ = response.Body.Close()
+		result.Body, result.BodyTruncated = body, truncated
+		if err == nil && readErr != nil {
+			err = fmt.Errorf("read response body: %w", readErr)
+			result.Err = err
+		}
+	}
+	completedAt := d.now().UTC()
+	result.CompletedAt = completedAt
+	result.Duration = completedAt.Sub(startedAt)
+	if response != nil {
+		result.RetryAfter, result.RetryAfterSet = parseWebhookRetryAfter(response.Header.Get("Retry-After"), completedAt)
 	}
 	status, err := d.store.CompleteAttempt(delivery, result)
 	if err != nil {
@@ -227,18 +277,18 @@ type webhookAttemptResult struct {
 	Err           error
 }
 
-func readWebhookResponseBody(body io.Reader) (string, bool) {
+func readWebhookResponseBody(body io.Reader) (string, bool, error) {
 	if body == nil {
-		return "", false
+		return "", false, nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(body, webhookResponseBodyMaxBytes+1))
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	if len(raw) > webhookResponseBodyMaxBytes {
-		return string(raw[:webhookResponseBodyMaxBytes]), true
+		return string(raw[:webhookResponseBodyMaxBytes]), true, nil
 	}
-	return string(raw), false
+	return string(raw), false, nil
 }
 
 func captureWebhookHeaders(headers http.Header, maxBytes int) map[string]string {

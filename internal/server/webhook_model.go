@@ -210,7 +210,7 @@ func uniqueNonEmptyStrings(values []string) []string {
 	return result
 }
 
-func validateWebhookInput(input WebhookConfigInput, fixtures map[string]map[string]any, variables []WebhookVariable) error {
+func validateWebhookInput(input WebhookConfigInput, fixtures map[string]map[string]any, variables []WebhookVariable, allowPrivateTargets bool) error {
 	if !webhookIDPattern.MatchString(input.ID) {
 		return invalidWebhook("id", "invalid_id", "Webhook id is invalid")
 	}
@@ -219,6 +219,9 @@ func validateWebhookInput(input WebhookConfigInput, fixtures map[string]map[stri
 	}
 	if utf8.RuneCountInString(input.Name) > 120 {
 		return invalidWebhook("name", "too_long", "Webhook name is too long")
+	}
+	if !validWebhookHeaderValue(input.Name) {
+		return invalidWebhook("name", "invalid_name", "Webhook name must not contain control characters")
 	}
 	if input.TargetKind != WebhookTargetClient && input.TargetKind != WebhookTargetTunnel {
 		return invalidWebhook("target_kind", "invalid_target_kind", "Webhook target kind is invalid")
@@ -323,6 +326,14 @@ func validateWebhookInput(input WebhookConfigInput, fixtures map[string]map[stri
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return invalidWebhook("url", "invalid_url_scheme", "Webhook URL must use HTTP or HTTPS")
+		}
+		if !allowPrivateTargets && webhookHostBlocked(parsed.Hostname()) {
+			return invalidWebhook("url", "url_target_not_allowed", "Webhook URL targets a private address; allow private targets in server settings first")
+		}
+		for key, value := range rendered.Headers {
+			if !validWebhookHeaderValue(value) {
+				return invalidWebhook("headers", "invalid_header_value", "Webhook header "+key+" renders to an invalid value")
+			}
 		}
 		if rendered.size() > webhookRenderedRequestMax {
 			return invalidWebhook("body", "rendered_request_too_large", "rendered Webhook request is too large")

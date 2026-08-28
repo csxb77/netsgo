@@ -483,9 +483,10 @@ export const webhookApi = {
     return webhookInvocationFromAPI(delivery);
   },
 
-  async deliveries(webhookId: string, status?: WebhookInvocationStatus) {
+  async deliveries(webhookId: string, status?: WebhookInvocationStatus, cursor?: string) {
     const params = new URLSearchParams({ limit: '100' });
     if (status) params.set('status', status);
+    if (cursor) params.set('cursor', cursor);
     const page = await api.get<WebhookDeliveryPageAPI>(`/api/webhooks/${encodePath(webhookId)}/deliveries?${params.toString()}`);
     return { ...page, items: page.items.map(webhookInvocationFromAPI) };
   },

@@ -60,7 +60,7 @@ func TestNormalizeWebhookInputTrimsAndDeduplicates(t *testing.T) {
 func TestValidateWebhookInputAcceptsSupportedGETAndPOSTConfigurations(t *testing.T) {
 	catalog := activityWebhookCatalog()
 	post := normalizeWebhookInput(testWebhookInput("wh_valid_post"))
-	if err := validateWebhookInput(post, catalog.Fixtures, catalog.Variables); err != nil {
+	if err := validateWebhookInput(post, catalog.Fixtures, catalog.Variables, true); err != nil {
 		t.Fatalf("valid POST configuration: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestValidateWebhookInputAcceptsSupportedGETAndPOSTConfigurations(t *testing
 	get.Method = WebhookMethodGET
 	get.URL = "https://example.test/hook?event={{event.type}}&client={{client.id}}"
 	get.Body = "not-json-is-ignored-for-get"
-	if err := validateWebhookInput(get, catalog.Fixtures, catalog.Variables); err != nil {
+	if err := validateWebhookInput(get, catalog.Fixtures, catalog.Variables, true); err != nil {
 		t.Fatalf("valid GET configuration: %v", err)
 	}
 }
@@ -149,7 +149,7 @@ func TestValidateWebhookInputRejectsInvalidConfigurationMatrix(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := cloneWebhookInput(base)
 			test.mutate(&input)
-			err := validateWebhookInput(normalizeWebhookInput(input), catalog.Fixtures, catalog.Variables)
+			err := validateWebhookInput(normalizeWebhookInput(input), catalog.Fixtures, catalog.Variables, true)
 			assertWebhookValidationError(t, err, test.field, test.code)
 		})
 	}
@@ -164,12 +164,12 @@ func TestValidateWebhookInputRejectsMissingFixtureAndRenderedSize(t *testing.T) 
 		fixtures[key] = value
 	}
 	delete(fixtures, "client.online")
-	assertWebhookValidationError(t, validateWebhookInput(base, fixtures, catalog.Variables), "events", "missing_fixture")
+	assertWebhookValidationError(t, validateWebhookInput(base, fixtures, catalog.Variables, true), "events", "missing_fixture")
 
 	fixtures = make(map[string]map[string]any, len(catalog.Fixtures))
 	for key, value := range catalog.Fixtures {
 		fixtures[key] = cloneWebhookValues(value)
 	}
 	fixtures["client.online"]["event.data"] = map[string]any{"payload": strings.Repeat("x", webhookRenderedRequestMax)}
-	assertWebhookValidationError(t, validateWebhookInput(base, fixtures, catalog.Variables), "body", "invalid_template")
+	assertWebhookValidationError(t, validateWebhookInput(base, fixtures, catalog.Variables, true), "body", "invalid_template")
 }

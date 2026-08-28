@@ -7,6 +7,53 @@ import (
 	"strings"
 )
 
+func (s *Server) handleAPIAdminWebhookSettings(w http.ResponseWriter, r *http.Request) {
+	s.ensureSharedStoreReferences()
+	if s.auth == nil || s.auth.adminStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "webhook_settings_unavailable", "Webhook settings are unavailable")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.auth.adminStore.GetWebhookSettings()
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "webhook_settings_read_failed", "Failed to read Webhook settings")
+			return
+		}
+		encodeJSON(w, http.StatusOK, settings)
+	case http.MethodPut:
+		var settings WebhookSettings
+		if err := decodeJSONRequestBody(r, &settings); err != nil {
+			writeJSONRequestDecodeError(w, err)
+			return
+		}
+		if err := validateWebhookSettings(settings); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_webhook_settings", err.Error())
+			return
+		}
+		if err := s.auth.adminStore.UpdateWebhookSettings(settings); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "webhook_settings_update_failed", "Failed to update Webhook settings")
+			return
+		}
+		encodeJSON(w, http.StatusOK, settings)
+	default:
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method is not allowed")
+	}
+}
+
+// webhookSettingsLoader keeps the outbound policy live: the store re-reads the
+// persisted settings on each use, so admin changes apply without restart.
+func (s *Server) webhookSettingsLoader() func() WebhookSettings {
+	return func() WebhookSettings {
+		if s.auth != nil && s.auth.adminStore != nil {
+			if settings, err := s.auth.adminStore.GetWebhookSettings(); err == nil {
+				return settings
+			}
+		}
+		return defaultWebhookSettings()
+	}
+}
+
 type webhookPreviewRequest struct {
 	Config WebhookConfigInput `json:"config"`
 	Event  string             `json:"event"`
@@ -280,6 +327,8 @@ func writeWebhookAPIError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "webhook_revision_conflict", err.Error())
 	case errors.Is(err, ErrWebhookLimitReached):
 		writeAPIError(w, http.StatusConflict, "webhook_limit_reached", err.Error())
+	case errors.Is(err, ErrWebhookDailyCapReached):
+		writeAPIError(w, http.StatusTooManyRequests, "webhook_daily_cap_reached", err.Error())
 	case errors.Is(err, ErrWebhookReplayUnavailable):
 		writeAPIError(w, http.StatusConflict, "webhook_replay_unavailable", err.Error())
 	default:

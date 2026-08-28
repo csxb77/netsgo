@@ -26,7 +26,11 @@ func newWebhookStoreFixture(t *testing.T) (*AdminStore, *WebhookStore, User) {
 	if err != nil {
 		t.Fatalf("load initialized user: %v", err)
 	}
-	return adminStore, newWebhookStoreWithDB(adminStore.db), user
+	webhookStore := newWebhookStoreWithDB(adminStore.db)
+	webhookStore.settings = func() WebhookSettings {
+		return WebhookSettings{AllowPrivateTargets: true, DailyDeliveryCap: defaultWebhookDailyDeliveryCap}
+	}
+	return adminStore, webhookStore, user
 }
 
 func TestActivityAppendCreatesOneDurableWebhookDelivery(t *testing.T) {

@@ -104,7 +104,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { ToggleGroup, ToggleGroupItem } from '@/components/custom/toggle-group';
 import { cn } from '@/lib/utils';
 import { WebhookJsonEditor, type WebhookJsonEditorHandle } from '@/components/custom/webhooks/WebhookJsonEditor';
 import {
@@ -231,8 +231,12 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
   const saved = draft ? webhooks.find((item) => item.id === draft.id) ?? null : null;
   const isNew = Boolean(draft && !saved);
   const dirty = !sameWebhook(draft, saved);
-  const { data: deliveryPage } = useWebhookDeliveries(saved?.id ?? null);
-  const invocations = deliveryPage?.items ?? [];
+  const [deliveryStatus, setDeliveryStatus] = useState<'all' | WebhookInvocationStatus>('all');
+  const deliveriesQuery = useWebhookDeliveries(saved?.id ?? null, deliveryStatus === 'all' ? undefined : deliveryStatus);
+  const invocations = useMemo(
+    () => deliveriesQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [deliveriesQuery.data],
+  );
   const clientTargets = useMemo<WebhookTargetOption[]>(() => clients.map((client) => {
     const name = client.display_name?.trim() || client.info.hostname || client.id;
     return {
@@ -544,6 +548,11 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
                       <WebhookDeliveryLog
                         webhookId={draft.id}
                         invocations={invocations}
+                        status={deliveryStatus}
+                        onStatusChange={setDeliveryStatus}
+                        hasMore={Boolean(deliveriesQuery.hasNextPage)}
+                        loadingMore={deliveriesQuery.isFetchingNextPage}
+                        onLoadMore={() => void deliveriesQuery.fetchNextPage()}
                         onReplay={replayInvocation}
                       />
                     </TabsContent>
@@ -1376,20 +1385,24 @@ function TestWebhookDialog({ open, webhook, catalog, onOpenChange }: {
   );
 }
 
-export function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
+export function WebhookDeliveryLog({ webhookId, invocations, status, onStatusChange, hasMore, loadingMore, onLoadMore, onReplay }: {
   webhookId: string;
   invocations: WebhookInvocation[];
+  status: 'all' | WebhookInvocationStatus;
+  onStatusChange: (status: 'all' | WebhookInvocationStatus) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
   onReplay: (invocation: WebhookInvocation) => void;
 }) {
   const { t, i18n } = useTranslation();
-  const [selected, setSelected] = useState<WebhookInvocation | null>(null);
-  const [status, setStatus] = useState<'all' | WebhookInvocationStatus>('all');
-  const filtered = invocations.filter((item) => item.webhookId === webhookId && (status === 'all' || item.status === status));
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const filtered = invocations.filter((item) => item.webhookId === webhookId);
 
   return (
     <>
       <div className="mb-3 flex justify-end">
-        <Select value={status} onValueChange={(value) => setStatus(value as typeof status)}>
+        <Select value={status} onValueChange={(value) => onStatusChange(value as typeof status)}>
           <SelectTrigger size="sm" className="w-full sm:w-40"><SelectValue /></SelectTrigger>
           <SelectContent><SelectGroup>
             {(['all', 'queued', 'retrying', 'success', 'failed', 'canceled'] as const).map((value) => <SelectItem key={value} value={value}>{t(`webhooks.deliveries.filter.${value}`)}</SelectItem>)}
@@ -1403,7 +1416,7 @@ export function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
               <button
                 key={invocation.id}
                 type="button"
-                onClick={() => setSelected(invocation)}
+                onClick={() => setSelectedId(invocation.id)}
                 className="rounded-lg border bg-background p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 aria-label={`${t(eventLabelKey(invocation.event))} ${t('webhooks.deliveries.details')}`}
               >
@@ -1435,12 +1448,17 @@ export function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
                     <TableCell className="font-mono text-xs">{invocation.statusCode ?? '—'}</TableCell>
                     <TableCell className="font-mono text-xs">{invocation.durationMs === null ? '—' : `${invocation.durationMs} ms`}</TableCell>
                     <TableCell className="text-xs">{formatShortTime(invocation.occurredAt, i18n.resolvedLanguage ?? 'zh-CN')}</TableCell>
-                    <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => setSelected(invocation)}>{t('webhooks.deliveries.details')}</Button></TableCell>
+                    <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => setSelectedId(invocation.id)}>{t('webhooks.deliveries.details')}</Button></TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </div>
+          {hasMore ? (
+            <div className="mt-3 flex justify-center">
+              <Button variant="outline" size="sm" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? t('webhooks.deliveries.loadingMore') : t('webhooks.deliveries.loadMore')}</Button>
+            </div>
+          ) : null}
         </>
       ) : (
         <Empty className="min-h-56 border border-dashed">
@@ -1451,23 +1469,28 @@ export function WebhookDeliveryLog({ webhookId, invocations, onReplay }: {
           </EmptyHeader>
         </Empty>
       )}
-      <DeliveryDialog invocation={selected} onOpenChange={(nextOpen) => !nextOpen && setSelected(null)} onReplay={onReplay} />
+      <DeliveryDialog invocationId={selectedId} initial={invocations.find((item) => item.id === selectedId) ?? null} onOpenChange={(nextOpen) => !nextOpen && setSelectedId(null)} onReplay={onReplay} />
     </>
   );
 }
 
-function DeliveryDialog({ invocation, onOpenChange, onReplay }: {
-  invocation: WebhookInvocation | null;
+function DeliveryDialog({ invocationId, initial, onOpenChange, onReplay }: {
+  invocationId: string | null;
+  initial: WebhookInvocation | null;
   onOpenChange: (open: boolean) => void;
   onReplay: (invocation: WebhookInvocation) => void;
 }) {
   const { t } = useTranslation();
   const [replayOpen, setReplayOpen] = useState(false);
+  // The live query keeps an open dialog in sync while the delivery is still
+  // queued or retrying; `initial` covers the moment before the first fetch.
+  const { data: live } = useWebhookDelivery(invocationId);
+  const invocation = live ?? initial;
   const requestHeaders = invocation ? JSON.stringify(invocation.requestHeaders, null, 2) : '';
   const responseHeaders = invocation ? JSON.stringify(invocation.responseHeaders, null, 2) : '';
   return (
     <>
-      <Dialog open={Boolean(invocation)} onOpenChange={onOpenChange}>
+      <Dialog open={Boolean(invocationId)} onOpenChange={onOpenChange}>
         <DialogContent className="max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
           <DialogHeader><DialogTitle>{t('webhooks.detail.title')}</DialogTitle><DialogDescription className="sr-only">{t('webhooks.detail.description')}</DialogDescription></DialogHeader>
           {invocation ? (

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -30,12 +31,26 @@ function invocation(overrides: Partial<WebhookInvocation> = {}): WebhookInvocati
     ...overrides,
   };
 }
-
-function renderLog(webhookId: string, invocations: WebhookInvocation[]) {
+function renderLog(webhookId: string, invocations: WebhookInvocation[], overrides: Partial<Parameters<typeof WebhookDeliveryLog>[0]> = {}) {
+  const client = new QueryClient();
   return renderToStaticMarkup(createElement(
-    TooltipProvider,
-    null,
-    createElement(WebhookDeliveryLog, { webhookId, invocations, onReplay: () => undefined }),
+    QueryClientProvider,
+    { client },
+    createElement(
+      TooltipProvider,
+      null,
+      createElement(WebhookDeliveryLog, {
+        webhookId,
+        invocations,
+        status: 'all',
+        onStatusChange: () => undefined,
+        hasMore: false,
+        loadingMore: false,
+        onLoadMore: () => undefined,
+        onReplay: () => undefined,
+        ...overrides,
+      }),
+    ),
   ));
 }
 

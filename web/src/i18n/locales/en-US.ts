@@ -476,6 +476,8 @@ export const enUS = {
       attempt: "Attempt",
       time: "Time",
       details: "Details",
+      loadMore: "Load more deliveries",
+      loadingMore: "Loading…",
       attemptValue: "{{count}} / 3",
       empty: "No deliveries for this webhook yet.",
       emptyDescription: "Event deliveries, test calls, and manual replays will appear here.",
@@ -921,6 +923,18 @@ export const enUS = {
     clientAuthRateLimitInvalid: "Enter a whole number from 1 to 1000.",
     clientAuthRateLimitSettingsSaved:
       "Client authentication rate-limit settings saved.",
+    webhookDeliverySettings: "Webhook delivery policy",
+    webhookDeliverySettingsDescription:
+      "Control where activity Webhooks may deliver and how many manual deliveries each user may enqueue. Private targets are blocked by default.",
+    webhookAllowPrivateTargets: "Allow Webhooks to reach private addresses",
+    webhookAllowPrivateTargetsHelp:
+      "When disabled, Webhook URLs pointing at loopback, LAN, or link-local addresses are rejected at save time and blocked at dial time.",
+    webhookPrivateTargetsAllowed: "Private targets allowed",
+    webhookDailyCap: "Daily manual delivery cap per user",
+    webhookDailyCapHelp:
+      "Test and replay requests per user within 24 hours, between 1 and 10000. Event-driven deliveries are never counted.",
+    webhookDailyCapInvalid: "Enter a whole number from 1 to 10000.",
+    webhookSettingsSaved: "Webhook delivery settings saved.",
     clientAuthRateLimits: "Client auth limits",
     clientAuthRateLimitsDescription:
       "View IP rate-limit records for control-channel authentication. Deleting a record resets authentication counting for that IP. Only records in the current server process are shown.",

@@ -33,6 +33,15 @@ test('user can create, test-deliver, inspect, and delete an activity Webhook @we
     page.setDefaultTimeout(15_000);
     page.setDefaultNavigationTimeout(20_000);
     await login(page);
+    const policy = await page.request.get(e2eURL('/api/admin/settings/webhooks'));
+    if (policy.ok()) {
+      const enable = await page.request.put(e2eURL('/api/admin/settings/webhooks'), {
+        data: { allow_private_targets: true, daily_delivery_cap: 50 },
+      });
+      if (!enable.ok()) {
+        throw new Error(`enable private webhook targets failed: ${enable.status()} ${await enable.text()}`);
+      }
+    }
     await page.goto(e2eURL('/#/dashboard/activity'));
     await expect(page.getByRole('heading', { name: 'Activity timeline' })).toBeVisible();
     await page.getByRole('button', { name: /My webhooks/ }).click();

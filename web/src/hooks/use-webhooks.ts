@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { QueryClient, UseMutationOptions } from '@tanstack/react-query';
 
 import { webhookApi } from '@/lib/api';
@@ -98,16 +98,19 @@ export function useDeleteWebhook() {
 }
 
 export function useWebhookDeliveries(webhookId: string | null, status?: WebhookInvocationStatus) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: webhookDeliveriesQueryKey(webhookId ?? 'none', status),
     enabled: Boolean(webhookId),
-    queryFn: () => {
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => {
       if (!webhookId) throw new Error('webhook id is required');
-      return webhookApi.deliveries(webhookId, status);
+      return webhookApi.deliveries(webhookId, status, pageParam);
     },
-    refetchInterval: (query) => query.state.data?.items.some((item) => (
-      item.status === 'queued' || item.status === 'retrying'
-    )) ? 1500 : false,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
+    refetchInterval: (query) => {
+      const items = query.state.data?.pages.flatMap((page) => page.items) ?? [];
+      return items.some((item) => item.status === 'queued' || item.status === 'retrying') ? 1500 : false;
+    },
   });
 }
 

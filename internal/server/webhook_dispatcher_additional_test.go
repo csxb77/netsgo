@@ -182,15 +182,18 @@ func TestWebhookRetryAndRetryAfterHelpers(t *testing.T) {
 }
 
 func TestWebhookResponseCaptureBoundsBodyAndHeaders(t *testing.T) {
-	if body, truncated := readWebhookResponseBody(nil); body != "" || truncated {
-		t.Fatalf("nil body = %q, %v", body, truncated)
+	if body, truncated, err := readWebhookResponseBody(nil); body != "" || truncated || err != nil {
+		t.Fatalf("nil body = %q, %v, %v", body, truncated, err)
 	}
-	if body, truncated := readWebhookResponseBody(strings.NewReader("short")); body != "short" || truncated {
-		t.Fatalf("short body = %q, %v", body, truncated)
+	if body, truncated, err := readWebhookResponseBody(strings.NewReader("short")); body != "short" || truncated || err != nil {
+		t.Fatalf("short body = %q, %v, %v", body, truncated, err)
 	}
 	large := strings.Repeat("x", webhookResponseBodyMaxBytes+1)
-	if body, truncated := readWebhookResponseBody(strings.NewReader(large)); len(body) != webhookResponseBodyMaxBytes || !truncated {
-		t.Fatalf("large body length = %d, truncated %v", len(body), truncated)
+	if body, truncated, err := readWebhookResponseBody(strings.NewReader(large)); len(body) != webhookResponseBodyMaxBytes || !truncated || err != nil {
+		t.Fatalf("large body length = %d, truncated %v, err %v", len(body), truncated, err)
+	}
+	if _, _, err := readWebhookResponseBody(errWebhookReader{}); err == nil {
+		t.Fatal("body read error must surface")
 	}
 
 	headers := http.Header{"X-Multi": []string{"one", "two"}, "X-Other": []string{"value"}}
@@ -202,6 +205,10 @@ func TestWebhookResponseCaptureBoundsBodyAndHeaders(t *testing.T) {
 		t.Fatalf("zero-byte captured headers = %#v", captured)
 	}
 }
+
+type errWebhookReader struct{}
+
+func (errWebhookReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
 
 func TestWebhookDispatcherSendsPOSTAndGETRequestContracts(t *testing.T) {
 	t.Run("POST", func(t *testing.T) {
@@ -443,6 +450,9 @@ func TestWebhookDispatcherRestartRecoversLeaseThenRetries(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reopenedStore.Close() })
 	webhookStore = newWebhookStoreWithDB(reopenedStore.db)
+	webhookStore.settings = func() WebhookSettings {
+		return WebhookSettings{AllowPrivateTargets: true, DailyDeliveryCap: defaultWebhookDailyDeliveryCap}
+	}
 
 	restartAt := clock.Add(webhookDeliveryLease + time.Second)
 	dispatcher := newWebhookDispatcher(webhookStore, nil)

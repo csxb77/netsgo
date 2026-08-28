@@ -3,7 +3,9 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 )
 
 func enqueueActivityWebhookDeliveriesTx(tx *sql.Tx, activityID int64, prepared preparedActivitySpec) error {
@@ -78,6 +80,14 @@ func enqueueActivityWebhookDeliveriesTx(tx *sql.Tx, activityID int64, prepared p
 		values := baseSnapshot.values(deliveryID, item.config.ID, item.config.Name)
 		if err := insertWebhookDeliveryTx(tx, prepared.scopeUserID, item.config, baseSnapshot, values,
 			WebhookOriginEvent, sql.NullInt64{Int64: activityID, Valid: true}, 3, prepared.recordedAt); err != nil {
+			var validation *webhookValidationError
+			if errors.As(err, &validation) {
+				// Runtime variables (for example a client display name) can
+				// render an otherwise valid template invalid. The activity
+				// event itself must still be recorded; skip only this Webhook.
+				log.Printf("⚠️ Skipping Webhook delivery [webhook_id=%s activity_id=%d]: %v", item.config.ID, activityID, err)
+				continue
+			}
 			return err
 		}
 	}

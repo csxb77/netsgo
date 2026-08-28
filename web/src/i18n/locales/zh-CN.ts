@@ -474,6 +474,8 @@ export const zhCN = {
       attempt: "尝试次数",
       time: "时间",
       details: "详情",
+      loadMore: "加载更多投递记录",
+      loadingMore: "加载中…",
       attemptValue: "{{count}} / 3",
       empty: "这条 Webhook 暂无投递记录。",
       emptyDescription: "事件投递、测试请求和手动重放会显示在这里。",
@@ -887,6 +889,18 @@ export const zhCN = {
       "允许 1–1000 次；超过后该 IP 等待滑动窗口释放。",
     clientAuthRateLimitInvalid: "请输入 1–1000 之间的整数。",
     clientAuthRateLimitSettingsSaved: "Client 认证限速设置已保存",
+    webhookDeliverySettings: "Webhook 投递策略",
+    webhookDeliverySettingsDescription:
+      "控制活动 Webhook 的可投递地址范围，以及每个用户每天可手动入队的投递数量。默认禁止访问内网地址。",
+    webhookAllowPrivateTargets: "允许 Webhook 访问内网地址",
+    webhookAllowPrivateTargetsHelp:
+      "关闭时，指向回环、局域网或链路本地地址的 Webhook URL 会在保存时被拒绝，并在建立连接时被拦截。",
+    webhookPrivateTargetsAllowed: "已允许内网地址",
+    webhookDailyCap: "每用户每日手动投递上限",
+    webhookDailyCapHelp:
+      "单个用户 24 小时内的测试与重放入队数量，允许 1–10000。事件触发的投递不计数。",
+    webhookDailyCapInvalid: "请输入 1–10000 之间的整数。",
+    webhookSettingsSaved: "Webhook 投递策略已保存",
     clientAuthRateLimits: "Client 认证限速",
     clientAuthRateLimitsDescription:
       "查看控制通道认证的 IP 限速记录；删除记录后，该 IP 会重新计算认证次数。这里只统计当前运行中的内存记录。",

@@ -50,7 +50,7 @@ func TestOpenServerDBCreatesExpectedTables(t *testing.T) {
 		}
 	}
 
-	for _, column := range []string{"initialized", "jwt_secret", "client_auth_rate_limit_enabled", "client_auth_rate_limit_per_minute"} {
+	for _, column := range []string{"initialized", "jwt_secret", "client_auth_rate_limit_enabled", "client_auth_rate_limit_per_minute", "webhook_allow_private_targets", "webhook_daily_delivery_cap"} {
 		if !sqliteTableColumnExists(t, db, "server_config", column) {
 			t.Fatalf("expected server_config.%s to exist", column)
 		}
@@ -92,6 +92,8 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 			{name: "activity_warning_min_count", typ: "INTEGER", notNull: true, defaultValue: "100"},
 			{name: "activity_error_retention_days", typ: "INTEGER", notNull: true, defaultValue: "180"},
 			{name: "activity_error_min_count", typ: "INTEGER", notNull: true, defaultValue: "100"},
+			{name: "webhook_allow_private_targets", typ: "INTEGER", notNull: true, defaultValue: "0"},
+			{name: "webhook_daily_delivery_cap", typ: "INTEGER", notNull: true, defaultValue: "50"},
 		},
 		"allowed_ports": {
 			{name: "id", typ: "INTEGER", primaryKey: true},
@@ -536,11 +538,12 @@ func TestOpenServerDBMigratesEmptyDatabaseToExpectedSchema(t *testing.T) {
 		"006_admin_security",
 		"007_api_key_lookup_digest",
 		"008_socks5_endpoint_types",
-		"009_tunnel_total_bandwidth",
-		"012_multi_user_ownership",
-		"013_global_passkey_challenges",
-		"014_activity_webhooks",
-	}
+	"009_tunnel_total_bandwidth",
+	"012_multi_user_ownership",
+	"013_global_passkey_challenges",
+	"014_activity_webhooks",
+	"015_webhook_delivery_policy",
+}
 	if got := appliedMigrationNames(t, db, "schema_migrations"); !reflect.DeepEqual(got, wantStrictMigrationNames) {
 		t.Fatalf("strict applied migrations = %#v, want %#v", got, wantStrictMigrationNames)
 	}
@@ -580,13 +583,14 @@ func TestServerMigrationsLoadsEmbeddedFiles(t *testing.T) {
 		"006_admin_security",
 		"007_api_key_lookup_digest",
 		"008_socks5_endpoint_types",
-		"009_tunnel_total_bandwidth",
-		"010_client_auth_control",
-		"011_activity_events",
-		"012_multi_user_ownership",
-		"013_global_passkey_challenges",
-		"014_activity_webhooks",
-	}
+	"009_tunnel_total_bandwidth",
+	"010_client_auth_control",
+	"011_activity_events",
+	"012_multi_user_ownership",
+	"013_global_passkey_challenges",
+	"014_activity_webhooks",
+	"015_webhook_delivery_policy",
+}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("migration names = %#v, want %#v", gotNames, wantNames)
 	}
@@ -745,8 +749,8 @@ func TestOpenServerDBSkipsAppliedEmbeddedMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ` + serverCompatibleMigrationTable).Scan(&compatibleCount); err != nil {
 		t.Fatalf("count compatible migrations failed: %v", err)
 	}
-	if strictCount != 12 || compatibleCount != 2 {
-		t.Fatalf("migration counts = strict %d, compatible %d; want 12 and 2", strictCount, compatibleCount)
+	if strictCount != 13 || compatibleCount != 2 {
+		t.Fatalf("migration counts = strict %d, compatible %d; want 13 and 2", strictCount, compatibleCount)
 	}
 }
 

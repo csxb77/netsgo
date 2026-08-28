@@ -72,6 +72,8 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/rate-limits/client-auth", s.RequireAdmin(s.handleAPIAdminClientAuthRateLimits))
 	mux.HandleFunc("PUT /api/admin/rate-limits/client-auth", s.RequireAdmin(s.handleAPIAdminClientAuthRateLimits))
 	mux.HandleFunc("DELETE /api/admin/rate-limits/client-auth", s.RequireAdmin(s.handleAPIAdminClientAuthRateLimits))
+	mux.HandleFunc("GET /api/admin/settings/webhooks", s.RequireAdmin(s.handleAPIAdminWebhookSettings))
+	mux.HandleFunc("PUT /api/admin/settings/webhooks", s.RequireAdmin(s.handleAPIAdminWebhookSettings))
 	// Backward-compatible administrator key routes retain an explicit self
 	// scope. New UI calls the /api/keys form above.
 	mux.HandleFunc("GET /api/admin/keys", s.requireAdminSelfResourceScope(s.handleAPIAdminKeys))
