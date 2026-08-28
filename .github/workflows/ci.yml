@@ -175,8 +175,6 @@ jobs:
         working-directory: web
         run: bunx playwright install --with-deps chromium
       - name: Run full Playwright E2E
-        env:
-          PLAYWRIGHT_RUNNER: xvfb-run -a
         run: make test-playwright-e2e-full
 
   cross-version-smoke:
