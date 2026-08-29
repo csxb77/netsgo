@@ -80,6 +80,53 @@ func TestActivityAppendCreatesOneDurableWebhookDelivery(t *testing.T) {
 	}
 }
 
+func TestActivityWebhookDeliveriesRenderEachLanguageVariable(t *testing.T) {
+	adminStore, webhookStore, user := newWebhookStoreFixture(t)
+	for _, fixture := range []struct {
+		id   string
+		body string
+		want string
+	}{
+		{id: "wh_language_en", body: `{"message":"{{event.name.en-US}}: {{client.name}}"}`, want: "Client online: Real client node"},
+		{id: "wh_language_zh", body: `{"message":"{{event.name.zh-CN}}：{{client.name}}"}`, want: "客户端上线：Real client node"},
+	} {
+		input := testWebhookInput(fixture.id)
+		input.Events = []string{"client.online"}
+		input.Body = fixture.body
+		if _, err := webhookStore.Create(user.ID, input); err != nil {
+			t.Fatalf("create %s Webhook: %v", fixture.id, err)
+		}
+	}
+
+	activityStore := newActivityStoreWithDB("", adminStore.db, false)
+	_, err := activityStore.Append(ActivityEventSpec{
+		OccurredAt: time.Now().UTC(), Category: ActivityCategoryClient, Action: "online", Source: "test",
+		ScopeUserID: user.ID, SubjectUserID: user.ID, DedupeKey: "webhook-localized-real-event",
+		Actor:   ActivityActor{Type: "client", ID: "client-real"},
+		Payload: newActivityClientLifecyclePayload("online", "", 1, true, ActivitySummaryArgs{ClientName: "Real client node"}),
+		Clients: []ActivityClientSubject{{ClientID: "client-real", Relation: "subject", DisplayName: "Real client node"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fixture := range []struct {
+		id   string
+		want string
+	}{
+		{id: "wh_language_en", want: "Client online: Real client node"},
+		{id: "wh_language_zh", want: "客户端上线：Real client node"},
+	} {
+		page, err := webhookStore.ListDeliveries(user.ID, fixture.id, "", 10, "")
+		if err != nil || len(page.Items) != 1 || page.Items[0].RequestBody == nil {
+			t.Fatalf("localized deliveries for %s = %+v, %v", fixture.id, page, err)
+		}
+		if !strings.Contains(*page.Items[0].RequestBody, fixture.want) {
+			t.Fatalf("localized body for %s = %s, want %q", fixture.id, *page.Items[0].RequestBody, fixture.want)
+		}
+	}
+}
+
 func TestActivityAndWebhookDeliveryRollbackTogether(t *testing.T) {
 	adminStore, webhookStore, user := newWebhookStoreFixture(t)
 	if _, err := webhookStore.Create(user.ID, testWebhookInput("wh_atomic_rollback")); err != nil {

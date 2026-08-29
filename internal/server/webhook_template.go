@@ -15,6 +15,7 @@ type WebhookVariable struct {
 	ValueType          string   `json:"value_type"`
 	Surfaces           []string `json:"surfaces"`
 	AvailableForEvents any      `json:"available_for_events"`
+	Optional           bool     `json:"optional,omitempty"`
 }
 
 type renderedWebhookRequest struct {
