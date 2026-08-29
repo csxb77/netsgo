@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import {
   Server as ServerIcon, LayoutDashboard,
-  Settings, Activity, Users,
+  Settings, Activity, Users, Webhook,
   BookOpen, LayersPlus, Languages, LogOut
 } from 'lucide-react';
 import { Link, useRouterState, useNavigate } from '@tanstack/react-router';
@@ -72,8 +72,9 @@ export function ClientSidebar({ scope, clients, isLoading }: ClientSidebarProps)
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isAdminSection = pathname.includes('/admin');
   const isActivity = pathname.includes('/activity');
+  const isWebhooks = pathname.includes('/webhooks');
   const isClientPage = pathname.includes('/clients/');
-  const isOverview = !isAdminSection && !isActivity && !isClientPage && pathname !== '/dashboard/users';
+  const isOverview = !isAdminSection && !isActivity && !isWebhooks && !isClientPage && pathname !== '/dashboard/users';
   const currentLanguage = SUPPORTED_LOCALES.includes(i18n.resolvedLanguage as SupportedLocale)
     ? i18n.resolvedLanguage as SupportedLocale
     : 'en-US';
@@ -147,6 +148,19 @@ export function ClientSidebar({ scope, clients, isLoading }: ClientSidebarProps)
                 <Link to="/dashboard/activity" search={{ scope: 'global', severity: ['info', 'warning', 'error'], category: [] }}>
                   <Activity className="h-4 w-4" />
                   <span>{t('activity.navLabel')}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                asChild
+                isActive={isWebhooks}
+                tooltip={t('webhooks.navLabel')}
+                className={NAV_ITEM_CLASS}
+              >
+                <Link to="/dashboard/webhooks">
+                  <Webhook className="h-4 w-4" />
+                  <span>{t('webhooks.navLabel')}</span>
                 </Link>
               </SidebarMenuButton>
             </SidebarMenuItem>

@@ -5,7 +5,6 @@ import { useTranslation } from 'react-i18next';
 import { ActivityFilters } from '@/components/custom/activity/ActivityFilters';
 import type { ActivityFilterValue } from '@/components/custom/activity/severity-meta';
 import { ActivityTimeline } from '@/components/custom/activity/ActivityTimeline';
-import { ActivityWebhookManager } from '@/components/custom/activity/ActivityWebhookManager';
 import { dashboardRoute } from '@/routes/dashboard';
 import { requireConsoleAuth } from '@/lib/auth';
 import { adminUserResourceScope, SELF_RESOURCE_SCOPE } from '@/lib/resource-scope';
@@ -119,12 +118,11 @@ function ActivityPage() {
       animate="show"
       className="z-10 mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 sm:gap-6 sm:p-6 lg:p-8"
     >
-      <motion.div variants={fadeUp} className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <motion.div variants={fadeUp} className="flex flex-col gap-3">
         <div>
           <h3 className="text-xl font-semibold tracking-tight">{t('activity.pageTitle')}</h3>
           <p className="mt-1 text-sm text-muted-foreground">{t('activity.pageDescription')}</p>
         </div>
-        <ActivityWebhookManager showAdminScopeNote={isAdmin} />
       </motion.div>
       <motion.div variants={fadeUp}>
         <section className="rounded-xl border border-border/40 bg-card/50 shadow-sm backdrop-blur-sm">

@@ -72,6 +72,15 @@ export function replayWebhookDeliveryMutationOptions(queryClient: QueryClient): 
   };
 }
 
+export function toggleWebhookMutationOptions(queryClient: QueryClient): UseMutationOptions<ActivityWebhookConfig, Error, { webhookId: string; enabled: boolean }> {
+  return {
+    mutationFn: ({ webhookId, enabled }) => webhookApi.setEnabled(webhookId, enabled),
+    onSuccess: (saved) => {
+      upsertWebhookInCache(queryClient, saved);
+    },
+  };
+}
+
 export function useWebhookCatalog() {
   return useQuery({
     queryKey: webhookCatalogQueryKey,
@@ -95,6 +104,11 @@ export function useSaveWebhook() {
 export function useDeleteWebhook() {
   const queryClient = useQueryClient();
   return useMutation(deleteWebhookMutationOptions(queryClient));
+}
+
+export function useToggleWebhook() {
+  const queryClient = useQueryClient();
+  return useMutation(toggleWebhookMutationOptions(queryClient));
 }
 
 export function useWebhookDeliveries(webhookId: string | null, status?: WebhookInvocationStatus) {

@@ -140,3 +140,14 @@ export function formatRelativeTimestamp(value: string, now = Date.now()): string
   if (Math.abs(months) < 12) return formatter.format(months, 'month');
   return formatter.format(Math.round(months / 12), 'year');
 }
+
+export function formatShortTime(value: string | null, locale: string) {
+  if (!value) return null;
+  return new Intl.DateTimeFormat(locale, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}

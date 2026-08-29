@@ -47,7 +47,6 @@ import {
 } from '@/components/ui/dialog';
 import {
   Empty,
-  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyMedia,
@@ -92,7 +91,6 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  SheetTrigger,
 } from '@/components/ui/sheet';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -143,12 +141,6 @@ import {
 } from '@/types/webhook';
 
 type WebhookPrototype = ActivityWebhookConfig;
-
-type PendingAction =
-  | { type: 'select'; id: string }
-  | { type: 'new' }
-  | { type: 'close' }
-  | null;
 
 function eventLabelKey(eventKey: WebhookEventKey) {
   return `webhooks.events.${eventKey}` as const;
@@ -210,24 +202,38 @@ function statusVariant(status: WebhookInvocationStatus | WebhookPrototype['lastS
   return 'outline' as const;
 }
 
-export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdminScopeNote?: boolean }) {
-  const { t, i18n } = useTranslation();
-  const [open, setOpen] = useState(false);
+export function ActivityWebhookManager({
+  open,
+  onOpenChange,
+  editWebhook,
+  showAdminScopeNote = false,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  editWebhook: ActivityWebhookConfig | 'new' | null;
+  showAdminScopeNote?: boolean;
+}) {
+  const { t } = useTranslation();
   const { data: catalog } = useWebhookCatalog();
   const { data: webhooks = [] } = useWebhooks();
   const { data: clients = [] } = useClients(SELF_RESOURCE_SCOPE);
   const saveWebhook = useSaveWebhook();
   const removeWebhook = useDeleteWebhook();
   const replayDelivery = useReplayWebhookDelivery();
-  const [draftOverride, setDraft] = useState<WebhookPrototype | null>(null);
+  // The caller remounts this editor with a fresh key per open, so the draft is
+  // initialized once from props here instead of being synced in an effect.
+  const [draftOverride, setDraft] = useState<WebhookPrototype | null>(() => {
+    if (editWebhook === 'new') return catalog ? createEmptyWebhook(catalog) : null;
+    return editWebhook ? cloneWebhook(editWebhook) : null;
+  });
   const [activeTab, setActiveTab] = useState<'configuration' | 'deliveries'>('configuration');
-  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [pendingAction, setPendingAction] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [testOpen, setTestOpen] = useState(false);
   const [validationIssues, setValidationIssues] = useState<WebhookValidationIssue[]>([]);
   const configurationScrollRef = useRef<HTMLDivElement>(null);
 
-  const draft = draftOverride ?? webhooks[0] ?? null;
+  const draft = draftOverride;
   const saved = draft ? webhooks.find((item) => item.id === draft.id) ?? null : null;
   const isNew = Boolean(draft && !saved);
   const dirty = !sameWebhook(draft, saved);
@@ -261,10 +267,6 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
     }
     return [...targets.values()];
   }, [clients]);
-  const listItems = useMemo(
-    () => draft && isNew ? [...webhooks, draft] : webhooks,
-    [draft, isNew, webhooks],
-  );
 
   const updateDraft = <Key extends keyof WebhookPrototype>(key: Key, value: WebhookPrototype[Key]) => {
     setDraft((current) => {
@@ -272,10 +274,6 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
       return base ? { ...base, [key]: value } : base;
     });
     setValidationIssues([]);
-  };
-
-  const resetConfigurationScroll = () => {
-    window.requestAnimationFrame(() => configurationScrollRef.current?.scrollTo({ top: 0 }));
   };
 
   const revealValidationIssue = (issue: WebhookValidationIssue) => {
@@ -287,40 +285,17 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
     }));
   };
 
-  const loadWebhook = (id: string) => {
-    const webhook = webhooks.find((item) => item.id === id);
-    if (!webhook) return;
-    setDraft(cloneWebhook(webhook));
-    setValidationIssues([]);
-    setActiveTab('configuration');
-    resetConfigurationScroll();
-  };
-
-  const startNewWebhook = () => {
-    if (!catalog) return;
-    setDraft(createEmptyWebhook(catalog));
-    setValidationIssues([]);
-    setActiveTab('configuration');
-    resetConfigurationScroll();
-  };
-
-  const requestAction = (action: Exclude<PendingAction, null>) => {
+  const requestClose = () => {
     if (dirty) {
-      setPendingAction(action);
+      setPendingAction(true);
       return;
     }
-    if (action.type === 'select') loadWebhook(action.id);
-    if (action.type === 'new') startNewWebhook();
-    if (action.type === 'close') setOpen(false);
+    onOpenChange(false);
   };
 
   const confirmDiscard = () => {
-    const action = pendingAction;
-    setPendingAction(null);
-    if (!action) return;
-    if (action.type === 'select') loadWebhook(action.id);
-    if (action.type === 'new') startNewWebhook();
-    if (action.type === 'close') setOpen(false);
+    setPendingAction(false);
+    onOpenChange(false);
   };
 
   const persistDraft = async (enable = false) => {
@@ -345,13 +320,7 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
   };
 
   const cancelChanges = () => {
-    if (saved) {
-      setDraft(cloneWebhook(saved));
-    } else if (webhooks[0]) {
-      setDraft(cloneWebhook(webhooks[0]));
-    } else {
-      setDraft(null);
-    }
+    setDraft(saved ? cloneWebhook(saved) : null);
     setValidationIssues([]);
   };
 
@@ -376,10 +345,10 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
     }
     try {
       await removeWebhook.mutateAsync(draft.id);
-      const remaining = webhooks.filter((item) => item.id !== draft.id);
-      setDraft(remaining[0] ? cloneWebhook(remaining[0]) : null);
+      setDraft(null);
       setValidationIssues([]);
       setDeleteOpen(false);
+      onOpenChange(false);
       toast.success(t('webhooks.toast.deleted'));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('webhooks.toast.operationFailed'));
@@ -402,23 +371,16 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) {
-      setOpen(true);
+      onOpenChange(true);
       return;
     }
-    requestAction({ type: 'close' });
+    requestClose();
   };
 
   return (
     <>
       <Sheet open={open} onOpenChange={handleOpenChange}>
-        <SheetTrigger asChild>
-          <Button variant="outline">
-            <Webhook data-icon="inline-start" />
-            {t('webhooks.manager.open')}
-            <Badge variant="secondary" className="ml-1">{webhooks.length}</Badge>
-          </Button>
-        </SheetTrigger>
-        <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-6xl">
+        <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-4xl">
           <SheetHeader className="border-b pr-14">
             <SheetTitle>{t('webhooks.manager.title')}</SheetTitle>
             <SheetDescription className="sr-only">
@@ -427,86 +389,11 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
           </SheetHeader>
 
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <div className="flex shrink-0 items-center gap-2 border-b bg-background p-2 md:hidden">
-              {draft && catalog ? (
-                <Select value={draft.id} onValueChange={(id) => id !== draft.id && requestAction({ type: 'select', id })}>
-                  <SelectTrigger className="min-w-0 flex-1" aria-label={t('webhooks.manager.selectWebhook')}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {listItems.map((item) => (
-                        <SelectItem key={item.id} value={item.id}>
-                          {item.name || t('webhooks.manager.webhookFallback')}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              ) : (
-                <div className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{t('webhooks.manager.emptySelection')}</div>
-              )}
-              <Button variant="outline" size="icon" onClick={() => requestAction({ type: 'new' })} aria-label={t('webhooks.manager.newWebhook')} title={t('webhooks.manager.newWebhook')}>
-                <Plus />
-              </Button>
-              {draft && catalog ? (
-                <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} aria-label={t('webhooks.editor.delete')} title={t('webhooks.editor.delete')}>
-                  <Trash2 />
-                </Button>
-              ) : null}
-            </div>
-
-            <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[260px_minmax(0,1fr)]">
-              <aside className="hidden overflow-y-auto border-r bg-muted/15 md:block">
-                <div className="sticky top-0 border-b bg-background/95 p-3 backdrop-blur">
-                  <div className="mb-2">
-                    <div className="text-sm font-medium">{t('webhooks.manager.listTitle')}</div>
-                    <div className="text-xs text-muted-foreground">{t('webhooks.manager.configured', { count: webhooks.length })}</div>
-                  </div>
-                  <Button className="w-full" size="sm" onClick={() => requestAction({ type: 'new' })}>
-                    <Plus data-icon="inline-start" />
-                    {t('webhooks.manager.newWebhook')}
-                  </Button>
-                </div>
-                <div className="flex flex-col gap-2 p-2">
-                  {listItems.map((item) => {
-                    const itemIsDraft = isNew && draft?.id === item.id;
-                    const calledAt = formatShortTime(item.lastCalledAt, i18n.resolvedLanguage ?? 'zh-CN');
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => item.id !== draft?.id && requestAction({ type: 'select', id: item.id })}
-                        className={cn(
-                          'rounded-lg border bg-background p-2.5 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
-                          draft?.id === item.id && 'border-primary/40 bg-primary/5 ring-1 ring-primary/10',
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <span className="min-w-0 truncate text-sm font-medium">
-                            {item.name || t('webhooks.manager.webhookFallback')}
-                          </span>
-                          <Badge variant={itemIsDraft ? 'secondary' : item.enabled ? 'default' : 'outline'}>
-                            {itemIsDraft ? t('webhooks.status.draft') : t(`webhooks.status.${item.enabled ? 'enabled' : 'disabled'}`)}
-                          </Badge>
-                        </div>
-                        {!itemIsDraft ? (
-                          <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-                            <span className="truncate">{t(`webhooks.health.${item.lastStatus}`)}</span>
-                            {calledAt ? <span aria-hidden>·</span> : null}
-                            {calledAt ? <span className="truncate">{calledAt}</span> : null}
-                          </div>
-                        ) : null}
-                      </button>
-                    );
-                  })}
-                </div>
-              </aside>
-
+            <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden">
               <main className="min-h-0 min-w-0 overflow-hidden">
               {draft && catalog ? (
                 <div className="flex h-full min-h-0 flex-col">
-                  <div className="hidden shrink-0 border-b bg-background px-4 py-2.5 md:block">
+                  <div className="shrink-0 border-b bg-background px-4 py-2.5">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -592,7 +479,6 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
                     <EmptyTitle>{catalog ? t('webhooks.manager.emptySelection') : t('common.loading')}</EmptyTitle>
                     <EmptyDescription>{catalog ? t('webhooks.manager.emptyDescription') : null}</EmptyDescription>
                   </EmptyHeader>
-                  <EmptyContent><Button onClick={startNewWebhook}>{t('webhooks.manager.newWebhook')}</Button></EmptyContent>
                 </Empty>
               )}
               </main>
@@ -601,7 +487,7 @@ export function ActivityWebhookManager({ showAdminScopeNote = false }: { showAdm
         </SheetContent>
       </Sheet>
 
-      <AlertDialog open={pendingAction !== null} onOpenChange={(nextOpen) => !nextOpen && setPendingAction(null)}>
+      <AlertDialog open={pendingAction} onOpenChange={(nextOpen) => !nextOpen && setPendingAction(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t('webhooks.unsaved.title')}</AlertDialogTitle>

@@ -42,13 +42,12 @@ test('user can create, test-deliver, inspect, and delete an activity Webhook @we
         throw new Error(`enable private webhook targets failed: ${enable.status()} ${await enable.text()}`);
       }
     }
-    await page.goto(e2eURL('/#/dashboard/activity'));
-    await expect(page.getByRole('heading', { name: 'Activity timeline' })).toBeVisible();
-    await page.getByRole('button', { name: /My webhooks/ }).click();
+    await page.goto(e2eURL('/#/dashboard/webhooks'));
+    await expect(page.getByRole('heading', { name: 'Outbound Webhooks' })).toBeVisible();
+    await page.getByRole('button', { name: 'New webhook' }).click();
 
     const sheet = page.getByRole('dialog', { name: 'Activity log webhooks' });
     await expect(sheet).toBeVisible();
-    await sheet.getByRole('button', { name: 'New webhook' }).first().click();
     await sheet.getByLabel('Webhook name').fill(name);
     await sheet.getByRole('radio', { name: 'All', exact: true }).click();
     await sheet.getByLabel('Client online').check();
