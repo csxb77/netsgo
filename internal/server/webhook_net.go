@@ -3,8 +3,8 @@ package server
 import (
 	"errors"
 	"net"
-	"net/url"
 	"strconv"
+	"strings"
 )
 
 // WebhookSettings controls server-wide outbound Webhook policy.
@@ -108,12 +108,16 @@ func mustWebhookCIDRs(values ...string) []*net.IPNet {
 	return result
 }
 
+// urlHostname normalizes a URL host to a bare hostname: port stripped, IPv6
+// brackets removed. Callers pass url.URL.Hostname() output (already bare), so
+// this only defends against future callers passing host:port forms. Unlike
+// url.Parse it must never fail on a syntactically odd host, because treating
+// unparsable hosts as empty would make webhookHostBlocked reject everything.
 func urlHostname(host string) string {
-	parsed, err := url.Parse("://" + host)
-	if err != nil {
-		return ""
+	if hostname, _, err := net.SplitHostPort(host); err == nil {
+		return hostname
 	}
-	return parsed.Hostname()
+	return strings.Trim(host, "[]")
 }
 
 func webhookHostBlocked(host string) bool {
