@@ -31,13 +31,28 @@ func (s *Server) handleAPIAdminWebhookSettings(w http.ResponseWriter, r *http.Re
 			writeAPIError(w, http.StatusBadRequest, "invalid_webhook_settings", err.Error())
 			return
 		}
+		previous, prevErr := s.auth.adminStore.GetWebhookSettings()
 		activityID, err := s.auth.adminStore.UpdateWebhookSettingsWithActivity(settings, s.activityActorForRequest(r))
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "webhook_settings_update_failed", "Failed to update Webhook settings")
 			return
 		}
 		s.publishActivityID(activityID)
-		encodeJSON(w, http.StatusOK, settings)
+		disabled := 0
+		if prevErr == nil && previous.AllowPrivateTargets && !settings.AllowPrivateTargets && s.webhookStore != nil {
+			disabled, err = s.webhookStore.DisableWebhooksViolatingPrivatePolicy()
+			if err != nil {
+				writeAPIError(w, http.StatusInternalServerError, "webhook_settings_update_failed", "settings were saved but disabling policy-violating Webhooks failed")
+				return
+			}
+			if disabled > 0 && s.webhookDispatcher != nil {
+				s.webhookDispatcher.Wake()
+			}
+		}
+		encodeJSON(w, http.StatusOK, struct {
+			WebhookSettings
+			DisabledWebhooks int `json:"disabled_webhooks"`
+		}{WebhookSettings: settings, DisabledWebhooks: disabled})
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method is not allowed")
 	}
@@ -165,6 +180,42 @@ func (s *Server) handleAPIWebhookItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
+}
+
+func (s *Server) handleAPIWebhookEnabledToggle(w http.ResponseWriter, r *http.Request) {
+	s.ensureSharedStoreReferences()
+	if s.webhookStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "webhook_store_unavailable", "Webhook store is unavailable")
+		return
+	}
+	scope, ok := requireResourceScope(w, r)
+	if !ok {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSONRequestBody(r, &body); err != nil {
+		writeJSONRequestDecodeError(w, err)
+		return
+	}
+	release, err := s.acquireResourceMutation(scope, true)
+	if err != nil {
+		writeResourceLifecycleError(w, err)
+		return
+	}
+	item, err := s.webhookStore.SetEnabled(scope.OwnerUserID, id, body.Enabled)
+	release()
+	if err != nil {
+		writeWebhookAPIError(w, err)
+		return
+	}
+	s.publishWebhookChanged(scope.OwnerUserID, "updated", item.ID)
+	if s.webhookDispatcher != nil {
+		s.webhookDispatcher.Wake()
+	}
+	encodeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) handleAPIWebhookPreview(w http.ResponseWriter, r *http.Request) {

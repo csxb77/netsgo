@@ -8,7 +8,6 @@ import {
   useClientAuthRateLimitMutations,
   useClientAuthRateLimits,
 } from "@/hooks/use-admin-rate-limits";
-import { useWebhookSettings, useWebhookSettingsMutations, type WebhookDeliverySettings } from "@/hooks/use-webhook-settings";
 import { formatTimestamp, formatUptime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,13 +27,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import {
-  Field,
-  FieldContent,
-  FieldDescription,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -104,7 +96,14 @@ function AdminAccessControlPage() {
 
   return (
     <div className="flex flex-col gap-6 pb-10">
-      <WebhookDeliverySettingsCard />
+      <div>
+        <h3 className="text-xl font-semibold tracking-tight">
+          {t("admin.accessControlTitle")}
+        </h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t("admin.accessControlDescription")}
+        </p>
+      </div>
       <ClientAuthRateLimitSettingsCard
         settings={displayedSettings}
         isLoading={isLoading}
@@ -121,116 +120,6 @@ function AdminAccessControlPage() {
         onReset={resetClientAuthRateLimit}
       />
     </div>
-  );
-}
-
-function WebhookDeliverySettingsCard() {
-  const { t } = useTranslation();
-  const { data, isLoading } = useWebhookSettings();
-  const mutations = useWebhookSettingsMutations();
-  const [draft, setDraft] = useState<WebhookDeliverySettings | null>(null);
-  const settings = draft ?? {
-    allow_private_targets: data?.allow_private_targets ?? false,
-    daily_delivery_cap: data?.daily_delivery_cap ?? 50,
-  };
-  const isDirty =
-    data != null &&
-    (settings.allow_private_targets !== data.allow_private_targets ||
-      settings.daily_delivery_cap !== data.daily_delivery_cap);
-  const isValid =
-    Number.isInteger(settings.daily_delivery_cap) &&
-    settings.daily_delivery_cap >= 1 &&
-    settings.daily_delivery_cap <= 10000;
-
-  if (isLoading) {
-    return <Skeleton className="h-44 w-full rounded-xl" />;
-  }
-
-  const save = async () => {
-    if (!isValid) {
-      toast.error(t("admin.webhookDailyCapInvalid"));
-      return;
-    }
-    try {
-      await mutations.updateSettings.mutateAsync(settings);
-      setDraft(null);
-      toast.success(t("admin.webhookSettingsSaved"));
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : t("errors.generic"));
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("admin.webhookDeliverySettings")}</CardTitle>
-        <CardDescription>
-          {t("admin.webhookDeliverySettingsDescription")}
-        </CardDescription>
-        <CardAction>
-          <Badge variant={settings.allow_private_targets ? "destructive" : "outline"}>
-            {settings.allow_private_targets ? t("admin.webhookPrivateTargetsAllowed") : t("common.disabled")}
-          </Badge>
-        </CardAction>
-      </CardHeader>
-      <CardContent>
-        <FieldGroup className="md:grid md:grid-cols-2">
-          <Field orientation="horizontal">
-            <FieldContent>
-              <FieldLabel htmlFor="webhook-allow-private-targets">
-                {t("admin.webhookAllowPrivateTargets")}
-              </FieldLabel>
-              <FieldDescription>
-                {t("admin.webhookAllowPrivateTargetsHelp")}
-              </FieldDescription>
-            </FieldContent>
-            <Switch
-              id="webhook-allow-private-targets"
-              checked={settings.allow_private_targets}
-              onCheckedChange={(allow) => setDraft({ ...settings, allow_private_targets: allow })}
-            />
-          </Field>
-
-          <Field data-invalid={!isValid}>
-            <FieldLabel htmlFor="webhook-daily-cap">
-              {t("admin.webhookDailyCap")}
-            </FieldLabel>
-            <Input
-              id="webhook-daily-cap"
-              type="number"
-              min={1}
-              max={10000}
-              step={1}
-              value={settings.daily_delivery_cap}
-              onChange={(event) =>
-                setDraft({ ...settings, daily_delivery_cap: Number(event.target.value) })
-              }
-              aria-invalid={!isValid}
-            />
-            <FieldDescription>
-              {isValid
-                ? t("admin.webhookDailyCapHelp")
-                : t("admin.webhookDailyCapInvalid")}
-            </FieldDescription>
-          </Field>
-        </FieldGroup>
-      </CardContent>
-      <CardFooter className="justify-end">
-        <Button
-          type="button"
-          size="sm"
-          disabled={!isDirty || !isValid || mutations.updateSettings.isPending}
-          onClick={() => void save()}
-        >
-          {mutations.updateSettings.isPending ? (
-            <Spinner data-icon="inline-start" />
-          ) : (
-            <Save data-icon="inline-start" />
-          )}
-          {mutations.updateSettings.isPending ? t("common.saving") : t("common.save")}
-        </Button>
-      </CardFooter>
-    </Card>
   );
 }
 
@@ -271,27 +160,34 @@ function ClientAuthRateLimitSettingsCard({
         </CardAction>
       </CardHeader>
       <CardContent>
-        <FieldGroup className="md:grid md:grid-cols-2">
-          <Field orientation="horizontal">
-            <FieldContent>
-              <FieldLabel htmlFor="client-auth-rate-limit-enabled">
+        <div className="flex flex-col divide-y divide-border/50">
+          <div className="grid gap-4 pb-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-6">
+            <div className="min-w-0">
+              <p className="font-medium text-foreground">
                 {t("admin.enableClientAuthRateLimit")}
-              </FieldLabel>
-              <FieldDescription>
+              </p>
+              <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
                 {t("admin.enableClientAuthRateLimitHelp")}
-              </FieldDescription>
-            </FieldContent>
+              </p>
+            </div>
             <Switch
               id="client-auth-rate-limit-enabled"
               checked={settings.enabled}
               onCheckedChange={(enabled) => onChange({ ...settings, enabled })}
             />
-          </Field>
+          </div>
 
-          <Field data-invalid={!isValid}>
-            <FieldLabel htmlFor="client-auth-rate-limit-per-minute">
-              {t("admin.clientAuthRequestsPerMinute")}
-            </FieldLabel>
+          <div className="grid gap-4 pt-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-6">
+            <div className="min-w-0">
+              <p className="font-medium text-foreground">
+                {t("admin.clientAuthRequestsPerMinute")}
+              </p>
+              <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                {isValid
+                  ? t("admin.clientAuthRequestsPerMinuteHelp")
+                  : t("admin.clientAuthRateLimitInvalid")}
+              </p>
+            </div>
             <Input
               id="client-auth-rate-limit-per-minute"
               type="number"
@@ -306,14 +202,10 @@ function ClientAuthRateLimitSettingsCard({
                 })
               }
               aria-invalid={!isValid}
+              className="w-28"
             />
-            <FieldDescription>
-              {isValid
-                ? t("admin.clientAuthRequestsPerMinuteHelp")
-                : t("admin.clientAuthRateLimitInvalid")}
-            </FieldDescription>
-          </Field>
-        </FieldGroup>
+          </div>
+        </div>
       </CardContent>
       <CardFooter className="justify-end">
         <Button
@@ -389,67 +281,69 @@ function ClientAuthRateLimitsSection({
             </EmptyHeader>
           </Empty>
         ) : (
-          <Table className="min-w-[780px]">
-            <TableHeader>
-              <TableRow>
-                <TableHead className="px-4">{t("admin.ipAddress")}</TableHead>
-                <TableHead className="px-4">{t("admin.limitStatus")}</TableHead>
-                <TableHead className="px-4">
-                  {t("admin.windowRequests")}
-                </TableHead>
-                <TableHead className="px-4">{t("admin.retryAfter")}</TableHead>
-                <TableHead className="px-4">
-                  {t("admin.lastActivity")}
-                </TableHead>
-                <TableHead className="px-4 text-right">
-                  {t("admin.actions")}
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries.map((entry) => {
-                const resetPending = resettingIP === entry.ip;
-                return (
-                  <TableRow key={entry.ip}>
-                    <TableCell className="px-4 font-mono text-xs">
-                      {entry.ip}
-                    </TableCell>
-                    <TableCell className="px-4">
-                      <Badge
-                        variant={entry.limited ? "destructive" : "secondary"}
-                      >
-                        {rateLimitStatusLabel(entry, t)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="px-4 font-mono text-xs text-muted-foreground">
-                      {entry.request_count} / {entry.max_requests}
-                    </TableCell>
-                    <TableCell className="px-4 text-muted-foreground">
-                      {entry.limited
-                        ? formatUptime(entry.retry_after_seconds)
-                        : "-"}
-                    </TableCell>
-                    <TableCell className="px-4 text-muted-foreground">
-                      {formatTimestamp(entry.last_activity)}
-                    </TableCell>
-                    <TableCell className="px-4 text-right">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        disabled={resetPending || resettingIP !== null}
-                        onClick={() => onReset(entry.ip)}
-                        title={t("admin.clearClientAuthRateLimit")}
-                        aria-label={t("admin.clearClientAuthRateLimit")}
-                      >
-                        {resetPending ? <Spinner /> : <Trash2 />}
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+          <div className="overflow-x-auto">
+            <Table className="min-w-[780px]">
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="px-4">{t("admin.ipAddress")}</TableHead>
+                  <TableHead className="px-4">{t("admin.limitStatus")}</TableHead>
+                  <TableHead className="px-4">
+                    {t("admin.windowRequests")}
+                  </TableHead>
+                  <TableHead className="px-4">{t("admin.retryAfter")}</TableHead>
+                  <TableHead className="px-4">
+                    {t("admin.lastActivity")}
+                  </TableHead>
+                  <TableHead className="px-4 text-right">
+                    {t("admin.actions")}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {entries.map((entry) => {
+                  const resetPending = resettingIP === entry.ip;
+                  return (
+                    <TableRow key={entry.ip}>
+                      <TableCell className="px-4 font-mono text-xs">
+                        {entry.ip}
+                      </TableCell>
+                      <TableCell className="px-4">
+                        <Badge
+                          variant={entry.limited ? "destructive" : "secondary"}
+                        >
+                          {rateLimitStatusLabel(entry, t)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="px-4 font-mono text-xs text-muted-foreground">
+                        {entry.request_count} / {entry.max_requests}
+                      </TableCell>
+                      <TableCell className="px-4 text-muted-foreground">
+                        {entry.limited
+                          ? formatUptime(entry.retry_after_seconds)
+                          : "-"}
+                      </TableCell>
+                      <TableCell className="px-4 text-muted-foreground">
+                        {formatTimestamp(entry.last_activity)}
+                      </TableCell>
+                      <TableCell className="px-4 text-right">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          disabled={resetPending || resettingIP !== null}
+                          onClick={() => onReset(entry.ip)}
+                          title={t("admin.clearClientAuthRateLimit")}
+                          aria-label={t("admin.clearClientAuthRateLimit")}
+                        >
+                          {resetPending ? <Spinner /> : <Trash2 />}
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
         )}
       </CardContent>
     </Card>

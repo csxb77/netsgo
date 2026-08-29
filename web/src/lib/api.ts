@@ -470,6 +470,11 @@ export const webhookApi = {
     return activityWebhookFromAPI(item);
   },
 
+  async setEnabled(webhookId: string, enabled: boolean) {
+    const item = await api.put<ActivityWebhookAPI>(`/api/webhooks/${encodePath(webhookId)}/enabled`, { enabled });
+    return activityWebhookFromAPI(item);
+  },
+
   delete(webhookId: string) {
     return api.delete<void>(`/api/webhooks/${encodePath(webhookId)}`);
   },

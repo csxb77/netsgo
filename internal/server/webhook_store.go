@@ -319,6 +319,124 @@ func (s *WebhookStore) Update(ownerUserID, id string, raw WebhookConfigInput) (A
 	return s.Get(ownerUserID, id)
 }
 
+// SetEnabled toggles a stored Webhook without requiring a full configuration
+// round-trip. Enabling re-runs the complete validation (including the private
+// target policy) against the stored configuration, so a policy-violating URL
+// cannot be turned on; disabling always succeeds and cancels waiting
+// deliveries like a full update would.
+func (s *WebhookStore) SetEnabled(ownerUserID, id string, enabled bool) (ActivityWebhook, error) {
+	current, err := s.Get(ownerUserID, id)
+	if err != nil {
+		return ActivityWebhook{}, err
+	}
+	if current.Enabled == enabled {
+		return current, nil
+	}
+	if enabled {
+		catalog := activityWebhookCatalog()
+		if err := validateWebhookInput(current.toConfigInput(true), catalog.Fixtures, catalog.Variables, s.currentSettings().AllowPrivateTargets); err != nil {
+			return ActivityWebhook{}, err
+		}
+	}
+	now := s.now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ActivityWebhook{}, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	result, err := tx.Exec(`UPDATE activity_webhooks SET revision = revision + 1, enabled = ?, updated_at_ns = ?
+		WHERE owner_user_id = ? AND id = ? AND revision = ?`, boolToInt(enabled), now.UnixNano(), ownerUserID, id, current.Revision)
+	if err != nil {
+		return ActivityWebhook{}, fmt.Errorf("toggle Webhook enabled: %w", err)
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return ActivityWebhook{}, ErrWebhookRevisionConflict
+	}
+	if current.Enabled && !enabled {
+		if _, err := cancelWaitingWebhookDeliveriesTx(tx, ownerUserID, id, now); err != nil {
+			return ActivityWebhook{}, err
+		}
+		if err := pruneWebhookHistoryTx(tx, ownerUserID, id, now); err != nil {
+			return ActivityWebhook{}, err
+		}
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return ActivityWebhook{}, err
+	}
+	return s.Get(ownerUserID, id)
+}
+
+// DisableWebhooksViolatingPrivatePolicy turns off every enabled Webhook whose
+// stored URL violates the private-target policy. It runs after an
+// administrator disables private targets, so previously allowed intranet
+// Webhooks stop delivering immediately instead of failing per attempt. Only
+// url_target_not_allowed violations disable a Webhook; unrelated validation
+// errors leave it untouched. Returns the number of disabled Webhooks.
+func (s *WebhookStore) DisableWebhooksViolatingPrivatePolicy() (int, error) {
+	rows, err := s.db.Query(`SELECT owner_user_id, id FROM activity_webhooks WHERE enabled = 1`)
+	if err != nil {
+		return 0, err
+	}
+	type webhookRef struct{ ownerUserID, id string }
+	refs := []webhookRef{}
+	for rows.Next() {
+		var ref webhookRef
+		if err := rows.Scan(&ref.ownerUserID, &ref.id); err != nil {
+			return 0, err
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	_ = rows.Close()
+
+	catalog := activityWebhookCatalog()
+	violating := []webhookRef{}
+	for _, ref := range refs {
+		current, err := s.Get(ref.ownerUserID, ref.id)
+		if err != nil {
+			return 0, err
+		}
+		err = validateWebhookInput(current.toConfigInput(true), catalog.Fixtures, catalog.Variables, false)
+		var validation *webhookValidationError
+		if errors.As(err, &validation) && validation.Code == "url_target_not_allowed" {
+			violating = append(violating, ref)
+		}
+	}
+	if len(violating) == 0 {
+		return 0, nil
+	}
+	now := s.now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer rollbackUnlessCommitted(tx, &committed)
+	for _, ref := range violating {
+		result, err := tx.Exec(`UPDATE activity_webhooks SET revision = revision + 1, enabled = 0, updated_at_ns = ?
+			WHERE owner_user_id = ? AND id = ? AND enabled = 1`, now.UnixNano(), ref.ownerUserID, ref.id)
+		if err != nil {
+			return 0, fmt.Errorf("disable policy-violating Webhook: %w", err)
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			continue
+		}
+		if _, err := cancelWaitingWebhookDeliveriesTx(tx, ref.ownerUserID, ref.id, now); err != nil {
+			return 0, err
+		}
+		if err := pruneWebhookHistoryTx(tx, ref.ownerUserID, ref.id, now); err != nil {
+			return 0, err
+		}
+	}
+	if err := commitTx(tx, &committed); err != nil {
+		return 0, err
+	}
+	return len(violating), nil
+}
+
 func (s *WebhookStore) Delete(ownerUserID, id string) error {
 	now := s.now().UTC()
 	tx, err := s.db.Begin()

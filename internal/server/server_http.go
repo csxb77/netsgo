@@ -55,6 +55,7 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/webhooks", s.requireSelfResourceScope(s.handleAPIWebhooks))
 	mux.HandleFunc("GET /api/webhooks/{id}", s.requireSelfResourceScope(s.handleAPIWebhookItem))
 	mux.HandleFunc("PUT /api/webhooks/{id}", s.requireSelfResourceScope(s.handleAPIWebhookItem))
+	mux.HandleFunc("PUT /api/webhooks/{id}/enabled", s.requireSelfResourceScope(s.handleAPIWebhookEnabledToggle))
 	mux.HandleFunc("DELETE /api/webhooks/{id}", s.requireSelfResourceScope(s.handleAPIWebhookItem))
 	mux.HandleFunc("POST /api/webhooks/preview", s.requireSelfResourceScope(s.handleAPIWebhookPreview))
 	mux.HandleFunc("POST /api/webhooks/test", s.requireSelfResourceScope(s.handleAPIWebhookTest))
