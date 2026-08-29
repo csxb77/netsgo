@@ -103,11 +103,12 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@/components/custom/toggle-group';
-import { cn } from '@/lib/utils';
+import { cn, copyText } from '@/lib/utils';
 import { WebhookJsonEditor, type WebhookJsonEditorHandle } from '@/components/custom/webhooks/WebhookJsonEditor';
 import {
-  getWebhookVariables,
+  getPickerVariables,
   getTemplateIssues,
+  type PickerVariable,
   renderWebhookRequest,
   validateWebhook,
   webhookVariableSample,
@@ -137,7 +138,6 @@ import {
   type WebhookTargetKind,
   type WebhookTargetOption,
   type WebhookTemplateSurface,
-  type WebhookVariable,
 } from '@/types/webhook';
 
 type WebhookPrototype = ActivityWebhookConfig;
@@ -146,8 +146,15 @@ function eventLabelKey(eventKey: WebhookEventKey) {
   return `webhooks.events.${eventKey}` as const;
 }
 
-function variableLabelKey(variable: WebhookVariable) {
-  return `webhooks.variables.item.${variable.key}` as const;
+function variableLabelKey(key: string) {
+  return `webhooks.variables.item.${key}` as const;
+}
+
+function resolvedPickerLanguage(language: string | undefined, locales: string[]) {
+  if (locales.length === 0) return '';
+  if (language && locales.includes(language)) return language;
+  const primary = language?.split('-')[0]?.toLowerCase();
+  return locales.find((locale) => locale.split('-')[0].toLowerCase() === primary) ?? locales[0];
 }
 
 function cloneWebhook(webhook: WebhookPrototype) {
@@ -967,17 +974,6 @@ function EditorSection({ title, action, children }: {
   );
 }
 
-function insertAtSelection(value: string, token: string, control: HTMLInputElement | null, onChange: (value: string) => void) {
-  const start = control?.selectionStart ?? value.length;
-  const end = control?.selectionEnd ?? value.length;
-  const nextPosition = start + token.length;
-  onChange(`${value.slice(0, start)}${token}${value.slice(end)}`);
-  window.requestAnimationFrame(() => {
-    control?.focus();
-    control?.setSelectionRange(nextPosition, nextPosition);
-  });
-}
-
 function TemplatedInput({ value, onChange, webhook, catalog, events, sampleEvent, surface, ...props }: Omit<React.ComponentProps<typeof InputGroupInput>, 'value' | 'onChange'> & {
   value: string;
   onChange: (value: string) => void;
@@ -987,17 +983,15 @@ function TemplatedInput({ value, onChange, webhook, catalog, events, sampleEvent
   sampleEvent: WebhookEventKey;
   surface: Exclude<WebhookTemplateSurface, 'body'>;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
   return (
     <InputGroup>
-      <InputGroupInput ref={inputRef} value={value} onChange={(event) => onChange(event.target.value)} className="font-mono text-xs" {...props} />
+      <InputGroupInput value={value} onChange={(event) => onChange(event.target.value)} className="font-mono text-xs" {...props} />
       <VariablePicker
         events={events}
         sampleEvent={sampleEvent}
         webhook={webhook}
         catalog={catalog}
         surface={surface}
-        onSelect={(variable) => insertAtSelection(value, `{{${variable.key}}}`, inputRef.current, onChange)}
       />
     </InputGroup>
   );
@@ -1035,7 +1029,6 @@ function JsonBodyEditor({ value, onChange, webhook, catalog, invalid, events, sa
             webhook={webhook}
             catalog={catalog}
             surface="body"
-            onSelect={(variable) => editorRef.current?.insert(`"{{${variable.key}}}"`)}
           />
           <Button type="button" variant="outline" size="sm" onClick={formatJson}>
             <AlignLeft data-icon="inline-start" />
@@ -1059,8 +1052,7 @@ function JsonBodyEditor({ value, onChange, webhook, catalog, invalid, events, sa
   );
 }
 
-function VariablePicker({ onSelect, webhook, catalog, events, sampleEvent, surface, standalone = false }: {
-  onSelect: (variable: WebhookVariable) => void;
+function VariablePicker({ webhook, catalog, events, sampleEvent, surface, standalone = false }: {
   webhook: WebhookPrototype;
   catalog: WebhookCatalog;
   events: WebhookEventKey[];
@@ -1068,14 +1060,24 @@ function VariablePicker({ onSelect, webhook, catalog, events, sampleEvent, surfa
   surface: WebhookTemplateSurface;
   standalone?: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
-  const groups = ['delivery', 'event', 'client', 'tunnel', 'subjects', 'match', 'p2p', 'webhook'] as const;
-  const variables = getWebhookVariables(catalog, events, surface);
+  const [language, setLanguage] = useState(() => resolvedPickerLanguage(i18n.resolvedLanguage, catalog.locales));
+  const groups = ['delivery', 'event', 'client', 'tunnel', 'subjects', 'match', 'webhook'] as const;
+  const variables = useMemo(
+    () => getPickerVariables(catalog, events, surface, language),
+    [catalog, events, surface, language],
+  );
 
-  const selectVariable = (variable: WebhookVariable) => {
-    onSelect(variable);
-    setOpen(false);
+  // The popover stays open after copying so several variables can be taken in one visit;
+  // it closes through the usual outside click / Escape.
+  const selectVariable = async (variable: PickerVariable) => {
+    try {
+      await copyText(`{{${variable.variable.key}}}`);
+      toast.success(t('webhooks.variables.copied', { key: `{{${variable.variable.key}}}` }));
+    } catch {
+      toast.error(t('webhooks.variables.copyFailed'));
+    }
   };
 
   return (
@@ -1091,29 +1093,45 @@ function VariablePicker({ onSelect, webhook, catalog, events, sampleEvent, surfa
         )}
       </PopoverTrigger>
       <PopoverContent align="end" collisionPadding={8} className="w-[28rem] max-w-[calc(100vw-1rem)] p-0">
-        <PopoverHeader className="border-b p-3">
+        <PopoverHeader className="flex-row items-center justify-between border-b p-3">
           <PopoverTitle>{t('webhooks.variables.title')}</PopoverTitle>
+          {catalog.locales.length > 1 ? (
+            <ToggleGroup
+              type="single"
+              size="sm"
+              variant="outline"
+              value={language}
+              onValueChange={(value) => { if (value) setLanguage(value); }}
+            >
+              {catalog.locales.map((locale) => (
+                <ToggleGroupItem key={locale} value={locale}>{t(`webhooks.variables.language.${locale}`)}</ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          ) : null}
         </PopoverHeader>
         <div className="p-2">
           <div data-slot="webhook-variable-list" className="max-h-80 overflow-y-auto overscroll-contain pr-1">
             {groups.map((group) => {
-              const groupVariables = variables.filter((variable) => variable.group === group);
+              const groupVariables = variables.filter((entry) => entry.variable.group === group);
               if (groupVariables.length === 0) return null;
               return (
                 <section key={group} className="mb-2 last:mb-0">
                   <h3 className="px-2 py-1 text-xs font-medium text-muted-foreground">{t(`webhooks.variables.group.${group}`)}</h3>
-                  {groupVariables.map((variable) => {
-                    const sample = webhookVariableSample(catalog, variable, sampleEvent, webhook);
+                  {groupVariables.map((entry) => {
+                    const sample = webhookVariableSample(catalog, entry.variable, sampleEvent, webhook);
                     return (
                       <button
-                        key={variable.key}
+                        key={entry.baseKey}
                         type="button"
-                        onClick={() => selectVariable(variable)}
+                        onClick={() => selectVariable(entry)}
                         className="grid w-full grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)] items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                       >
                         <span className="min-w-0">
-                          <span className="block truncate text-xs font-medium">{t(variableLabelKey(variable))}</span>
-                          <code className="block truncate text-[10px] text-muted-foreground">{`{{${variable.key}}}`}</code>
+                          <span className="block truncate text-xs font-medium">
+                            {t(variableLabelKey(entry.baseKey))}
+                            {entry.variable.optional ? ` · ${t('webhooks.variables.optional')}` : ''}
+                          </span>
+                          <code className="block truncate text-[10px] text-muted-foreground">{`{{${entry.variable.key}}}`}</code>
                         </span>
                         <code className="truncate text-right text-[11px]" title={sample}>{sample}</code>
                       </button>

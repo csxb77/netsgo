@@ -19,7 +19,6 @@ import type { ActivityWebhookConfig, WebhookCatalog, WebhookEventKey } from '@/t
 export interface WebhookJsonEditorHandle {
   focus: () => void;
   format: () => boolean;
-  insert: (value: string) => void;
 }
 
 interface WebhookJsonEditorProps {
@@ -41,7 +40,7 @@ function webhookVariableCompletion(
   catalog: WebhookCatalog,
 ) {
   return (context: CompletionContext) => {
-    const variable = context.matchBefore(/{{[\w.]*$/);
+    const variable = context.matchBefore(/{{[\w.-]*$/);
     if (!variable && !context.explicit) return null;
     return {
       from: variable?.from ?? context.pos,
@@ -191,18 +190,6 @@ export const WebhookJsonEditor = forwardRef<WebhookJsonEditorHandle, WebhookJson
         } catch {
           return false;
         }
-      },
-      insert: (text: string) => {
-        const view = viewRef.current;
-        if (!view) return;
-        const selection = view.state.selection.main;
-        const cursor = selection.from + text.length;
-        view.dispatch({
-          changes: { from: selection.from, to: selection.to, insert: text },
-          selection: { anchor: cursor },
-          scrollIntoView: true,
-        });
-        view.focus();
       },
     }), []);
 

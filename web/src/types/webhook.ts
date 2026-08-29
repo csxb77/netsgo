@@ -29,10 +29,11 @@ export interface WebhookCatalogEvent {
 
 export interface WebhookVariable {
   key: string;
-  group: 'delivery' | 'event' | 'client' | 'tunnel' | 'subjects' | 'match' | 'p2p' | 'webhook';
+  group: 'delivery' | 'event' | 'client' | 'tunnel' | 'subjects' | 'match' | 'webhook';
   value_type: 'text' | 'number' | 'boolean' | 'json';
   surfaces: WebhookTemplateSurface[];
   available_for_events: 'all' | WebhookEventKey[];
+  optional?: boolean;
 }
 
 export interface WebhookCatalog {
@@ -40,6 +41,7 @@ export interface WebhookCatalog {
   variables: WebhookVariable[];
   fixtures: Record<WebhookEventKey, Record<string, WebhookTemplateValue>>;
   default_body: string;
+  locales: string[];
 }
 
 export interface WebhookTargetOption {
