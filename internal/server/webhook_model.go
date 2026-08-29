@@ -126,6 +126,17 @@ func (w ActivityWebhook) snapshot() webhookConfigSnapshot {
 	}
 }
 
+// toConfigInput rebuilds the stored configuration as an update input pinned to
+// the current revision, so policy checks run against exactly what is stored.
+func (w ActivityWebhook) toConfigInput(enabled bool) WebhookConfigInput {
+	return WebhookConfigInput{
+		ID: w.ID, ExpectedRevision: w.Revision, Name: w.Name, Enabled: enabled,
+		TargetKind: w.TargetKind, TargetMode: w.TargetMode,
+		TargetIDs: slices.Clone(w.TargetIDs), Method: w.Method, URL: w.URL,
+		Headers: slices.Clone(w.Headers), Body: w.Body, Events: slices.Clone(w.Events),
+	}
+}
+
 func (input WebhookConfigInput) snapshot(revision int64) webhookConfigSnapshot {
 	return webhookConfigSnapshot{
 		ID: input.ID, Revision: revision, Name: input.Name,

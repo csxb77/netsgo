@@ -489,3 +489,176 @@ func TestActivityAppendInfersP2PScopeAndEnqueuesWebhookDelivery(t *testing.T) {
 		t.Fatalf("p2p deliveries = %+v, want one event delivery via inferred scope", page.Items)
 	}
 }
+
+func TestValidateWebhookInputAllowsPublicTargetsWithDefaultPolicy(t *testing.T) {
+	catalog := activityWebhookCatalog()
+	publicURLs := []string{
+		"https://93.184.216.34/hook",
+		"http://8.8.8.8:8080/hook",
+		"https://[2606:2800:220:1:248:1893:25c8:1946]/hook",
+		"https://example.com/hook",
+		"https://open.feishu.cn/open-apis/bot/v2/hook/test",
+	}
+	for _, rawURL := range publicURLs {
+		input := normalizeWebhookInput(testWebhookInput("wh_public_policy"))
+		input.URL = rawURL
+		if err := validateWebhookInput(input, catalog.Fixtures, catalog.Variables, false); err != nil {
+			t.Fatalf("default policy: public URL %q should pass, got %v", rawURL, err)
+		}
+	}
+}
+
+func TestURLHostnameNormalizesHostForms(t *testing.T) {
+	cases := map[string]string{
+		"open.feishu.cn":     "open.feishu.cn",
+		"open.feishu.cn:443": "open.feishu.cn",
+		"1.2.3.4":            "1.2.3.4",
+		"1.2.3.4:8080":       "1.2.3.4",
+		"[::1]":              "::1",
+		"[2001:db8::1]:443":  "2001:db8::1",
+	}
+	for host, want := range cases {
+		if got := urlHostname(host); got != want {
+			t.Errorf("urlHostname(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+func TestWebhookHostBlockedLiteralAddresses(t *testing.T) {
+	blocked := []string{"192.168.1.5", "10.0.0.9", "127.0.0.1", "::1", "169.254.169.254"}
+	for _, host := range blocked {
+		if !webhookHostBlocked(host) {
+			t.Errorf("webhookHostBlocked(%q) = false, want true", host)
+		}
+	}
+	public := []string{"93.184.216.34", "8.8.8.8", "2606:2800:220:1:248:1893:25c8:1946"}
+	for _, host := range public {
+		if webhookHostBlocked(host) {
+			t.Errorf("webhookHostBlocked(%q) = true, want false", host)
+		}
+	}
+}
+
+func TestWebhookStoreSetEnabledValidatesOnEnable(t *testing.T) {
+	_, webhookStore, owner := newWebhookStoreFixture(t)
+	allowPrivate := true
+	webhookStore.settings = func() WebhookSettings {
+		return policySettings(allowPrivate, defaultWebhookDailyDeliveryCap)
+	}
+
+	private := normalizeWebhookInput(testWebhookInput("wh_toggle_private"))
+	private.URL = "http://192.168.1.10/hook"
+	private.Enabled = false
+	stored, err := webhookStore.Create(owner.ID, private)
+	if err != nil {
+		t.Fatalf("create private-url webhook with allow=true: %v", err)
+	}
+
+	allowPrivate = false
+	if _, err := webhookStore.SetEnabled(owner.ID, stored.ID, true); err == nil {
+		t.Fatal("enabling a private-URL webhook under the default policy should fail")
+	} else {
+		assertWebhookValidationError(t, err, "url", "url_target_not_allowed")
+	}
+	unchanged, err := webhookStore.Get(owner.ID, stored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Enabled || unchanged.Revision != stored.Revision {
+		t.Fatalf("rejected enable must not change state: enabled=%v revision=%d", unchanged.Enabled, unchanged.Revision)
+	}
+
+	public := normalizeWebhookInput(testWebhookInput("wh_toggle_public"))
+	public.URL = "https://93.184.216.34/hook"
+	public.Enabled = false
+	storedPublic, err := webhookStore.Create(owner.ID, public)
+	if err != nil {
+		t.Fatalf("create public-url webhook under the default policy: %v", err)
+	}
+	enabled, err := webhookStore.SetEnabled(owner.ID, storedPublic.ID, true)
+	if err != nil {
+		t.Fatalf("enable public-url webhook: %v", err)
+	}
+	if !enabled.Enabled || enabled.Revision != storedPublic.Revision+1 {
+		t.Fatalf("enabled=%v revision=%d (want enabled, %d)", enabled.Enabled, enabled.Revision, storedPublic.Revision+1)
+	}
+	idempotent, err := webhookStore.SetEnabled(owner.ID, storedPublic.ID, true)
+	if err != nil {
+		t.Fatalf("idempotent enable: %v", err)
+	}
+	if idempotent.Revision != enabled.Revision {
+		t.Fatalf("idempotent enable must not bump revision: %d vs %d", idempotent.Revision, enabled.Revision)
+	}
+	disabled, err := webhookStore.SetEnabled(owner.ID, storedPublic.ID, false)
+	if err != nil {
+		t.Fatalf("disable webhook: %v", err)
+	}
+	if disabled.Enabled || disabled.Revision != enabled.Revision+1 {
+		t.Fatalf("disable result: enabled=%v revision=%d", disabled.Enabled, disabled.Revision)
+	}
+}
+
+func TestWebhookEnqueueTestRejectsPrivateURLUnderDefaultPolicy(t *testing.T) {
+	_, webhookStore, owner := newWebhookStoreFixture(t)
+	webhookStore.settings = func() WebhookSettings {
+		return policySettings(false, defaultWebhookDailyDeliveryCap)
+	}
+	input := normalizeWebhookInput(testWebhookInput("wh_test_private"))
+	input.URL = "http://127.0.0.1:9000/hook"
+	_, err := webhookStore.EnqueueTest(owner.ID, input, "client.online")
+	if err == nil {
+		t.Fatal("test delivery to a private URL must be rejected under the default policy")
+	}
+	assertWebhookValidationError(t, err, "url", "url_target_not_allowed")
+}
+
+func TestDisableWebhooksViolatingPrivatePolicy(t *testing.T) {
+	_, webhookStore, owner := newWebhookStoreFixture(t)
+	allowPrivate := true
+	webhookStore.settings = func() WebhookSettings {
+		return policySettings(allowPrivate, defaultWebhookDailyDeliveryCap)
+	}
+
+	private := normalizeWebhookInput(testWebhookInput("wh_sweep_private"))
+	private.URL = "http://10.1.2.3/hook"
+	private.Enabled = true
+	if _, err := webhookStore.Create(owner.ID, private); err != nil {
+		t.Fatalf("create enabled private webhook with allow=true: %v", err)
+	}
+	public := normalizeWebhookInput(testWebhookInput("wh_sweep_public"))
+	public.URL = "https://93.184.216.34/hook"
+	public.Enabled = true
+	if _, err := webhookStore.Create(owner.ID, public); err != nil {
+		t.Fatalf("create enabled public webhook: %v", err)
+	}
+	disabledDraft := normalizeWebhookInput(testWebhookInput("wh_sweep_off"))
+	disabledDraft.URL = "http://10.1.2.4/hook"
+	disabledDraft.Enabled = false
+	if _, err := webhookStore.Create(owner.ID, disabledDraft); err != nil {
+		t.Fatalf("create disabled private webhook: %v", err)
+	}
+
+	allowPrivate = false
+	disabledCount, err := webhookStore.DisableWebhooksViolatingPrivatePolicy()
+	if err != nil {
+		t.Fatalf("disable policy violations: %v", err)
+	}
+	if disabledCount != 1 {
+		t.Fatalf("disabled count = %d, want 1 (only the enabled private webhook)", disabledCount)
+	}
+	privateAfter, err := webhookStore.Get(owner.ID, "wh_sweep_private")
+	if err != nil || privateAfter.Enabled {
+		t.Fatalf("enabled private webhook should be disabled: %+v err=%v", privateAfter, err)
+	}
+	if privateAfter.Revision != 2 {
+		t.Fatalf("disable should bump revision: %d", privateAfter.Revision)
+	}
+	publicAfter, err := webhookStore.Get(owner.ID, "wh_sweep_public")
+	if err != nil || !publicAfter.Enabled {
+		t.Fatalf("public webhook must stay enabled: %+v err=%v", publicAfter, err)
+	}
+	offAfter, err := webhookStore.Get(owner.ID, "wh_sweep_off")
+	if err != nil || offAfter.Enabled || offAfter.Revision != 1 {
+		t.Fatalf("already-disabled webhook must be untouched: %+v err=%v", offAfter, err)
+	}
+}
