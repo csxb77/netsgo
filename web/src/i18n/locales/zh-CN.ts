@@ -223,7 +223,7 @@ export const zhCN = {
   },
   webhooks: {
     navLabel: "Webhook",
-    pageTitle: "外部 Webhook",
+    pageTitle: "Webhook",
     pageDescription: "活动事件发生后，调用用户配置的外部接口。",
     status: {
       enabled: "已启用",
