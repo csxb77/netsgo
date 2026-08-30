@@ -68,7 +68,7 @@ func TestWebhookAPICompleteLifecycleIntegration(t *testing.T) {
 		t.Fatalf("preview status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
 	}
 	preview := decodeWebhookAPIResponse[WebhookPreview](t, previewResponse)
-	if preview.Event != "client.online" || !strings.Contains(preview.URL, "event=client.online") || preview.Headers["X-NetsGo-Attempt"] != "1" || preview.Body == nil {
+	if preview.Event != "client.online" || !strings.Contains(preview.URL, "event=client.online") || preview.Headers["X-NetsGo-Attempt"] != "1" || preview.Body == nil || !strings.Contains(*preview.Body, "客户端上线") || !strings.Contains(*preview.Body, "Client online") {
 		t.Fatalf("preview = %+v", preview)
 	}
 
@@ -82,7 +82,8 @@ func TestWebhookAPICompleteLifecycleIntegration(t *testing.T) {
 	}
 
 	getResponse := serveWebhookAPIRequest(t, handler, http.MethodGet, "/api/webhooks/"+created.ID, token, nil)
-	if getResponse.Code != http.StatusOK || decodeWebhookAPIResponse[ActivityWebhook](t, getResponse).ID != created.ID {
+	got := decodeWebhookAPIResponse[ActivityWebhook](t, getResponse)
+	if getResponse.Code != http.StatusOK || got.ID != created.ID {
 		t.Fatalf("get status=%d body=%s", getResponse.Code, getResponse.Body.String())
 	}
 	input.ID = created.ID

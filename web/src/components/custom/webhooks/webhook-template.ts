@@ -51,7 +51,7 @@ export interface RenderedWebhookRequest {
   values: Record<string, WebhookTemplateValue>;
 }
 
-export function webhookVariableSupportsEvents(variable: WebhookVariable, events: WebhookEventKey[]) {
+function webhookVariableSupportsEvents(variable: WebhookVariable, events: WebhookEventKey[]) {
   if (variable.available_for_events === 'all') return true;
   return events.length > 0 && events.every((event) => variable.available_for_events.includes(event));
 }
@@ -62,8 +62,47 @@ export function getWebhookVariables(
   surface: WebhookTemplateSurface,
 ) {
   return catalog.variables.filter((variable) => (
-    variable.surfaces.includes(surface) && webhookVariableSupportsEvents(variable, events)
+    variable.surfaces.includes(surface)
+    && webhookVariableSupportsEvents(variable, events)
   ));
+}
+
+// A picker entry is one visible row: language variants of the same variable
+// (event.name.zh-CN / event.name.en-US) collapse into a single baseKey row,
+// resolved to the picker's currently selected language.
+export interface PickerVariable {
+  baseKey: string;
+  variable: WebhookVariable;
+}
+
+function localeSuffix(catalog: WebhookCatalog, key: string) {
+  return (catalog.locales ?? []).find(
+    (locale) => key.length > locale.length + 1 && key.endsWith(`.${locale}`),
+  );
+}
+
+export function getPickerVariables(
+  catalog: WebhookCatalog,
+  events: WebhookEventKey[],
+  surface: WebhookTemplateSurface,
+  locale: string,
+): PickerVariable[] {
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const chosen = new Map<string, WebhookVariable>();
+  for (const variable of getWebhookVariables(catalog, events, surface)) {
+    const suffix = localeSuffix(catalog, variable.key);
+    const baseKey = suffix ? variable.key.slice(0, variable.key.length - suffix.length - 1) : variable.key;
+    if (!seen.has(baseKey)) {
+      seen.add(baseKey);
+      order.push(baseKey);
+    }
+    const existing = chosen.get(baseKey);
+    if (!existing || (!existing.key.endsWith(`.${locale}`) && variable.key.endsWith(`.${locale}`))) {
+      chosen.set(baseKey, variable);
+    }
+  }
+  return order.map((baseKey) => ({ baseKey, variable: chosen.get(baseKey)! }));
 }
 
 export function webhookVariableSample(
