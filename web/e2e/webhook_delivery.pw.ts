@@ -53,9 +53,12 @@ test('user can create, test-deliver, inspect, and delete an activity Webhook @we
     await sheet.getByLabel('Client online').check();
 
     const urlInput = sheet.getByPlaceholder('https://example.com/webhooks/netsgo');
-    await urlInput.locator('..').getByRole('button', { name: 'Insert variable' }).click();
+    await page.context().grantPermissions(['clipboard-write']);
+    await urlInput.locator('..').getByRole('button', { name: 'Copy variable' }).click();
     const variableList = page.locator('[data-slot="webhook-variable-list"]');
     await expect(variableList).toBeVisible();
+    await variableList.getByRole('button', { name: /Event type/ }).click();
+    await expect(page.getByText('Variable {{event.type}} copied to clipboard.')).toBeVisible();
     await expect.poll(() => variableList.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
     await variableList.hover();
     await page.mouse.wheel(0, 500);
