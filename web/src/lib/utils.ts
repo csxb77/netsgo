@@ -17,8 +17,12 @@ export function createLocalId(prefix = "id") {
 
 export async function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value)
-    return
+    try {
+      await navigator.clipboard.writeText(value)
+      return
+    } catch {
+      // Permission denied (e.g. unfocused document); fall through to execCommand.
+    }
   }
 
   const textarea = document.createElement("textarea")
