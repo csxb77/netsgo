@@ -224,7 +224,7 @@ export const enUS = {
   },
   webhooks: {
     navLabel: "Webhooks",
-    pageTitle: "Outbound Webhooks",
+    pageTitle: "Webhooks",
     pageDescription:
       "Call user-configured external endpoints when selected activity events occur.",
     status: {

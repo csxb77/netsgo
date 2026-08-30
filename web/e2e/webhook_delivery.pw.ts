@@ -43,7 +43,7 @@ test('user can create, test-deliver, inspect, and delete an activity Webhook @we
       }
     }
     await page.goto(e2eURL('/#/dashboard/webhooks'));
-    await expect(page.getByRole('heading', { name: 'Outbound Webhooks' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Webhooks' })).toBeVisible();
     await page.getByRole('button', { name: 'New webhook' }).click();
 
     const sheet = page.getByRole('dialog', { name: 'Activity log webhooks' });
