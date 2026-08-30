@@ -29,7 +29,7 @@ export interface WebhookCatalogEvent {
 
 export interface WebhookVariable {
   key: string;
-  group: 'delivery' | 'event' | 'client' | 'tunnel' | 'subjects' | 'match' | 'webhook';
+  group: 'delivery' | 'event' | 'client' | 'tunnel' | 'webhook';
   value_type: 'text' | 'number' | 'boolean' | 'json';
   surfaces: WebhookTemplateSurface[];
   available_for_events: 'all' | WebhookEventKey[];
