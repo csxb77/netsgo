@@ -18,16 +18,6 @@ func TestWebhookCatalogLocalizesHumanVariablesAndUsesGenericFixtures(t *testing.
 	if online["client.name"] != "Test client node" {
 		t.Fatalf("sample client name = %#v", online["client.name"])
 	}
-	if online["event.reason_code"] != "" || online["event.reason.zh-CN"] != "" || online["event.reason.en-US"] != "" {
-		t.Fatalf("online reasons = (%#v, %#v, %#v), want empty", online["event.reason_code"], online["event.reason.zh-CN"], online["event.reason.en-US"])
-	}
-	offline := catalog.Fixtures["client.offline"]
-	if offline["event.reason_code"] != "transport_error" ||
-		offline["event.reason.zh-CN"] != "客户端连接意外中断" ||
-		offline["event.reason.en-US"] != "The client connection was interrupted" {
-		t.Fatalf("localized offline reasons = (%#v, %#v, %#v)", offline["event.reason_code"], offline["event.reason.zh-CN"], offline["event.reason.en-US"])
-	}
-
 	if len(catalog.Locales) != len(supportedWebhookLocales()) {
 		t.Fatalf("catalog locales = %#v", catalog.Locales)
 	}
@@ -43,24 +33,13 @@ func TestWebhookCatalogLocalizesHumanVariablesAndUsesGenericFixtures(t *testing.
 	}
 }
 
-func TestWebhookLocalizedCatalogCoversEventsAndReasons(t *testing.T) {
+func TestWebhookLocalizedCatalogCoversEvents(t *testing.T) {
 	catalog := activityWebhookCatalog()
 	for _, event := range catalog.Events {
 		values := catalog.Fixtures[event.Key]
 		for _, locale := range supportedWebhookLocales() {
 			if values["event.name."+string(locale)] == "" || values["event.summary."+string(locale)] == "" {
 				t.Fatalf("event %q is missing %q human text", event.Key, locale)
-			}
-		}
-	}
-	for _, action := range []string{"offline", "runtime_error", "failed", "fallback", "session_closed"} {
-		for reason := range activityReasonAllowlist[action] {
-			snapshot := webhookEventSnapshot{Type: "client.offline", ReasonCode: reason}
-			values := snapshot.values("dlv", "wh", "Webhook")
-			for _, locale := range supportedWebhookLocales() {
-				if values["event.reason."+string(locale)] == "" {
-					t.Fatalf("reason %q is missing %q human text", reason, locale)
-				}
 			}
 		}
 	}

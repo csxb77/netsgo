@@ -133,7 +133,7 @@ func TestValidateWebhookInputRejectsInvalidConfigurationMatrix(t *testing.T) {
 			input.Headers = []WebhookHeader{{Key: "X-Test", Value: "{{missing.value}}"}}
 		}},
 		{name: "unsupported header variable", field: "headers", code: "unsupported_surface", mutate: func(input *WebhookConfigInput) {
-			input.Headers = []WebhookHeader{{Key: "X-Test", Value: "{{event.data}}"}}
+			input.Headers = []WebhookHeader{{Key: "X-Test", Value: "{{delivery.attempt}}"}}
 		}},
 		{name: "unavailable header variable", field: "headers", code: "unavailable_variable", mutate: func(input *WebhookConfigInput) {
 			input.Headers = []WebhookHeader{{Key: "X-Test", Value: "{{tunnel.id}}"}}
@@ -170,6 +170,6 @@ func TestValidateWebhookInputRejectsMissingFixtureAndRenderedSize(t *testing.T) 
 	for key, value := range catalog.Fixtures {
 		fixtures[key] = cloneWebhookValues(value)
 	}
-	fixtures["client.online"]["event.data"] = map[string]any{"payload": strings.Repeat("x", webhookRenderedRequestMax)}
+	fixtures["client.online"]["event.summary.en-US"] = strings.Repeat("x", webhookRenderedRequestMax)
 	assertWebhookValidationError(t, validateWebhookInput(base, fixtures, catalog.Variables, true), "body", "invalid_template")
 }
