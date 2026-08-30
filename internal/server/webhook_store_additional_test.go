@@ -188,7 +188,7 @@ func TestWebhookPreviewAndTestDeliveryUseUnsavedConfiguration(t *testing.T) {
 	input.Events = []string{"client.online"}
 	input.URL = "https://example.test/hook?event={{event.type}}&client={{client.id}}&delivery={{delivery.id}}"
 	input.Headers = []WebhookHeader{{Key: "X-Webhook", Value: "{{webhook.name}}"}}
-	input.Body = `{"attempt":"{{delivery.attempt}}","expected":"{{event.expected}}","targets":"{{match.target_ids}}"}`
+	input.Body = `{"attempt":"{{delivery.attempt}}","type":"{{event.type}}","webhook":"{{webhook.name}}"}`
 
 	preview, err := webhookStore.Preview(input, "client.online")
 	if err != nil {
@@ -204,7 +204,7 @@ func TestWebhookPreviewAndTestDeliveryUseUnsavedConfiguration(t *testing.T) {
 	if preview.Body == nil || jsonUnmarshalUseNumber([]byte(*preview.Body), &previewBody) != nil {
 		t.Fatalf("preview body = %v", preview.Body)
 	}
-	if previewBody["attempt"] != jsonNumber("1") || previewBody["expected"] != true {
+	if previewBody["attempt"] != jsonNumber("1") || previewBody["type"] != "client.online" {
 		t.Fatalf("preview typed body = %#v", previewBody)
 	}
 

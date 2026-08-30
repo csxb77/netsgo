@@ -1063,7 +1063,7 @@ function VariablePicker({ webhook, catalog, events, sampleEvent, surface, standa
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const [language, setLanguage] = useState(() => resolvedPickerLanguage(i18n.resolvedLanguage, catalog.locales));
-  const groups = ['delivery', 'event', 'client', 'tunnel', 'subjects', 'match', 'webhook'] as const;
+  const groups = ['delivery', 'event', 'client', 'tunnel', 'webhook'] as const;
   const variables = useMemo(
     () => getPickerVariables(catalog, events, surface, language),
     [catalog, events, surface, language],

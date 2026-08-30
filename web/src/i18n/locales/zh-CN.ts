@@ -390,8 +390,6 @@ export const zhCN = {
         event: "事件内容",
         client: "客户端信息",
         tunnel: "隧道信息",
-        subjects: "关联对象",
-        match: "命中的监听对象",
         webhook: "当前 Webhook",
       },
       item: {
@@ -406,20 +404,6 @@ export const zhCN = {
           severity: "事件级别",
           occurred_at: "发生时间",
           summary: "事件摘要",
-          reason_code: "原因代码",
-          reason: "原因说明",
-          expected: "是否为预期变化",
-          data: "事件详细数据",
-        },
-        subjects: {
-          clients: "关联客户端列表",
-          tunnels: "关联隧道列表",
-          client_ids_csv: "关联客户端 ID（逗号分隔）",
-          tunnel_ids_csv: "关联隧道 ID（逗号分隔）",
-        },
-        match: {
-          target_ids: "命中的监听对象 ID",
-          target_ids_csv: "命中的监听对象 ID（逗号分隔）",
         },
         client: {
           id: "客户端 ID",

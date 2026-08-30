@@ -392,8 +392,6 @@ export const enUS = {
         event: "Event details",
         client: "Client details",
         tunnel: "Tunnel details",
-        subjects: "Related objects",
-        match: "Matched targets",
         webhook: "Current webhook",
       },
       item: {
@@ -408,20 +406,6 @@ export const enUS = {
           severity: "Event severity",
           occurred_at: "Occurred at",
           summary: "Event summary",
-          reason_code: "Reason code",
-          reason: "Reason",
-          expected: "Expected change",
-          data: "Event detail data",
-        },
-        subjects: {
-          clients: "Related client list",
-          tunnels: "Related tunnel list",
-          client_ids_csv: "Related client IDs (comma-separated)",
-          tunnel_ids_csv: "Related tunnel IDs (comma-separated)",
-        },
-        match: {
-          target_ids: "Matched target IDs",
-          target_ids_csv: "Matched target IDs (comma-separated)",
         },
         client: {
           id: "Client ID",

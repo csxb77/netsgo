@@ -26,20 +26,12 @@ const defaultActivityWebhookBody = `{
       "en-US": "{{event.summary.en-US}}"
     },
     "occurred_at": "{{event.occurred_at}}",
-    "severity": "{{event.severity}}",
-    "reason_code": "{{event.reason_code}}",
-    "reason": {
-      "zh-CN": "{{event.reason.zh-CN}}",
-      "en-US": "{{event.reason.en-US}}"
-    },
-    "expected": "{{event.expected}}",
-    "data": "{{event.data}}"
+    "severity": "{{event.severity}}"
   },
-  "subjects": {
-    "clients": "{{subjects.clients}}",
-    "tunnels": "{{subjects.tunnels}}"
-  },
-  "matched_target_ids": "{{match.target_ids}}"
+  "webhook": {
+    "id": "{{webhook.id}}",
+    "name": "{{webhook.name}}"
+  }
 }`
 
 type WebhookCatalogEvent struct {
@@ -77,9 +69,6 @@ type webhookEventSnapshot struct {
 	Type             string                  `json:"type"`
 	Severity         string                  `json:"severity"`
 	OccurredAt       string                  `json:"occurred_at"`
-	ReasonCode       string                  `json:"reason_code"`
-	Expected         bool                    `json:"expected"`
-	Data             map[string]any          `json:"data"`
 	Clients          []webhookClientSnapshot `json:"clients"`
 	Tunnels          []webhookTunnelSnapshot `json:"tunnels"`
 	MatchedTargetIDs []string                `json:"matched_target_ids"`
@@ -126,17 +115,6 @@ func webhookCatalogVariables() []WebhookVariable {
 		{Key: "event.summary.en-US", Group: "event", ValueType: "text", Surfaces: every, AvailableForEvents: all},
 		{Key: "event.severity", Group: "event", ValueType: "text", Surfaces: every, AvailableForEvents: all},
 		{Key: "event.occurred_at", Group: "event", ValueType: "text", Surfaces: every, AvailableForEvents: all},
-		{Key: "event.reason_code", Group: "event", ValueType: "text", Surfaces: every, AvailableForEvents: all, Optional: true},
-		{Key: "event.reason.zh-CN", Group: "event", ValueType: "text", Surfaces: every, AvailableForEvents: all, Optional: true},
-		{Key: "event.reason.en-US", Group: "event", ValueType: "text", Surfaces: every, AvailableForEvents: all, Optional: true},
-		{Key: "event.expected", Group: "event", ValueType: "boolean", Surfaces: body, AvailableForEvents: all},
-		{Key: "event.data", Group: "event", ValueType: "json", Surfaces: body, AvailableForEvents: all},
-		{Key: "subjects.clients", Group: "subjects", ValueType: "json", Surfaces: body, AvailableForEvents: all},
-		{Key: "subjects.tunnels", Group: "subjects", ValueType: "json", Surfaces: body, AvailableForEvents: all},
-		{Key: "subjects.client_ids_csv", Group: "subjects", ValueType: "text", Surfaces: every, AvailableForEvents: all},
-		{Key: "subjects.tunnel_ids_csv", Group: "subjects", ValueType: "text", Surfaces: every, AvailableForEvents: all},
-		{Key: "match.target_ids", Group: "match", ValueType: "json", Surfaces: body, AvailableForEvents: all},
-		{Key: "match.target_ids_csv", Group: "match", ValueType: "text", Surfaces: every, AvailableForEvents: all},
 		{Key: "client.id", Group: "client", ValueType: "text", Surfaces: every, AvailableForEvents: clients},
 		{Key: "client.name", Group: "client", ValueType: "text", Surfaces: every, AvailableForEvents: clients},
 		{Key: "client.hostname", Group: "client", ValueType: "text", Surfaces: every, AvailableForEvents: clients, Optional: true},
@@ -156,33 +134,26 @@ func sampleWebhookEvent(eventType string) webhookEventSnapshot {
 	peer := webhookClientSnapshot{ID: "client_test_peer", Name: "Test peer node", Hostname: "test-peer-node"}
 	serviceTunnel := webhookTunnelSnapshot{ID: "tunnel_test_service", Name: "Test service tunnel", Type: "https", Topology: "server_expose", RuntimeState: "active"}
 	p2pTunnel := webhookTunnelSnapshot{ID: "tunnel_test_p2p", Name: "Test P2P tunnel", Type: "tcp", Topology: "client_to_client", RuntimeState: "active"}
-	snapshot := webhookEventSnapshot{ID: "evt_sample_" + strings.ReplaceAll(eventType, ".", "_"), Type: eventType, OccurredAt: now, Expected: true, Data: map[string]any{}}
+	snapshot := webhookEventSnapshot{ID: "evt_sample_" + strings.ReplaceAll(eventType, ".", "_"), Type: eventType, OccurredAt: now}
 	switch eventType {
 	case "client.online":
 		snapshot.Severity, snapshot.Clients, snapshot.MatchedTargetIDs = "info", []webhookClientSnapshot{client}, []string{client.ID}
-		snapshot.Data = map[string]any{"status": "online"}
 	case "client.offline":
-		snapshot.Severity, snapshot.ReasonCode, snapshot.Expected = "warning", "transport_error", false
+		snapshot.Severity = "warning"
 		snapshot.Clients, snapshot.MatchedTargetIDs = []webhookClientSnapshot{client}, []string{client.ID}
-		snapshot.Data = map[string]any{"status": "offline", "reason_code": snapshot.ReasonCode}
 	case "tunnel.stopped":
 		serviceTunnel.RuntimeState = "idle"
 		snapshot.Severity, snapshot.Tunnels, snapshot.MatchedTargetIDs = "info", []webhookTunnelSnapshot{serviceTunnel}, []string{serviceTunnel.ID}
-		snapshot.Data = map[string]any{"before": "running", "after": "stopped"}
 	case "tunnel.resumed":
 		snapshot.Severity, snapshot.Tunnels, snapshot.MatchedTargetIDs = "info", []webhookTunnelSnapshot{serviceTunnel}, []string{serviceTunnel.ID}
-		snapshot.Data = map[string]any{"before": "stopped", "after": "running"}
 	case "tunnel.runtime_changed":
 		snapshot.Severity, snapshot.Tunnels, snapshot.MatchedTargetIDs = "debug", []webhookTunnelSnapshot{serviceTunnel}, []string{serviceTunnel.ID}
-		snapshot.Data = map[string]any{"before": "pending", "after": "active", "revision": 18}
 	case "tunnel.runtime_error":
 		serviceTunnel.RuntimeState = "error"
-		snapshot.Severity, snapshot.ReasonCode, snapshot.Expected = "error", "start_failed", false
+		snapshot.Severity = "error"
 		snapshot.Tunnels, snapshot.MatchedTargetIDs = []webhookTunnelSnapshot{serviceTunnel}, []string{serviceTunnel.ID}
-		snapshot.Data = map[string]any{"before": "pending", "after": "error", "reason_code": snapshot.ReasonCode}
 	case "tunnel.runtime_recovered":
 		snapshot.Severity, snapshot.Tunnels, snapshot.MatchedTargetIDs = "info", []webhookTunnelSnapshot{serviceTunnel}, []string{serviceTunnel.ID}
-		snapshot.Data = map[string]any{"before": "error", "after": "active"}
 	case "p2p.checking", "p2p.connected", "p2p.failed", "p2p.fallback", "p2p.session_closed":
 		state := strings.TrimPrefix(eventType, "p2p.")
 		snapshot.Severity = "info"
@@ -190,42 +161,26 @@ func sampleWebhookEvent(eventType string) webhookEventSnapshot {
 			snapshot.Severity = "debug"
 		}
 		if state == "failed" || state == "fallback" {
-			snapshot.Severity, snapshot.Expected = "warning", false
+			snapshot.Severity = "warning"
 		}
-		snapshot.ReasonCode = map[string]string{"failed": "negotiation_failed", "fallback": "negotiation_failed", "session_closed": "tunnel_stopped"}[state]
 		snapshot.Clients = []webhookClientSnapshot{client, peer}
 		snapshot.Tunnels = []webhookTunnelSnapshot{p2pTunnel, serviceTunnel}
 		snapshot.MatchedTargetIDs = []string{p2pTunnel.ID, serviceTunnel.ID}
-		snapshot.Data = map[string]any{"state": state, "reason_code": snapshot.ReasonCode}
 	}
 	return snapshot
 }
 
 func (snapshot webhookEventSnapshot) values(deliveryID, webhookID, webhookName string) map[string]any {
-	clientIDs := make([]string, 0, len(snapshot.Clients))
-	for _, client := range snapshot.Clients {
-		clientIDs = append(clientIDs, client.ID)
-	}
-	tunnelIDs := make([]string, 0, len(snapshot.Tunnels))
-	for _, tunnel := range snapshot.Tunnels {
-		tunnelIDs = append(tunnelIDs, tunnel.ID)
-	}
 	values := map[string]any{
 		"delivery.id": deliveryID, "delivery.attempt": 1,
 		"event.id": snapshot.ID, "event.type": snapshot.Type,
 		"event.severity": snapshot.Severity, "event.occurred_at": snapshot.OccurredAt,
-		"event.reason_code": snapshot.ReasonCode,
-		"event.expected": snapshot.Expected, "event.data": snapshot.Data,
-		"subjects.clients": snapshot.Clients, "subjects.tunnels": snapshot.Tunnels,
-		"subjects.client_ids_csv": strings.Join(clientIDs, ","), "subjects.tunnel_ids_csv": strings.Join(tunnelIDs, ","),
-		"match.target_ids": snapshot.MatchedTargetIDs, "match.target_ids_csv": strings.Join(snapshot.MatchedTargetIDs, ","),
 		"webhook.id": webhookID, "webhook.name": webhookName,
 	}
 	for _, locale := range supportedWebhookLocales() {
 		localized := localizeWebhookEvent(snapshot, locale)
 		values["event.name."+string(locale)] = localized.Name
 		values["event.summary."+string(locale)] = localized.Summary
-		values["event.reason."+string(locale)] = localized.Reason
 	}
 	if len(snapshot.Clients) == 1 && strings.HasPrefix(snapshot.Type, "client.") {
 		values["client.id"], values["client.name"] = snapshot.Clients[0].ID, snapshot.Clients[0].Name
@@ -245,11 +200,9 @@ func webhookEventSnapshotFromPrepared(activityID int64, prepared preparedActivit
 		return webhookEventSnapshot{}, fmt.Errorf("decode activity payload for Webhook: %w", err)
 	}
 	eventType := string(prepared.category) + "." + prepared.action
-	reasonCode, _ := data["reason_code"].(string)
 	snapshot := webhookEventSnapshot{
 		ID: fmt.Sprintf("%d", activityID), Type: eventType,
 		Severity: string(prepared.severity), OccurredAt: prepared.occurredAt.Format(time.RFC3339Nano),
-		ReasonCode: reasonCode, Expected: webhookEventExpected(eventType, reasonCode), Data: data,
 		Clients:          make([]webhookClientSnapshot, 0, len(prepared.clients)),
 		Tunnels:          make([]webhookTunnelSnapshot, 0, len(prepared.tunnels)),
 		MatchedTargetIDs: append([]string(nil), matchedTargetIDs...),
@@ -282,15 +235,3 @@ func webhookEventSnapshotFromPrepared(activityID int64, prepared preparedActivit
 	return snapshot, nil
 }
 
-func webhookEventExpected(eventType, reason string) bool {
-	switch eventType {
-	case "client.offline":
-		return reason == "normal_closure" || reason == "server_shutdown" || reason == "user_disabled" || reason == "replaced"
-	case "tunnel.runtime_error", "p2p.failed", "p2p.fallback":
-		return false
-	case "p2p.session_closed":
-		return reason != "lease_unhealthy" && reason != "lease_expired"
-	default:
-		return true
-	}
-}

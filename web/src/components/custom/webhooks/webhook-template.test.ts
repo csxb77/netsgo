@@ -14,12 +14,11 @@ import {
 
 const defaultBody = `{
   "delivery": { "attempt": "{{delivery.attempt}}" },
-  "event": { "expected": "{{event.expected}}" },
-  "subjects": {
-    "clients": "{{subjects.clients}}",
-    "tunnels": "{{subjects.tunnels}}"
+  "event": {
+    "type": "{{event.type}}",
+    "summary": { "zh-CN": "{{event.summary.zh-CN}}", "en-US": "{{event.summary.en-US}}" }
   },
-  "matched_target_ids": "{{match.target_ids}}"
+  "webhook": { "name": "{{webhook.name}}" }
 }`;
 
 const allEvents = 'all' as const;
@@ -31,11 +30,8 @@ const variables: WebhookVariable[] = [
   { key: 'event.type', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'event.name.zh-CN', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'event.name.en-US', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
-  { key: 'event.expected', group: 'event', value_type: 'boolean', surfaces: [...body], available_for_events: allEvents },
-  { key: 'event.data', group: 'event', value_type: 'json', surfaces: [...body], available_for_events: allEvents },
-  { key: 'subjects.clients', group: 'subjects', value_type: 'json', surfaces: [...body], available_for_events: allEvents },
-  { key: 'subjects.tunnels', group: 'subjects', value_type: 'json', surfaces: [...body], available_for_events: allEvents },
-  { key: 'match.target_ids', group: 'match', value_type: 'json', surfaces: [...body], available_for_events: allEvents },
+  { key: 'event.summary.zh-CN', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
+  { key: 'event.summary.en-US', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'client.id', group: 'client', value_type: 'text', surfaces: [...everySurface], available_for_events: ['client.online'] },
   { key: 'tunnel.id', group: 'tunnel', value_type: 'text', surfaces: [...everySurface], available_for_events: ['tunnel.runtime_error'] },
   { key: 'webhook.id', group: 'webhook', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
@@ -49,12 +45,9 @@ const fixtures = {
     'event.type': 'client.online',
     'event.name.zh-CN': '客户端上线',
     'event.name.en-US': 'Client online',
-    'event.expected': true,
-    'event.data': { status: 'online', count: 2 },
+    'event.summary.zh-CN': 'client-a 已上线',
+    'event.summary.en-US': 'client-a came online',
     'client.id': 'client-a',
-    'subjects.clients': [{ id: 'client-a' }],
-    'subjects.tunnels': [],
-    'match.target_ids': ['client-a'],
   },
   'p2p.connected': {
     'delivery.id': 'dlv-p2p-connected',
@@ -62,11 +55,8 @@ const fixtures = {
     'event.type': 'p2p.connected',
     'event.name.zh-CN': 'P2P 已直连',
     'event.name.en-US': 'P2P connected',
-    'event.expected': true,
-    'event.data': { state: 'connected' },
-    'subjects.clients': [{ id: 'client-a' }, { id: 'client-b' }],
-    'subjects.tunnels': [{ id: 'tunnel-a' }, { id: 'tunnel-b' }],
-    'match.target_ids': ['tunnel-a', 'tunnel-b'],
+    'event.summary.zh-CN': 'P2P 已直连',
+    'event.summary.en-US': 'P2P connected',
   },
   'p2p.failed': {
     'delivery.id': 'dlv-p2p-failed',
@@ -74,11 +64,8 @@ const fixtures = {
     'event.type': 'p2p.failed',
     'event.name.zh-CN': 'P2P 直连失败',
     'event.name.en-US': 'P2P failed',
-    'event.expected': false,
-    'event.data': { state: 'failed' },
-    'subjects.clients': [],
-    'subjects.tunnels': [],
-    'match.target_ids': [],
+    'event.summary.zh-CN': 'P2P 直连失败',
+    'event.summary.en-US': 'P2P failed',
   },
   'tunnel.runtime_error': {
     'delivery.id': 'dlv-tunnel-error',
@@ -86,11 +73,8 @@ const fixtures = {
     'event.type': 'tunnel.runtime_error',
     'event.name.zh-CN': '隧道运行异常',
     'event.name.en-US': 'Tunnel runtime error',
-    'event.expected': false,
-    'event.data': { state: 'error' },
-    'subjects.clients': [],
-    'subjects.tunnels': [{ id: 'tunnel-a' }],
-    'match.target_ids': ['tunnel-a'],
+    'event.summary.zh-CN': 'tunnel-a 运行异常',
+    'event.summary.en-US': 'tunnel-a encountered a runtime error',
     'tunnel.id': 'tunnel-a',
   },
 } as WebhookCatalog['fixtures'];
@@ -141,10 +125,8 @@ describe('webhook request templates', () => {
 
     const rendered = JSON.parse(request.body);
     expect(rendered.delivery.attempt).toBe(1);
-    expect(rendered.event.expected).toBe(true);
-    expect(rendered.subjects.clients).toHaveLength(2);
-    expect(rendered.subjects.tunnels).toHaveLength(2);
-    expect(rendered.matched_target_ids).toEqual(['tunnel-a', 'tunnel-b']);
+    expect(rendered.event.summary['zh-CN']).toBe('P2P 已直连');
+    expect(rendered.webhook.name).toBe('Test webhook');
   });
 
   test('rejects a singular tunnel variable when P2P events share the template', () => {
@@ -165,7 +147,7 @@ describe('webhook request templates', () => {
     expect(catalog.fixtures['client.online']['client.id']).toBe('client-a');
     expect(catalog.fixtures['client.online']['event.name.en-US']).toBe('Client online');
     expect(catalog.fixtures['client.online']['event.name.zh-CN']).toBe('客户端上线');
-    expect(catalog.fixtures['p2p.connected']['event.data']).toEqual({ state: 'connected' });
+    expect(catalog.fixtures['p2p.connected']['event.name.en-US']).toBe('P2P connected');
   });
 
   test('renders each language variable in its own language', () => {
@@ -196,17 +178,15 @@ describe('webhook request templates', () => {
   test('preserves exact-token JSON types through nested objects and arrays', () => {
     const rendered = renderJsonBody(`{
       "attempt": "{{delivery.attempt}}",
-      "expected": "{{event.expected}}",
-      "data": "{{event.data}}",
-      "items": ["{{subjects.clients}}", "attempt={{delivery.attempt}}"],
+      "name": "{{event.name.en-US}}",
+      "items": ["{{event.type}}", "attempt={{delivery.attempt}}"],
       "missing": "{{missing.value}}"
     }`, catalog.fixtures['client.online']);
 
     expect(JSON.parse(rendered)).toEqual({
       attempt: 1,
-      expected: true,
-      data: { status: 'online', count: 2 },
-      items: [[{ id: 'client-a' }], 'attempt=1'],
+      name: 'Client online',
+      items: ['client.online', 'attempt=1'],
       missing: '{{missing.value}}',
     });
   });
@@ -229,6 +209,8 @@ describe('webhook request templates', () => {
       'event.type',
       'event.name.zh-CN',
       'event.name.en-US',
+      'event.summary.zh-CN',
+      'event.summary.en-US',
       'client.id',
       'webhook.id',
       'webhook.name',
@@ -238,13 +220,15 @@ describe('webhook request templates', () => {
       'event.type',
       'event.name.zh-CN',
       'event.name.en-US',
+      'event.summary.zh-CN',
+      'event.summary.en-US',
       'webhook.id',
       'webhook.name',
     ]);
   });
 
   test('formats fixture and current-webhook samples for the variable picker', () => {
-    expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'event.data')!, 'client.online')).toBe('{"status":"online","count":2}');
+    expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'event.type')!, 'client.online')).toBe('client.online');
     expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'webhook.name')!, 'client.online', webhook({ name: 'Current name' }))).toBe('Current name');
     expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'webhook.name')!, 'client.online', webhook({ name: '' }))).toBe('Webhook');
   });
