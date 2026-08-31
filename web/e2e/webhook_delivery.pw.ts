@@ -49,23 +49,48 @@ test('user can create, test-deliver, inspect, and delete an activity Webhook @we
     const sheet = page.getByRole('dialog', { name: 'Activity log webhooks' });
     await expect(sheet).toBeVisible();
     await sheet.getByLabel('Webhook name').fill(name);
-    await sheet.getByRole('radio', { name: 'All', exact: true }).click();
-    await sheet.getByLabel('Client online').check();
+
+    await sheet.getByRole('radio', { name: 'Tunnel', exact: true }).click();
+    const tunnelChangeDialog = page.getByRole('alertdialog', { name: 'Change listening object?' });
+    await expect(tunnelChangeDialog).toBeVisible();
+    await tunnelChangeDialog.getByRole('button', { name: 'Change object' }).click();
+
+    const tunnelEventCheckboxes = sheet.locator('[data-webhook-field="events"] [role="checkbox"]');
+    await expect(tunnelEventCheckboxes).toHaveCount(10);
+    for (const checkbox of await tunnelEventCheckboxes.all()) {
+      await expect(checkbox).not.toBeChecked();
+    }
+    await sheet.getByLabel('Tunnel runtime error').check();
 
     const urlInput = sheet.getByPlaceholder('https://example.com/webhooks/netsgo');
     await page.context().grantPermissions(['clipboard-write']);
     await urlInput.locator('..').getByRole('button', { name: 'Copy variable' }).click();
     const variableList = page.locator('[data-slot="webhook-variable-list"]');
     await expect(variableList).toBeVisible();
-    await variableList.getByRole('button', { name: /Event type/ }).click();
-    await expect(page.getByText('Variable {{event.type}} copied to clipboard.')).toBeVisible();
-    await expect.poll(() => variableList.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-    await variableList.hover();
-    await page.mouse.wheel(0, 500);
-    await expect.poll(() => variableList.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(variableList.getByRole('button', { name: /Client ID/ })).toBeVisible();
+    await expect(variableList.getByRole('button', { name: /Client name/ })).toBeVisible();
+    await expect(variableList.getByRole('button', { name: /Client hostname/ })).toHaveCount(0);
+    await expect(variableList.getByRole('button', { name: /Activity event ID/ })).toHaveCount(0);
+    await expect(variableList.getByRole('button', { name: /Event type/ })).toHaveCount(0);
+    await expect(variableList.getByRole('button', { name: /Webhook ID/ })).toHaveCount(0);
+    await variableList.getByRole('button', { name: /Client ID/ }).click();
+    await expect(page.getByText('Variable {{client.id}} copied to clipboard.')).toBeVisible();
     await page.keyboard.press('Escape');
 
-    await urlInput.fill('http://webhook-receiver:18085/hook?event={{event.type}}&delivery={{delivery.id}}');
+    await sheet.getByRole('radio', { name: 'Client', exact: true }).click();
+    const clientChangeDialog = page.getByRole('alertdialog', { name: 'Change listening object?' });
+    await expect(clientChangeDialog).toBeVisible();
+    await clientChangeDialog.getByRole('button', { name: 'Change object' }).click();
+    await sheet.getByRole('radio', { name: 'All', exact: true }).click();
+    await sheet.getByLabel('Client online').check();
+
+    await urlInput.locator('..').getByRole('button', { name: 'Copy variable' }).click();
+    await expect(variableList).toBeVisible();
+    await variableList.getByRole('button', { name: /Client name/ }).click();
+    await expect(page.getByText('Variable {{client.name}} copied to clipboard.')).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await urlInput.fill('http://webhook-receiver:18085/hook?client={{client.id}}&delivery={{delivery.id}}');
     await sheet.getByRole('button', { name: 'Save and enable' }).click();
     await expect(page.getByText('Webhook created.', { exact: true })).toBeVisible();
     await expect.poll(async () => (await listWebhooks(page)).some((item) => item.name === name)).toBe(true);

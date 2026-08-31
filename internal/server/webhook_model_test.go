@@ -67,7 +67,7 @@ func TestValidateWebhookInputAcceptsSupportedGETAndPOSTConfigurations(t *testing
 	get := cloneWebhookInput(post)
 	get.ID = "wh_valid_get"
 	get.Method = WebhookMethodGET
-	get.URL = "https://example.test/hook?event={{event.type}}&client={{client.id}}"
+	get.URL = "https://example.test/hook?event={{event.name.en-US}}&client={{client.id}}"
 	get.Body = "not-json-is-ignored-for-get"
 	if err := validateWebhookInput(get, catalog.Fixtures, catalog.Variables, true); err != nil {
 		t.Fatalf("valid GET configuration: %v", err)

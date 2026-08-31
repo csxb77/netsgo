@@ -574,15 +574,13 @@ function WebhookConfiguration({
   const confirmTargetKindChange = () => {
     const targetKind = pendingTargetKind;
     if (!targetKind) return;
-    const events: WebhookEventKey[] = targetKind === 'client'
-      ? ['client.online', 'client.offline']
-      : ['tunnel.runtime_error', 'tunnel.runtime_recovered', 'p2p.failed', 'p2p.fallback'];
+    const events: WebhookEventKey[] = [];
     onUpdate('targetKind', targetKind);
     onUpdate('targetMode', 'all');
     onUpdate('targetIds', []);
     onUpdate('events', events);
     onUpdate('body', catalog.default_body);
-    setSampleEvent(events[0]);
+    setSampleEvent(targetKind === 'client' ? 'client.online' : 'tunnel.runtime_changed');
     setPendingTargetKind(null);
     const retainedTemplates = [
       ...getTemplateIssues(webhook.url, events, 'url', catalog.variables),

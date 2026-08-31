@@ -400,8 +400,6 @@ export const enUS = {
           attempt: "Current attempt number",
         },
         event: {
-          id: "Activity event ID",
-          type: "Event type",
           name: "Event name",
           severity: "Event severity",
           occurred_at: "Occurred at",
@@ -410,7 +408,6 @@ export const enUS = {
         client: {
           id: "Client ID",
           name: "Client name",
-          hostname: "Client hostname",
         },
         tunnel: {
           id: "Tunnel ID",
@@ -420,7 +417,6 @@ export const enUS = {
           runtime_state: "Tunnel runtime state",
         },
         webhook: {
-          id: "Webhook ID",
           name: "Webhook name",
         },
       },

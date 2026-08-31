@@ -60,7 +60,7 @@ func TestWebhookAPICompleteLifecycleIntegration(t *testing.T) {
 	input := testWebhookInput("")
 	input.Name = "API lifecycle"
 	input.Events = []string{"client.online"}
-	input.URL = "https://preview.example/hook?event={{event.type}}&delivery={{delivery.id}}"
+	input.URL = "https://preview.example/hook?event={{event.name.en-US}}&delivery={{delivery.id}}"
 	previewInput := cloneWebhookInput(input)
 	previewInput.ID = "wh_api_preview"
 	previewResponse := serveWebhookAPIRequest(t, handler, http.MethodPost, "/api/webhooks/preview", token, webhookPreviewRequest{Config: previewInput, Event: "client.online"})
@@ -68,7 +68,7 @@ func TestWebhookAPICompleteLifecycleIntegration(t *testing.T) {
 		t.Fatalf("preview status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
 	}
 	preview := decodeWebhookAPIResponse[WebhookPreview](t, previewResponse)
-	if preview.Event != "client.online" || !strings.Contains(preview.URL, "event=client.online") || preview.Headers["X-NetsGo-Attempt"] != "1" || preview.Body == nil || !strings.Contains(*preview.Body, "客户端上线") || !strings.Contains(*preview.Body, "Client online") {
+	if preview.Event != "client.online" || !strings.Contains(preview.URL, "event=Client%20online") || preview.Headers["X-NetsGo-Attempt"] != "1" || preview.Body == nil || !strings.Contains(*preview.Body, "客户端上线") || !strings.Contains(*preview.Body, "Client online") {
 		t.Fatalf("preview = %+v", preview)
 	}
 
