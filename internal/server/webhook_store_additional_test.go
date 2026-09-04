@@ -186,9 +186,9 @@ func TestWebhookPreviewAndTestDeliveryUseUnsavedConfiguration(t *testing.T) {
 	input.Name = "Unsaved Webhook"
 	input.TargetMode, input.TargetIDs = WebhookTargetSelected, []string{client.ID}
 	input.Events = []string{"client.online"}
-	input.URL = "https://example.test/hook?event={{event.type}}&client={{client.id}}&delivery={{delivery.id}}"
+	input.URL = "https://example.test/hook?event={{event.name.en-US}}&client={{client.id}}&delivery={{delivery.id}}"
 	input.Headers = []WebhookHeader{{Key: "X-Webhook", Value: "{{webhook.name}}"}}
-	input.Body = `{"attempt":"{{delivery.attempt}}","type":"{{event.type}}","webhook":"{{webhook.name}}"}`
+	input.Body = `{"attempt":"{{delivery.attempt}}","name":"{{event.name.en-US}}","webhook":"{{webhook.name}}"}`
 
 	preview, err := webhookStore.Preview(input, "client.online")
 	if err != nil {
@@ -197,14 +197,14 @@ func TestWebhookPreviewAndTestDeliveryUseUnsavedConfiguration(t *testing.T) {
 	if preview.Event != "client.online" || preview.Method != WebhookMethodPOST || preview.Headers["X-Webhook"] != input.Name {
 		t.Fatalf("preview = %+v", preview)
 	}
-	if !strings.Contains(preview.URL, "event=client.online") || !strings.Contains(preview.URL, "delivery=dlv_sample_client_online") {
+	if !strings.Contains(preview.URL, "event=Client%20online") || !strings.Contains(preview.URL, "delivery=dlv_sample_client_online") {
 		t.Fatalf("preview URL = %s", preview.URL)
 	}
 	var previewBody map[string]any
 	if preview.Body == nil || jsonUnmarshalUseNumber([]byte(*preview.Body), &previewBody) != nil {
 		t.Fatalf("preview body = %v", preview.Body)
 	}
-	if previewBody["attempt"] != jsonNumber("1") || previewBody["type"] != "client.online" {
+	if previewBody["attempt"] != jsonNumber("1") || previewBody["name"] != "Client online" {
 		t.Fatalf("preview typed body = %#v", previewBody)
 	}
 
@@ -325,7 +325,7 @@ func TestWebhookReplayUsesCurrentConfigurationAndOriginalEventSnapshot(t *testin
 	client := registerWebhookClient(t, adminStore, owner.ID, "webhook-replay-client", "replay-client")
 	input := testWebhookInput("wh_replay")
 	input.Events = []string{"client.online"}
-	input.URL = "https://initial.example/hook/{{event.id}}"
+	input.URL = "https://initial.example/hook/{{event.occurred_at}}"
 	created, err := webhookStore.Create(owner.ID, input)
 	if err != nil {
 		t.Fatal(err)
@@ -346,7 +346,7 @@ func TestWebhookReplayUsesCurrentConfigurationAndOriginalEventSnapshot(t *testin
 
 	input.ExpectedRevision = created.Revision
 	input.Name = "Current Replay Webhook"
-	input.URL = "https://current.example/hook?event={{event.type}}&delivery={{delivery.id}}"
+	input.URL = "https://current.example/hook?event={{event.name.en-US}}&delivery={{delivery.id}}"
 	input.Headers = []WebhookHeader{{Key: "X-Current", Value: "{{webhook.name}}"}}
 	updated, err := webhookStore.Update(owner.ID, created.ID, input)
 	if err != nil {

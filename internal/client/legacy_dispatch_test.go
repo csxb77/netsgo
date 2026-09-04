@@ -159,6 +159,7 @@ func TestClientControlLoopLegacyProxyProvisionFixturesStillUseLegacyProxyStore(t
 
 			go func() { _ = c.Start() }()
 			conn := ms.waitForConn(t, 10*time.Second)
+			waitForAuthenticatedTestClient(t, c, 10*time.Second)
 
 			// These fixtures are hand-crafted from the v0.1.8 ProxyNewRequest
 			// schema and dual-dispatch code, not captured from a live server.
@@ -255,10 +256,7 @@ func TestClientControlLoopLegacyProxyCloseFixtureDeletesLegacyProxyStore(t *test
 		}
 	})
 	conn := ms.waitForConn(t, 10*time.Second)
-	ms.waitForMessage(t, 2*time.Second, protocol.MsgTypeAuth)
-	waitForClientCondition(t, 2*time.Second, func() bool {
-		return c.CurrentClientID() == "mock_client_1"
-	})
+	waitForAuthenticatedTestClient(t, c, 10*time.Second)
 
 	payload, err := os.ReadFile("testdata/legacy_v0.1.8_proxy_close.json")
 	if err != nil {
@@ -382,6 +380,7 @@ func TestClientControlLoopUnifiedPayloadIgnoresLegacyFlatFields(t *testing.T) {
 
 			go func() { _ = c.Start() }()
 			conn := ms.waitForConn(t, 10*time.Second)
+			waitForAuthenticatedTestClient(t, c, 10*time.Second)
 			spec := tc.spec
 			const legacyShadowName = "legacy-shadow"
 			const legacyShadowID = "legacy-shadow-id"
@@ -479,6 +478,7 @@ func TestClientControlLoopRejectedUnifiedPayloadDoesNotFallBackToLegacyProxyStor
 
 	go func() { _ = c.Start() }()
 	conn := ms.waitForConn(t, 10*time.Second)
+	waitForAuthenticatedTestClient(t, c, 10*time.Second)
 	spec := mixedPayloadTunnelSpec(t, "split-unsupported", protocol.IngressTypeTCPListen, "future_target", map[string]any{
 		"bind_ip": "0.0.0.0",
 		"port":    19091,
@@ -553,6 +553,7 @@ func TestClientControlLoopMalformedUnifiedPayloadDoesNotFallBackToLegacyProxySto
 
 	go func() { _ = c.Start() }()
 	conn := ms.waitForConn(t, 10*time.Second)
+	waitForAuthenticatedTestClient(t, c, 10*time.Second)
 	payload := mustJSON(t, map[string]any{
 		"id":          "legacy-malformed-shadow-id",
 		"name":        "legacy-malformed-shadow",

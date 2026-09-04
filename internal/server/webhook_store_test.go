@@ -127,6 +127,51 @@ func TestActivityWebhookDeliveriesRenderEachLanguageVariable(t *testing.T) {
 	}
 }
 
+func TestTunnelWebhookRendersCurrentOwnerClientName(t *testing.T) {
+	adminStore, webhookStore, user := newWebhookStoreFixture(t)
+	client, err := adminStore.GetOrCreateClientForUser(user.ID, "webhook-tunnel-owner-install", protocol.ClientInfo{
+		Hostname: "owner-host", OS: "linux", Arch: "amd64", Version: "0.1.0",
+	}, "127.0.0.1:12345")
+	if err != nil {
+		t.Fatalf("create tunnel owner client: %v", err)
+	}
+	if _, err := adminStore.UpdateClientDisplayNameWithActivity(client.ID, "Renamed owner", systemActivityActor()); err != nil {
+		t.Fatalf("rename tunnel owner client: %v", err)
+	}
+
+	input := testWebhookInput("wh_tunnel_owner_client")
+	input.TargetKind = WebhookTargetTunnel
+	input.Events = []string{"tunnel.runtime_error"}
+	input.Body = `{"client_id":"{{client.id}}","client_name":"{{client.name}}"}`
+	created, err := webhookStore.Create(user.ID, input)
+	if err != nil {
+		t.Fatalf("create tunnel Webhook: %v", err)
+	}
+
+	before := testStoredServerExposeTCPTunnel("tunnel-webhook-owner", "Owner tunnel", client.ID, 8080, 18080, time.Now().UTC())
+	before.OwnerUserID = user.ID
+	after := before
+	after.RuntimeState = protocol.ProxyRuntimeStateError
+	after.Error = "test runtime failure"
+	spec, changed := tunnelRuntimeActivitySpec(before, after)
+	if !changed {
+		t.Fatal("runtime error should produce a tunnel activity")
+	}
+	activityStore := newActivityStoreWithDB("", adminStore.db, false)
+	if _, err := activityStore.Append(spec); err != nil {
+		t.Fatalf("append tunnel runtime activity: %v", err)
+	}
+
+	page, err := webhookStore.ListDeliveries(user.ID, created.ID, "", 10, "")
+	if err != nil || len(page.Items) != 1 || page.Items[0].RequestBody == nil {
+		t.Fatalf("tunnel owner delivery = %+v, %v", page, err)
+	}
+	body := *page.Items[0].RequestBody
+	if !strings.Contains(body, `"client_id": "`+client.ID+`"`) || !strings.Contains(body, `"client_name": "Renamed owner"`) {
+		t.Fatalf("tunnel owner Webhook body = %s", body)
+	}
+}
+
 func TestActivityAndWebhookDeliveryRollbackTogether(t *testing.T) {
 	adminStore, webhookStore, user := newWebhookStoreFixture(t)
 	if _, err := webhookStore.Create(user.ID, testWebhookInput("wh_atomic_rollback")); err != nil {

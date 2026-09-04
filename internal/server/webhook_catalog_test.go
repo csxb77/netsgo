@@ -33,6 +33,68 @@ func TestWebhookCatalogLocalizesHumanVariablesAndUsesGenericFixtures(t *testing.
 	}
 }
 
+func TestWebhookCatalogClientVariablesCoverClientAndTunnelEvents(t *testing.T) {
+	catalog := activityWebhookCatalog()
+	variables := make(map[string]WebhookVariable, len(catalog.Variables))
+	for _, variable := range catalog.Variables {
+		variables[variable.Key] = variable
+	}
+
+	for _, key := range []string{"event.id", "event.type", "webhook.id", "client.hostname"} {
+		if _, ok := variables[key]; ok {
+			t.Fatalf("removed template variable %q is still exposed", key)
+		}
+		if strings.Contains(catalog.DefaultBody, "{{"+key+"}}") {
+			t.Fatalf("default Webhook body still references %q", key)
+		}
+	}
+
+	for _, key := range []string{"client.id", "client.name"} {
+		variable, ok := variables[key]
+		if !ok {
+			t.Fatalf("client template variable %q is missing", key)
+		}
+		if !webhookVariableSupportsEvents(variable, []string{"client.online"}) {
+			t.Fatalf("%q should be available for client events", key)
+		}
+		if !webhookVariableSupportsEvents(variable, []string{"tunnel.runtime_error"}) {
+			t.Fatalf("%q should be available for tunnel events", key)
+		}
+		if webhookVariableSupportsEvents(variable, []string{"p2p.failed"}) {
+			t.Fatalf("%q must not imply one client for a multi-peer P2P event", key)
+		}
+	}
+
+	tunnel := catalog.Fixtures["tunnel.runtime_error"]
+	if tunnel["client.id"] != "client_test_node" || tunnel["client.name"] != "Test client node" {
+		t.Fatalf("sample tunnel owner client = (%#v, %#v)", tunnel["client.id"], tunnel["client.name"])
+	}
+	if _, ok := catalog.Fixtures["p2p.failed"]["client.id"]; ok {
+		t.Fatal("P2P fixture exposes an ambiguous singular client")
+	}
+}
+
+func TestWebhookTunnelValuesUseOwnerClient(t *testing.T) {
+	snapshot := webhookEventSnapshot{
+		ID:   "event-1",
+		Type: "tunnel.runtime_error",
+		Clients: []webhookClientSnapshot{
+			{ID: "client-ingress", Name: "Ingress", Relation: "ingress"},
+			{ID: "client-owner", Name: "Renamed owner", Relation: "owner"},
+			{ID: "client-owner", Name: "Renamed owner", Relation: "target"},
+		},
+		Tunnels: []webhookTunnelSnapshot{{ID: "tunnel-1", Name: "Tunnel"}},
+	}
+
+	values := snapshot.values("delivery-1", "webhook-1", "Webhook")
+	if values["client.id"] != "client-owner" || values["client.name"] != "Renamed owner" {
+		t.Fatalf("tunnel owner client values = (%#v, %#v)", values["client.id"], values["client.name"])
+	}
+	if _, ok := values["client.hostname"]; ok {
+		t.Fatal("client.hostname should not be exposed as a template value")
+	}
+}
+
 func TestWebhookLocalizedCatalogCoversEvents(t *testing.T) {
 	catalog := activityWebhookCatalog()
 	for _, event := range catalog.Events {

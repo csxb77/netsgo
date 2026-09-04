@@ -398,8 +398,6 @@ export const zhCN = {
           attempt: "当前尝试次数",
         },
         event: {
-          id: "活动事件 ID",
-          type: "事件类型",
           name: "事件名称",
           severity: "事件级别",
           occurred_at: "发生时间",
@@ -408,7 +406,6 @@ export const zhCN = {
         client: {
           id: "客户端 ID",
           name: "客户端名称",
-          hostname: "客户端主机名",
         },
         tunnel: {
           id: "隧道 ID",
@@ -418,7 +415,6 @@ export const zhCN = {
           runtime_state: "隧道运行状态",
         },
         webhook: {
-          id: "Webhook ID",
           name: "Webhook 名称",
         },
       },

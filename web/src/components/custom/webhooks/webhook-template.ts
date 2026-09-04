@@ -109,9 +109,8 @@ export function webhookVariableSample(
   catalog: WebhookCatalog,
   variable: WebhookVariable,
   event: WebhookEventKey,
-  webhook?: Pick<ActivityWebhookConfig, 'id' | 'name'>,
+  webhook?: Pick<ActivityWebhookConfig, 'name'>,
 ) {
-  if (variable.key === 'webhook.id' && webhook) return webhook.id;
   if (variable.key === 'webhook.name' && webhook) return webhook.name || 'Webhook';
   const value = catalog.fixtures[event]?.[variable.key];
   return typeof value === 'string' ? value : JSON.stringify(value ?? null);
@@ -187,7 +186,6 @@ export function renderWebhookRequest(
   const fixture = catalog.fixtures[event] ?? {};
   const values = {
     ...fixture,
-    'webhook.id': webhook.id,
     'webhook.name': webhook.name || 'Webhook',
   };
   let body = '';

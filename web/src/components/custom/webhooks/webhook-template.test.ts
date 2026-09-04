@@ -15,7 +15,6 @@ import {
 const defaultBody = `{
   "delivery": { "attempt": "{{delivery.attempt}}" },
   "event": {
-    "type": "{{event.type}}",
     "summary": { "zh-CN": "{{event.summary.zh-CN}}", "en-US": "{{event.summary.en-US}}" }
   },
   "webhook": { "name": "{{webhook.name}}" }
@@ -27,14 +26,13 @@ const everySurface = ['url', 'header', 'body'] as const;
 const variables: WebhookVariable[] = [
   { key: 'delivery.id', group: 'delivery', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'delivery.attempt', group: 'delivery', value_type: 'number', surfaces: [...body], available_for_events: allEvents },
-  { key: 'event.type', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'event.name.zh-CN', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'event.name.en-US', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'event.summary.zh-CN', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'event.summary.en-US', group: 'event', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
-  { key: 'client.id', group: 'client', value_type: 'text', surfaces: [...everySurface], available_for_events: ['client.online'] },
+  { key: 'client.id', group: 'client', value_type: 'text', surfaces: [...everySurface], available_for_events: ['client.online', 'tunnel.runtime_error'] },
+  { key: 'client.name', group: 'client', value_type: 'text', surfaces: [...everySurface], available_for_events: ['client.online', 'tunnel.runtime_error'] },
   { key: 'tunnel.id', group: 'tunnel', value_type: 'text', surfaces: [...everySurface], available_for_events: ['tunnel.runtime_error'] },
-  { key: 'webhook.id', group: 'webhook', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
   { key: 'webhook.name', group: 'webhook', value_type: 'text', surfaces: [...everySurface], available_for_events: allEvents },
 ];
 
@@ -42,17 +40,16 @@ const fixtures = {
   'client.online': {
     'delivery.id': 'dlv-client-online',
     'delivery.attempt': 1,
-    'event.type': 'client.online',
     'event.name.zh-CN': '客户端上线',
     'event.name.en-US': 'Client online',
     'event.summary.zh-CN': 'client-a 已上线',
     'event.summary.en-US': 'client-a came online',
     'client.id': 'client-a',
+    'client.name': 'Primary client',
   },
   'p2p.connected': {
     'delivery.id': 'dlv-p2p-connected',
     'delivery.attempt': 1,
-    'event.type': 'p2p.connected',
     'event.name.zh-CN': 'P2P 已直连',
     'event.name.en-US': 'P2P connected',
     'event.summary.zh-CN': 'P2P 已直连',
@@ -61,7 +58,6 @@ const fixtures = {
   'p2p.failed': {
     'delivery.id': 'dlv-p2p-failed',
     'delivery.attempt': 1,
-    'event.type': 'p2p.failed',
     'event.name.zh-CN': 'P2P 直连失败',
     'event.name.en-US': 'P2P failed',
     'event.summary.zh-CN': 'P2P 直连失败',
@@ -70,11 +66,12 @@ const fixtures = {
   'tunnel.runtime_error': {
     'delivery.id': 'dlv-tunnel-error',
     'delivery.attempt': 1,
-    'event.type': 'tunnel.runtime_error',
     'event.name.zh-CN': '隧道运行异常',
     'event.name.en-US': 'Tunnel runtime error',
     'event.summary.zh-CN': 'tunnel-a 运行异常',
     'event.summary.en-US': 'tunnel-a encountered a runtime error',
+    'client.id': 'client-owner',
+    'client.name': 'Renamed owner',
     'tunnel.id': 'tunnel-a',
   },
 } as WebhookCatalog['fixtures'];
@@ -179,14 +176,14 @@ describe('webhook request templates', () => {
     const rendered = renderJsonBody(`{
       "attempt": "{{delivery.attempt}}",
       "name": "{{event.name.en-US}}",
-      "items": ["{{event.type}}", "attempt={{delivery.attempt}}"],
+      "items": ["{{client.id}}", "attempt={{delivery.attempt}}"],
       "missing": "{{missing.value}}"
     }`, catalog.fixtures['client.online']);
 
     expect(JSON.parse(rendered)).toEqual({
       attempt: 1,
       name: 'Client online',
-      items: ['client.online', 'attempt=1'],
+      items: ['client-a', 'attempt=1'],
       missing: '{{missing.value}}',
     });
   });
@@ -206,29 +203,38 @@ describe('webhook request templates', () => {
   test('filters picker variables by surface and every selected event', () => {
     expect(getWebhookVariables(catalog, ['client.online'], 'url').map((item) => item.key)).toEqual([
       'delivery.id',
-      'event.type',
       'event.name.zh-CN',
       'event.name.en-US',
       'event.summary.zh-CN',
       'event.summary.en-US',
       'client.id',
-      'webhook.id',
+      'client.name',
       'webhook.name',
     ]);
-    expect(getWebhookVariables(catalog, ['tunnel.runtime_error', 'p2p.failed'], 'url').map((item) => item.key)).toEqual([
+    expect(getWebhookVariables(catalog, ['tunnel.runtime_error'], 'url').map((item) => item.key)).toEqual([
       'delivery.id',
-      'event.type',
       'event.name.zh-CN',
       'event.name.en-US',
       'event.summary.zh-CN',
       'event.summary.en-US',
-      'webhook.id',
+      'client.id',
+      'client.name',
+      'tunnel.id',
+      'webhook.name',
+    ]);
+    expect(getWebhookVariables(catalog, ['tunnel.runtime_error', 'p2p.failed'], 'url').map((item) => item.key)).toEqual([
+      'delivery.id',
+      'event.name.zh-CN',
+      'event.name.en-US',
+      'event.summary.zh-CN',
+      'event.summary.en-US',
       'webhook.name',
     ]);
   });
 
   test('formats fixture and current-webhook samples for the variable picker', () => {
-    expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'event.type')!, 'client.online')).toBe('client.online');
+    expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'client.name')!, 'client.online')).toBe('Primary client');
+    expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'client.name')!, 'tunnel.runtime_error')).toBe('Renamed owner');
     expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'webhook.name')!, 'client.online', webhook({ name: 'Current name' }))).toBe('Current name');
     expect(webhookVariableSample(catalog, variables.find((item) => item.key === 'webhook.name')!, 'client.online', webhook({ name: '' }))).toBe('Webhook');
   });
@@ -245,7 +251,7 @@ describe('webhook request templates', () => {
     expect(en.find((entry) => entry.baseKey === 'event.name')!.variable.key).toBe('event.name.en-US');
 
     // non-localized variables pass through unchanged
-    expect(zh.find((entry) => entry.baseKey === 'event.type')!.variable.key).toBe('event.type');
+    expect(zh.find((entry) => entry.baseKey === 'client.id')!.variable.key).toBe('client.id');
   });
 
   test('renders plain text values and URL encoding directly', () => {
@@ -288,6 +294,11 @@ describe('webhook configuration validation', () => {
     expect(validateWebhook(webhook({ url: 'https://example.test/{{tunnel.id}}' }), catalog)).toContainEqual({
       field: 'url', code: 'unavailableVariable', key: 'tunnel.id',
     });
+    for (const key of ['event.id', 'event.type', 'webhook.id', 'client.hostname']) {
+      expect(getTemplateIssues(`{{${key}}}`, ['client.online'], 'url', variables)).toEqual([
+        expect.objectContaining({ code: 'unknownVariable', key }),
+      ]);
+    }
   });
 
   test('rejects malformed, duplicated, restricted, and injected Headers', () => {
@@ -335,8 +346,8 @@ describe('webhook configuration validation', () => {
     expect(validateWebhook(webhook({
       targetMode: 'selected',
       targetIds: ['client-a'],
-      url: 'https://hooks.example.test/{{event.type}}?delivery={{delivery.id}}',
-      headers: [{ id: 'event', key: 'X-Event', value: '{{event.type}}' }],
+      url: 'https://hooks.example.test/{{client.id}}?delivery={{delivery.id}}',
+      headers: [{ id: 'event', key: 'X-Event', value: '{{event.name.en-US}}' }],
     }), catalog)).toEqual([]);
   });
 });

@@ -231,8 +231,8 @@ func TestWebhookDispatcherSendsPOSTAndGETRequestContracts(t *testing.T) {
 
 		input := testWebhookInput("wh_post_contract")
 		input.Events = []string{"client.online"}
-		input.URL = receiver.URL + "/hook?event={{event.type}}&delivery={{delivery.id}}"
-		input.Headers = []WebhookHeader{{Key: "Content-Type", Value: "application/json"}, {Key: "X-Event-Type", Value: "{{event.type}}"}}
+		input.URL = receiver.URL + "/hook?event={{event.name.en-US}}&delivery={{delivery.id}}"
+		input.Headers = []WebhookHeader{{Key: "Content-Type", Value: "application/json"}, {Key: "X-Event-Name", Value: "{{event.name.en-US}}"}}
 		delivery, err := webhookStore.EnqueueTest(owner.ID, input, "client.online")
 		if err != nil {
 			t.Fatal(err)
@@ -246,10 +246,10 @@ func TestWebhookDispatcherSendsPOSTAndGETRequestContracts(t *testing.T) {
 		dispatcher.execute(claimed)
 
 		request := <-received
-		if request.method != http.MethodPost || request.path != "/hook" || !strings.Contains(request.query, "event=client.online") || !strings.Contains(request.query, "delivery="+delivery.ID) {
+		if request.method != http.MethodPost || request.path != "/hook" || !strings.Contains(request.query, "event=Client%20online") || !strings.Contains(request.query, "delivery="+delivery.ID) {
 			t.Fatalf("received POST target = %s %s?%s", request.method, request.path, request.query)
 		}
-		if request.headers.Get("X-NetsGo-Delivery") != delivery.ID || request.headers.Get("X-NetsGo-Event") == "" || request.headers.Get("X-NetsGo-Attempt") != "1" || request.headers.Get("X-Event-Type") != "client.online" {
+		if request.headers.Get("X-NetsGo-Delivery") != delivery.ID || request.headers.Get("X-NetsGo-Event") == "" || request.headers.Get("X-NetsGo-Attempt") != "1" || request.headers.Get("X-Event-Name") != "Client online" {
 			t.Fatalf("received POST headers = %#v", request.headers)
 		}
 		var body map[string]any
@@ -394,7 +394,10 @@ func TestWebhookDispatcherLoopDeliversCommittedActivityEvent(t *testing.T) {
 			t.Fatalf("loop request headers = %#v", request.headers)
 		}
 		var body map[string]any
-		if err := json.Unmarshal(request.body, &body); err != nil || body["event"].(map[string]any)["type"] != "client.online" {
+		err := json.Unmarshal(request.body, &body)
+		event, _ := body["event"].(map[string]any)
+		name, _ := event["name"].(map[string]any)
+		if err != nil || name["en-US"] != "Client online" {
 			t.Fatalf("loop request body = %#v, %v", body, err)
 		}
 	case <-time.After(3 * time.Second):
